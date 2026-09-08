@@ -390,19 +390,23 @@ jobs:
         # timeout guards against adb hanging once the emulator is torn down.
         run: timeout 15 adb logcat -d -t 60 "*:E" 2>/dev/null || true
 
-  # Publishes to nuget.org. Only a tag push can ever satisfy this condition
-  # -- never a pull_request, fork or otherwise -- so this job cannot run as
-  # part of reviewing someone else's changes: NUGET_API_KEY is never even
-  # evaluated on that path. The "nuget-publish" environment additionally
+  # Publishes to nuget.org via trusted publishing (OIDC) -- no long-lived
+  # API key stored anywhere; NuGet/login exchanges this job's GitHub-issued
+  # OIDC token for a short-lived one, scoped to a trusted publishing policy
+  # configured on nuget.org for this exact repo/workflow/environment. Only
+  # a tag push can ever satisfy this condition -- never a pull_request,
+  # fork or otherwise -- so this job cannot run as part of reviewing
+  # someone else's changes. The "nuget-publish" environment additionally
   # lets a required-reviewer rule be added in repo settings, so even a
   # maintainer's own tag push can be made to wait for a manual approval
-  # before the token is used.
+  # before publishing.
   publish:
     needs: [dotnet, dotnet-android-demo, dotnet-android-e2e]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write # required for NuGet/login's OIDC token exchange
     environment: nuget-publish
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -414,5 +418,11 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: NuGet login (OIDC)
+        id: login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
+        with:
+          user: ${{ secrets.NUGET_USER }} # nuget.org profile name, NOT email
+
       - name: Push packages to nuget.org
-        run: dotnet nuget push "nupkg/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push "nupkg/*.nupkg" --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

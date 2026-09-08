@@ -74,11 +74,20 @@ build/patch number is never hand-edited.
 2. Push a tag matching `v*` (e.g. `v0.2.0`) — the tag name itself doesn't
    drive the version, it just triggers publishing.
 3. The `publish` job in `.github/workflows/ci.yml` pushes the packed
-   NuGet packages to nuget.org, gated on that tag push and a
-   `NUGET_API_KEY` repo secret. It never runs on a pull request, fork or
-   otherwise. For an extra manual approval step before the token is used,
-   add a required-reviewer rule to the `nuget-publish` environment in repo
-   settings.
+   NuGet packages to nuget.org via [trusted publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing)
+   (OIDC) — no long-lived API key stored anywhere. It never runs on a pull
+   request, fork or otherwise. For an extra manual approval step before
+   publishing, add a required-reviewer rule to the `nuget-publish`
+   environment in repo settings.
+
+One-time setup, before the first release:
+
+1. On nuget.org: **your account → Trusted Publishing → Add policy**, with
+   Repository Owner/Repository set to this repo, Workflow File `ci.yml`,
+   and Environment `nuget-publish`.
+2. In this repo's **Settings → Environments → `nuget-publish`**, add an
+   environment secret `NUGET_USER` set to your nuget.org profile name
+   (not your email).
 
 ## License
 
