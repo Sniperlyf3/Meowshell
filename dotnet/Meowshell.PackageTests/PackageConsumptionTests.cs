@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Meowshell;
 
 namespace Meowshell.PackageTests;
@@ -21,6 +22,13 @@ namespace Meowshell.PackageTests;
 public sealed class PackageConsumptionTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("tailcat-pkgtest-").FullName;
+
+    // tailcat client error output (e.g. a failed connection) commonly
+    // echoes the target address back; with InsecureNoAuth that address
+    // alone is a live credential, and the server here is still running
+    // when this could fire, so it must never reach a CI log verbatim.
+    private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
+    private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
@@ -72,7 +80,7 @@ public sealed class PackageConsumptionTests : IDisposable
         var exited = await Task.Run(() => client.WaitForExit(30_000));
         Assert.True(exited, "tailcat ssh did not exit in time");
         var stdout = await stdoutTask;
-        Assert.True(client.ExitCode == 0, $"tailcat ssh failed: {await stderrTask}");
+        Assert.True(client.ExitCode == 0, $"tailcat ssh failed: {Redact(await stderrTask)}");
         Assert.Contains(marker, stdout);
 
         await server.StopAsync();

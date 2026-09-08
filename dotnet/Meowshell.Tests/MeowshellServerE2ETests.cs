@@ -99,7 +99,10 @@ public sealed class MeowshellServerE2ETests : IDisposable
         var (exitCode, stdout, _) = await RunAsync(tailcatPath, "parse", address);
         Assert.Equal(0, exitCode);
         var match = Regex.Match(stdout, "\"ServerPublic\":\\s*\"([^\"]+)\"");
-        Assert.True(match.Success, $"no ServerPublic in: {stdout}");
+        // "parse"'s own JSON echoes the address back, which may still be a
+        // live, connectable server at this point in the test -- redact it
+        // the same as everywhere else, not just the ServerPublic identity.
+        Assert.True(match.Success, $"no ServerPublic in: {Redact(stdout)}");
         return match.Groups[1].Value;
     }
 
