@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Carries the tailcat and meowshell executables as native assets for one
+       platform family. Packed once per family so an app pulls in only what it
+       runs on: the binaries are around 7.5 MB compressed per architecture, and
+       a single package holding every one of them would be a poor citizen.
+
+       Build with (from dotnet/):
+         dotnet pack Meowshell.Runtime -c Release \
+           -p:Family=android -p:BinDir=../dist -o nupkg
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Family Condition="'$(Family)' == ''">linux</Family>
+    <BinDir Condition="'$(BinDir)' == ''">$(MSBuildThisFileDirectory)../../dist</BinDir>
+
+    <PackageId>Meowshell.Runtime.$(Family)</PackageId>
+    <Authors>Sniperlyf3</Authors>
+    <Description>tailcat and meowshell executables for $(Family), as native assets for Meowshell.</Description>
+    <PackageTags>tailcat;meowshell;native;runtime;$(Family)</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Sniperlyf3/meowshell</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Sniperlyf3/meowshell</PackageProjectUrl>
+
+    <!-- Nothing to compile: this package is native assets only. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+  </PropertyGroup>
+
+  <!-- Map this repo's binary names onto the RIDs and file names each
+       platform expects. Android is the fiddly one: only files called lib*.so
+       are unpacked into the native library directory, which for apps
+       targeting API 29+ is the one place a file may be executed from. -->
+  <ItemGroup Condition="'$(Family)' == 'android'">
+    <_Bin Include="$(BinDir)/tailcat_android_arm64"   Rid="android-arm64" Name="libtailcat.so" />
+    <_Bin Include="$(BinDir)/meowshell_android_arm64" Rid="android-arm64" Name="libmeowshell.so" />
+    <_Bin Include="$(BinDir)/tailcat_android_armv7"   Rid="android-arm"   Name="libtailcat.so" />
+    <_Bin Include="$(BinDir)/meowshell_android_armv7" Rid="android-arm"   Name="libmeowshell.so" />
+    <_Bin Include="$(BinDir)/tailcat_android_amd64"   Rid="android-x64"   Name="libtailcat.so" />
+    <_Bin Include="$(BinDir)/meowshell_android_amd64" Rid="android-x64"   Name="libmeowshell.so" />
+    <_Bin Include="$(BinDir)/tailcat_android_386"     Rid="android-x86"   Name="libtailcat.so" />
+    <_Bin Include="$(BinDir)/meowshell_android_386"   Rid="android-x86"   Name="libmeowshell.so" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Family)' == 'linux'">
+    <_Bin Include="$(BinDir)/tailcat_linux_amd64"   Rid="linux-x64"   Name="tailcat" />
+    <_Bin Include="$(BinDir)/meowshell_linux_amd64" Rid="linux-x64"   Name="meowshell" />
+    <_Bin Include="$(BinDir)/tailcat_linux_arm64"   Rid="linux-arm64" Name="tailcat" />
+    <_Bin Include="$(BinDir)/meowshell_linux_arm64" Rid="linux-arm64" Name="meowshell" />
+    <_Bin Include="$(BinDir)/tailcat_linux_armv7"   Rid="linux-arm"   Name="tailcat" />
+    <_Bin Include="$(BinDir)/meowshell_linux_armv7" Rid="linux-arm"   Name="meowshell" />
+    <_Bin Include="$(BinDir)/tailcat_linux_386"     Rid="linux-x86"   Name="tailcat" />
+    <_Bin Include="$(BinDir)/meowshell_linux_386"   Rid="linux-x86"   Name="meowshell" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Family)' == 'windows'">
+    <_Bin Include="$(BinDir)/tailcat_windows_amd64.exe"   Rid="win-x64"   Name="tailcat.exe" />
+    <_Bin Include="$(BinDir)/meowshell_windows_amd64.exe" Rid="win-x64"   Name="meowshell.exe" />
+    <_Bin Include="$(BinDir)/tailcat_windows_arm64.exe"   Rid="win-arm64" Name="tailcat.exe" />
+    <_Bin Include="$(BinDir)/meowshell_windows_arm64.exe" Rid="win-arm64" Name="meowshell.exe" />
+  </ItemGroup>
+
+  <Target Name="StageNativeAssets" BeforeTargets="AssignTargetPaths">
+    <Error Condition="'@(_Bin)' == ''"
+           Text="No binaries for family '$(Family)'. Valid families: android, linux, windows." />
+    <Error Condition="!Exists('%(_Bin.Identity)')"
+           Text="Missing %(_Bin.Identity). Run ./build.sh first, or set BinDir." />
+
+    <!-- Copy to the name the package must carry before packing. NuGet reads
+         a PackagePath with no file extension as a directory, so packing
+         "tailcat" directly would nest it in a folder of that name and keep
+         the original file name. Staging sidesteps the ambiguity: the file
+         already has its final name, and PackagePath names only the folder. -->
+    <PropertyGroup>
+      <_Staged>$(IntermediateOutputPath)nativeassets/</_Staged>
+    </PropertyGroup>
+    <Copy SourceFiles="%(_Bin.Identity)"
+          DestinationFiles="$(_Staged)%(_Bin.Rid)/%(_Bin.Name)" />
+
+    <ItemGroup>
+      <_StagedBin Include="$(_Staged)%(_Bin.Rid)/%(_Bin.Name)" Rid="%(_Bin.Rid)" />
+      <!-- runtimes/&lt;rid&gt;/native is where NuGet expects native assets,
+           and where .NET for Android looks when building an APK. -->
+      <None Include="@(_StagedBin)"
+            Pack="true"
+            PackagePath="runtimes/%(_StagedBin.Rid)/native/" />
+    </ItemGroup>
+  </Target>
+
+</Project>

@@ -1,0 +1,418 @@
+name: CI
+
+# GitHub's Ubuntu runners ship the Android NDK preinstalled, which is what
+# makes the non-arm64 ABIs buildable here: they need the NDK's clang for
+# external linking, and android/arm64 does not.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tailcat_ref:
+        description: tailcat git ref to build
+        default: main
+      android_api_level:
+        description: minimum Android API level
+        default: "21"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
+      - name: Vet and test meowshell
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Locate the NDK
+        run: |
+          ndk=${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            echo "::error::no Android NDK found on this runner" >&2
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "using NDK at $ndk"
+          cat "$ndk/source.properties" || true
+
+      - name: Build
+        env:
+          # tailcat's go.mod asks for a newer Go than setup-go's stable may
+          # be; let the toolchain fetch it rather than pinning a version here.
+          GOTOOLCHAIN: auto
+          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+          ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
+        run: ./build.sh
+
+      - name: Verify each binary targets the platform it claims
+        run: ./verify-binaries.sh
+
+      - name: Record what was built
+        run: |
+          {
+            echo '### tailcat builds'
+            echo
+            echo "tailcat ref: \`$(git -C .tailcat-src rev-parse HEAD)\`"
+            echo "go: \`$(go version | cut -d' ' -f3)\`"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tailcat-binaries
+          path: dist/
+          if-no-files-found: error
+
+  # Runs the binaries on a real Android system. The build job proves they are
+  # shaped like Android executables; only this proves they work.
+  emulator-e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tailcat-binaries
+          path: dist
+
+      - name: Build a host tailcat to act as the client
+        env:
+          GOTOOLCHAIN: auto
+          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+        run: |
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+          cd .tailcat-src
+          go build -tags="$(tr -d '[:space:]' < build-tags.txt)" \
+            -o "$GITHUB_WORKSPACE/tailcat-host" ./cmd/tailcat
+          "$GITHUB_WORKSPACE/tailcat-host" version
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # This action manages the AVD, boot wait, and emulator flags itself,
+      # rather than driving the emulator by hand.
+      - name: End-to-end test on the device
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        env:
+          HOST_TAILCAT: ${{ github.workspace }}/tailcat-host
+          ABI: amd64
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          force-avd-creation: false
+          disable-animations: true
+          emulator-options: >-
+            -no-window -no-snapshot-save -noaudio -no-boot-anim
+            -gpu swiftshader_indirect -camera-back none
+          script: ./e2e/android-e2e.sh
+
+      - name: Device diagnostics (on failure)
+        if: failure()
+        # timeout guards against adb hanging on an already-gone device.
+        run: timeout 15 adb logcat -d -t 40 "*:E" 2>/dev/null || true
+
+  # The same coverage as the emulator test, on the runner itself: no device
+  # to boot, so it is fast and cannot be flaky for reasons of its own.
+  host-e2e:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tailcat-binaries
+          path: dist
+
+      - name: End-to-end test on this host
+        env:
+          TAILCAT: dist/tailcat_linux_${{ matrix.arch }}
+          MEOWSHELL: dist/meowshell_linux_${{ matrix.arch }}
+        run: ./e2e/host-e2e.sh
+
+  # The only place the Windows binaries are executed. meowshell is a
+  # launcher there, so this covers the launcher, the session, and the key
+  # staging that has to work differently without unlink-while-open.
+  windows-e2e:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tailcat-binaries
+          path: dist
+
+      - name: End-to-end test on Windows
+        shell: pwsh
+        run: ./e2e/windows-e2e.ps1
+
+  # The .NET integration is independent of the Android binaries, so it builds
+  # in parallel rather than waiting on them.
+  dotnet:
+    # The runtime packages carry the binaries, so this waits for them.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tailcat-binaries
+          path: dist
+
+      - name: Create the local nupkg feed directory
+        # dotnet/nuget.config lists ./nupkg as a package
+        # source so Meowshell can later restore its own runtime-package
+        # dependencies (see IncludeRuntimeDependencies there). A configured
+        # local folder source that does not exist on disk yet fails restore
+        # outright (NU1301) on this runner's NuGet client, even for
+        # projects that need nothing from it -- which is every project
+        # until the Pack step below has run once.
+        run: mkdir -p nupkg
+
+      - name: Test
+        # The E2E tests in Meowshell.Tests run against these real binaries
+        # instead of the fake stand-ins the rest of the suite uses; they
+        # no-op locally when the variables are unset (see
+        # MeowshellServerE2ETests.RealBinaries).
+        env:
+          DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
+          DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
+        run: dotnet test dotnet/Meowshell.sln -c Release --nologo
+
+      - name: Install the Android workload
+        # Needed to pack Meowshell's android-targeted build below.
+        run: dotnet workload install android
+
+      - name: Pack the runtime packages, then the library that depends on them
+        # Order matters: Meowshell is packed with
+        # -p:IncludeRuntimeDependencies=true, which adds these as real
+        # dependencies (see Meowshell.csproj) and needs them already
+        # sitting in ./nupkg to restore against. BuildNumber makes every
+        # package in this run share one version (see
+        # dotnet/Directory.Build.props) -- the patch component is never
+        # hand-edited.
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          for family in android linux windows; do
+            dotnet pack dotnet/Meowshell.Runtime \
+              -c Release -p:Family="$family" -p:BinDir="$PWD/dist" -p:BuildNumber="$BUILD_NUMBER" \
+              -o nupkg --nologo
+          done
+          dotnet pack dotnet/Meowshell/Meowshell.csproj \
+            -c Release -p:IncludeAndroidTarget=true -p:IncludeRuntimeDependencies=true -p:BuildNumber="$BUILD_NUMBER" \
+            -o nupkg --nologo
+          ls -la nupkg
+
+      - name: A consumer must find the binaries through the package alone
+        run: ./dotnet/verify-package.sh
+
+      - name: MeowshellServer must also find them, with no help from the caller
+        # Meowshell.Tests references the library by ProjectReference, so
+        # it cannot catch a broken package layout (wrong RID folder, wrong
+        # file name, a missing executable bit) -- only consuming the actual
+        # nupkg does. Not part of Meowshell.sln: it can only run after
+        # the pack step above. BuildNumber must match the pack step's, so
+        # its PackageReference resolves to the version just packed.
+        run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nuget
+          path: nupkg/*
+          if-no-files-found: error
+
+  # Meowshell.Demo: a real, installable app, not just a pass/fail check.
+  # One button generates a fresh throwaway shell address, one field copies
+  # it. Published as a single universal APK bundling all four ABIs, the
+  # same approach Meowshell.AndroidProbe already uses successfully (see
+  # dotnet/android/issues/9763 upstream for why a per-ABI split isn't
+  # worth pursuing with the current .NET for Android toolchain).
+  dotnet-android-demo:
+    needs: dotnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install the Android workload
+        run: dotnet workload install android
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget
+          path: nupkg
+
+      - name: Publish the demo APK
+        # BuildNumber must match the "dotnet" job's pack step, so the
+        # Meowshell PackageReference resolves to the version just packed.
+        run: |
+          dotnet publish dotnet/Meowshell.Demo -c Release -f net10.0-android36.0 \
+            -p:BuildNumber="${{ github.run_number }}" -o publish-out --nologo
+
+          mkdir -p demo-apks
+          apk=$(find publish-out -iname "*-Signed.apk" | head -1)
+          [ -n "$apk" ] || apk=$(find publish-out -iname "*.apk" | head -1)
+          if [ -z "$apk" ]; then
+            echo "::error::no APK produced"
+            find publish-out -type f
+            exit 1
+          fi
+          cp "$apk" demo-apks/meowshell-demo.apk
+          ls -la demo-apks
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meowshell-demo-apks
+          path: demo-apks/*
+          if-no-files-found: error
+
+  # BinaryLocator's generic search does not apply on Android -- native
+  # libraries land under ApplicationInfo.NativeLibraryDir, not the app's
+  # base directory -- so nothing above exercises the path a real Android
+  # app actually uses to find them. Only a real .NET-for-Android build,
+  # installed and run on a device, proves Meowshell.Runtime.android's
+  # layout is one .NET for Android actually extracts and can execute.
+  dotnet-android-e2e:
+    needs: dotnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
+      - name: Install the Android workload
+        run: dotnet workload install android
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget
+          path: nupkg
+
+      - name: Build the probe app against the packages, not this repo's source
+        # BuildNumber must match the "dotnet" job's pack step, so the
+        # Meowshell PackageReference resolves to the version just packed.
+        run: dotnet build dotnet/Meowshell.AndroidProbe -c Release -f net10.0-android36.0 -p:BuildNumber="${{ github.run_number }}" --nologo
+
+      - name: Build a host tailcat to act as the client
+        # Same approach as emulator-e2e's equivalent step: proves the probe
+        # serves a real, working shell -- not just that Start() returned an
+        # address -- by having a real client dial in and run commands.
+        env:
+          GOTOOLCHAIN: auto
+          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+        run: |
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+          cd .tailcat-src
+          go build -tags="$(tr -d '[:space:]' < build-tags.txt)" \
+            -o "$GITHUB_WORKSPACE/tailcat-host" ./cmd/tailcat
+          "$GITHUB_WORKSPACE/tailcat-host" version
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the probe on the device
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        env:
+          HOST_TAILCAT: ${{ github.workspace }}/tailcat-host
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          force-avd-creation: false
+          disable-animations: true
+          emulator-options: >-
+            -no-window -no-snapshot-save -noaudio -no-boot-anim
+            -gpu swiftshader_indirect -camera-back none
+          script: ./dotnet/android-probe-e2e.sh
+
+      - name: Device diagnostics (on failure)
+        if: failure()
+        # timeout guards against adb hanging once the emulator is torn down.
+        run: timeout 15 adb logcat -d -t 60 "*:E" 2>/dev/null || true
+
+  # Publishes to nuget.org. Only a tag push can ever satisfy this condition
+  # -- never a pull_request, fork or otherwise -- so this job cannot run as
+  # part of reviewing someone else's changes: NUGET_API_KEY is never even
+  # evaluated on that path. The "nuget-publish" environment additionally
+  # lets a required-reviewer rule be added in repo settings, so even a
+  # maintainer's own tag push can be made to wait for a manual approval
+  # before the token is used.
+  publish:
+    needs: [dotnet, dotnet-android-demo, dotnet-android-e2e]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment: nuget-publish
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget
+          path: nupkg
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Push packages to nuget.org
+        run: dotnet nuget push "nupkg/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

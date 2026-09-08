@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A minimal, real .NET-for-Android app whose only job is to prove that
+       MeowshellOptions.Create finds and runs the binaries
+       Meowshell.Runtime.android ships, once a real Android build has
+       extracted them into ApplicationInfo.NativeLibraryDir. Only
+       Meowshell is referenced below: the runtime package reaches this
+       app purely as a transitive dependency of Meowshell's own
+       android-targeted build (packed with -p:IncludeAndroidTarget=true
+       -p:IncludeRuntimeDependencies=true), which is itself part of what
+       this probe proves.
+
+       BinaryLocator's generic search (AppContext.BaseDirectory and
+       runtimes/<rid>/native beneath it) does not apply on Android: native
+       libraries live under NativeLibraryDir, outside the app's base
+       directory, so nothing in Meowshell.PackageTests or
+       Meowshell.Tests exercises the path Android actually uses. Only a
+       real APK build, installed and run on a device, does.
+
+       References the packed NuGet package, not this repo's source: see
+       nuget.config. Built and run by dotnet/android-probe-e2e.sh
+       against an emulator. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationId>com.meowshell.androidprobe</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <!-- Apps targeting API 29+ may only execute a file from
+         ApplicationInfo.NativeLibraryDir, and only get one at all if the
+         OS actually extracted the native libraries there at install time. -->
+    <AndroidExtractNativeLibraries>true</AndroidExtractNativeLibraries>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Meowshell" Version="$(MeowshellVersion)" />
+  </ItemGroup>
+
+</Project>

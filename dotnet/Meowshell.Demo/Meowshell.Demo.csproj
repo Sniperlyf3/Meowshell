@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A real, installable demo app: one button to generate a fresh
+       throwaway shell address, one field to copy it from. Built and
+       published by the "dotnet-android-demo" job (see
+       ../../.github/workflows/ci.yml) as a single universal APK
+       bundling all four ABIs, the same way Meowshell.AndroidProbe
+       already builds successfully.
+
+       References the packed NuGet package, not this repo's source: see
+       nuget.config, same as Meowshell.AndroidProbe. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationId>com.meowshell.demo</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <!-- Apps targeting API 29+ may only execute a file from
+         ApplicationInfo.NativeLibraryDir, and only get one at all if the
+         OS actually extracted the native libraries there at install time. -->
+    <AndroidExtractNativeLibraries>true</AndroidExtractNativeLibraries>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Meowshell" Version="$(MeowshellVersion)" />
+  </ItemGroup>
+
+</Project>

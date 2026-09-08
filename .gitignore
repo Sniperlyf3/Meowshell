@@ -1,0 +1,5 @@
+.tailcat-src/
+bin/
+obj/
+nupkg/
+dist/

@@ -1,0 +1,80 @@
+using System.Diagnostics;
+using Meowshell;
+
+namespace Meowshell.PackageTests;
+
+/// <summary>
+/// Consumes Meowshell the way a real app would: as a package, not as
+/// this repo's source, and with only that one package referenced (see the
+/// csproj). Meowshell.Runtime.linux reaches this project only as a
+/// transitive dependency, so this proves two things at once: that adding
+/// just Meowshell is enough to end up with the right binaries on disk
+/// (nothing else here ever adds a runtime package explicitly), and that
+/// once there, MeowshellServer finds and runs them on its own, through
+/// BinaryLocator's search of the package's runtimes/&lt;rid&gt;/native
+/// layout. Meowshell.Tests cannot prove either: it references the
+/// library by ProjectReference and hands MeowshellServer a directory it
+/// built itself, so a broken package layout or a missing dependency would
+/// both pass there and only surface once a consumer actually installed
+/// the package.
+/// </summary>
+public sealed class PackageConsumptionTests : IDisposable
+{
+    private readonly string _dir = Directory.CreateTempSubdirectory("tailcat-pkgtest-").FullName;
+
+    public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+    [Fact]
+    public void TheRuntimePackageIsFoundWithoutBeingToldWhereItIs()
+    {
+        var naming = BinaryNaming.ForCurrentPlatform();
+        var dir = BinaryLocator.Locate(naming);
+
+        Assert.False(string.IsNullOrEmpty(dir));
+        Assert.True(File.Exists(Path.Combine(dir!, naming.FileName("tailcat"))));
+        Assert.True(File.Exists(Path.Combine(dir!, naming.FileName("meowshell"))));
+    }
+
+    [Fact]
+    public async Task ARealSessionRunsUsingOnlyThePackagesOwnDiscovery()
+    {
+        // BinaryDirectory is left unset: StartAsync must locate the
+        // binaries itself, exactly as it would for a real consumer that
+        // never sets it either.
+        var options = new MeowshellOptions
+        {
+            HomeDirectory = Path.Combine(_dir, "home"),
+            WorkDirectory = Path.Combine(_dir, "work"),
+            InsecureNoAuth = true,
+            StartTimeout = TimeSpan.FromSeconds(30),
+        };
+
+        await using var server = await MeowshellServer.StartAsync(options);
+        Assert.False(string.IsNullOrWhiteSpace(server.Address));
+
+        var naming = BinaryNaming.ForCurrentPlatform();
+        var tailcat = Path.Combine(BinaryLocator.Locate(naming)!, naming.FileName("tailcat"));
+        var marker = $"pkg-e2e-{Guid.NewGuid():N}";
+
+        var psi = new ProcessStartInfo(tailcat)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("ssh");
+        psi.ArgumentList.Add(server.Address);
+        psi.ArgumentList.Add($"echo {marker}");
+
+        using var client = Process.Start(psi)!;
+        var stdoutTask = client.StandardOutput.ReadToEndAsync();
+        var stderrTask = client.StandardError.ReadToEndAsync();
+        var exited = await Task.Run(() => client.WaitForExit(30_000));
+        Assert.True(exited, "tailcat ssh did not exit in time");
+        var stdout = await stdoutTask;
+        Assert.True(client.ExitCode == 0, $"tailcat ssh failed: {await stderrTask}");
+        Assert.Contains(marker, stdout);
+
+        await server.StopAsync();
+    }
+}
