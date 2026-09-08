@@ -22,6 +22,11 @@ set -euo pipefail
 # unredacted for internal use (extracting $addr to actually dial in); only
 # what gets echoed into this script's own stdout is redacted.
 redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
+# ::add-mask:: registers a value with the runner itself, so it gets
+# replaced with *** in this job's log from here on regardless of what
+# prints it later -- belt and suspenders alongside redact() above, which
+# only covers print sites this script already knows about.
+mask() { [ -n "$1" ] && printf '::add-mask::%s\n' "$1"; }
 
 APP_ID=com.meowshell.androidprobe
 # set -e + pipefail means a "not found" from grep or find has to be
@@ -87,6 +92,7 @@ if [ -z "$addr" ]; then
 	echo "FAIL  PROBE_PASS but no tailcat address found in the probe's own log" >&2
 	exit 1
 fi
+mask "$addr"
 echo "== connecting from the host (${#addr} char address) =="
 
 marker="probe-e2e-$$-$RANDOM"

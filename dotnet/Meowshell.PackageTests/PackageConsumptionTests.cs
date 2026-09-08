@@ -30,6 +30,17 @@ public sealed class PackageConsumptionTests : IDisposable
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 
+    // Best-effort second layer alongside Redact() above: "::add-mask::" is a
+    // GitHub Actions runner command, not a .NET/xunit feature, so there is no
+    // guarantee dotnet test's captured console output is scanned for it the
+    // way a shell step's stdout is. Redact() is what actually keeps the
+    // address out of a failure message; this just registers it too, in case
+    // it helps.
+    private static void Mask(string value)
+    {
+        if (!string.IsNullOrEmpty(value)) Console.WriteLine("::add-mask::" + value);
+    }
+
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
     [Fact]
@@ -59,6 +70,7 @@ public sealed class PackageConsumptionTests : IDisposable
 
         await using var server = await MeowshellServer.StartAsync(options);
         Assert.False(string.IsNullOrWhiteSpace(server.Address));
+        Mask(server.Address);
 
         var naming = BinaryNaming.ForCurrentPlatform();
         var tailcat = Path.Combine(BinaryLocator.Locate(naming)!, naming.FileName("tailcat"));

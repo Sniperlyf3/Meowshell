@@ -28,6 +28,11 @@ assert_not_grep() { # assert_not_grep <description> <pattern> <text>
 # address it just published, which must never reach a CI log verbatim.
 redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
 server_log() { echo "--- server log (redacted) ---"; adb shell "cat $DEV/server.log" 2>&1 | redact || true; }
+# ::add-mask:: registers a value with the runner itself, so it gets
+# replaced with *** in this job's log from here on regardless of what
+# prints it later -- belt and suspenders alongside redact() above, which
+# only covers print sites this script already knows about.
+mask() { [ -n "$1" ] && printf '::add-mask::%s\n' "$1"; }
 
 # shellcheck disable=SC2317 # invoked via trap
 cleanup() {
@@ -112,7 +117,7 @@ adb shell "nohup env TAILCAT_BIN=$DEV/tailcat HOME=$DEV/home TAILCAT_ADDR_FILE=$
 addr=""
 for _ in $(seq 60); do
 	addr=$(adb shell "cat $DEV/addr 2>/dev/null" | tr -d '\r\n' || true)
-	[ -n "$addr" ] && break
+	[ -n "$addr" ] && { mask "$addr"; break; }
 	sleep 2
 done
 if [ -z "$addr" ]; then
@@ -157,6 +162,7 @@ sleep 1
 
 keydir=$(mktemp -d)
 provisioned=$(XDG_CONFIG_HOME="$keydir" "$HOST_TAILCAT" genkey --key=fleet-e2e | tail -1)
+mask "$provisioned"
 keyfile=$keydir/tailcat/keys/fleet-e2e.private.json
 pass "provisioned a key on the host (address is ${#provisioned} chars)"
 
@@ -213,6 +219,7 @@ ssh-add "$authdir/.ssh/id_ed25519" 2>/dev/null
 XDG_CONFIG_HOME=$authdir "$HOST_TAILCAT" genkey --client --key=client-default >/dev/null
 clientpub=$(XDG_CONFIG_HOME="$authdir" "$HOST_TAILCAT" printpub)
 authed=$(XDG_CONFIG_HOME="$authdir" "$HOST_TAILCAT" genkey --key=device-authed | tail -1)
+mask "$authed"
 authkey=$authdir/tailcat/keys/device-authed.private.json
 
 adb shell -T "env TAILCAT_BIN=$DEV/tailcat HOME=$DEV/home \

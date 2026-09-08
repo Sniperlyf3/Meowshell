@@ -22,6 +22,11 @@ assert_grep() { if printf '%s\n' "$3" | grep -q "$2"; then pass "$1"; else fail 
 # never reach a CI log verbatim (public repo, live-streamed while the job
 # runs).
 redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
+# ::add-mask:: registers a value with the runner itself, so it gets
+# replaced with *** in this job's log from here on regardless of what
+# prints it later -- belt and suspenders alongside redact() above, which
+# only covers print sites this script already knows about.
+mask() { [ -n "$1" ] && printf '::add-mask::%s\n' "$1"; }
 
 # The node key an address carries. A server picks a DERP region at startup
 # and embeds it, so the address it publishes is not byte-identical to the
@@ -71,6 +76,7 @@ assert_grep "shim set a real PATH" "^P=/.*bin"        "$shim"
 
 echo "== 3. a session over a tailcat address, with the key given on stdin =="
 provisioned=$("$TAILCAT" genkey --key=host-e2e | tail -1)
+mask "$provisioned"
 keyfile=$work/config/tailcat/keys/host-e2e.private.json
 pass "provisioned a key (address is ${#provisioned} chars)"
 
@@ -80,7 +86,7 @@ server_pid=$!
 
 addr=""
 for _ in $(seq 40); do
-	[ -s "$work/addr" ] && { addr=$(tr -d '\n' < "$work/addr"); break; }
+	[ -s "$work/addr" ] && { addr=$(tr -d '\n' < "$work/addr"); mask "$addr"; break; }
 	kill -0 "$server_pid" 2>/dev/null || break
 	sleep 2
 done
@@ -142,6 +148,7 @@ pass "generated a client key ($clientpub)"
 
 serverkey=$work/config/tailcat/keys/authed.private.json
 authed=$("$TAILCAT" genkey --key=authed | tail -1)
+mask "$authed"
 
 TAILCAT_ADDR_FILE=$work/addr2 "$MEOWSHELL" serve \
 	--key="$serverkey" \
@@ -152,7 +159,7 @@ server_pid=$!
 
 addr2=""
 for _ in $(seq 40); do
-	[ -s "$work/addr2" ] && { addr2=$(tr -d '\n' < "$work/addr2"); break; }
+	[ -s "$work/addr2" ] && { addr2=$(tr -d '\n' < "$work/addr2"); mask "$addr2"; break; }
 	kill -0 "$server_pid" 2>/dev/null || break
 	sleep 2
 done

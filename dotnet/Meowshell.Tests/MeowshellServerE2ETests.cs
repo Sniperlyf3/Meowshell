@@ -24,6 +24,17 @@ public sealed class MeowshellServerE2ETests : IDisposable
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 
+    // Best-effort second layer alongside Redact() above: "::add-mask::" is a
+    // GitHub Actions runner command, not a .NET/xunit feature, so there is no
+    // guarantee dotnet test's captured console output is scanned for it the
+    // way a shell step's stdout is. Redact() is what actually keeps the
+    // address out of a failure message; this just registers it too, in case
+    // it helps.
+    private static void Mask(string value)
+    {
+        if (!string.IsNullOrEmpty(value)) Console.WriteLine("::add-mask::" + value);
+    }
+
     private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";
     private const string MeowshellEnvVar = "DOTNET_E2E_MEOWSHELL_BIN";
 
@@ -131,6 +142,7 @@ public sealed class MeowshellServerE2ETests : IDisposable
         server.Log += line => { lock (logs) logs.Add(line); };
 
         Assert.False(string.IsNullOrWhiteSpace(server.Address));
+        Mask(server.Address);
 
         var marker = $"dotnet-e2e-{Guid.NewGuid():N}";
         var (exitCode, stdout, stderr) = await RunAsync(tailcatPath, "ssh", server.Address, $"echo {marker}");
@@ -170,6 +182,7 @@ public sealed class MeowshellServerE2ETests : IDisposable
             Assert.True(exited, "tailcat genkey did not exit in time");
             Assert.Equal(0, genkey.ExitCode);
             Assert.NotEmpty(provisioned);
+            Mask(provisioned);
 
             var keyPath = Path.Combine(configDir, "tailcat", "keys", "dotnet-e2e.private.json");
             Assert.True(File.Exists(keyPath), $"genkey did not write {keyPath}");
@@ -187,6 +200,7 @@ public sealed class MeowshellServerE2ETests : IDisposable
             };
 
             await using var server = await MeowshellServer.StartAsync(options);
+            Mask(server.Address);
 
             var provisionedIdentity = await IdentityAsync(tailcatPath, provisioned);
             var publishedIdentity = await IdentityAsync(tailcatPath, server.Address);

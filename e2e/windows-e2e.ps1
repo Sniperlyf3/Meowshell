@@ -61,6 +61,11 @@ try {
 
     Write-Host '== 3. a session over a tailcat address, key given on stdin =='
     $provisioned = (& $tailcat genkey --key=win-e2e | Select-Object -Last 1).Trim()
+    # ::add-mask:: registers a value with the runner itself, so it gets
+    # replaced with *** in this job's log from here on regardless of what
+    # prints it later -- belt and suspenders alongside the inline redaction
+    # above, which only covers print sites this script already knows about.
+    Write-Host "::add-mask::$provisioned"
     $keyfile = Join-Path $env:APPDATA 'tailcat\keys\win-e2e.private.json'
     if (-not (Test-Path $keyfile)) { Fail "genkey did not write $keyfile"; exit 1 }
     Pass "provisioned a key ($($provisioned.Length) chars)"
@@ -114,6 +119,7 @@ try {
         Fail 'server published no address (redacted server output below)'
         $serverOutput.ToArray() | ForEach-Object { Write-Host "      $_" }
     } else {
+        Write-Host "::add-mask::$addr"
         Pass 'server published an address'
         if ((Get-Identity $addr) -eq (Get-Identity $provisioned) -and (Get-Identity $addr)) {
             Pass 'the published address carries the provisioned identity'
