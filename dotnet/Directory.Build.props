@@ -1,0 +1,14 @@
+<Project>
+
+  <!-- Single source of truth for every packed project's version. Bump
+       MajorMinor by hand for a minor/major release; BuildNumber comes from
+       CI (github.run_number, via -p:BuildNumber=) and defaults to 0 for a
+       local build, so the patch component is never hand-edited. -->
+  <PropertyGroup>
+    <MajorMinor>0.1</MajorMinor>
+    <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
+    <MeowshellVersion>$(MajorMinor).$(BuildNumber)</MeowshellVersion>
+    <Version>$(MeowshellVersion)</Version>
+  </PropertyGroup>
+
+</Project>

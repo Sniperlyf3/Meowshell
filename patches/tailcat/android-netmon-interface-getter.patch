@@ -1,0 +1,54 @@
+diff --git a/cmd/tailcat/netmon_android.go b/cmd/tailcat/netmon_android.go
+new file mode 100644
+index 0000000..71c02ef
+--- /dev/null
++++ b/cmd/tailcat/netmon_android.go
+@@ -0,0 +1,48 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package main
++
++import (
++	"github.com/wlynxg/anet"
++	"tailscale.com/net/netmon"
++)
++
++// Go's net.Interfaces() and net.Interface.Addrs() open a netlink socket and
++// call bind() on it explicitly; Android's SELinux policy denies that bind
++// operation on a netlink_route_socket to every app in the untrusted_app
++// domain (i.e. every installed app, not just this one). netmon.New(), which
++// Server.Start and Client both call unconditionally, needs a working
++// interface list before anything else can happen, so this otherwise kills
++// every tailcat session on Android outright.
++//
++// netmon.RegisterInterfaceGetter is the extension point tailscale.com added
++// for exactly this (see its doc comment on netInterfaces in
++// net/netmon/state.go, which cites this same Android restriction by name).
++// anet reimplements the same netlink RIB queries the stdlib does, but never
++// binds the socket explicitly -- it lets the kernel's implicit
++// autobind-on-send handle that instead, which Android's policy does not
++// deny -- so it returns real, non-empty interface data where the stdlib
++// call fails outright.
++func init() {
++	netmon.RegisterInterfaceGetter(func() ([]netmon.Interface, error) {
++		ifs, err := anet.Interfaces()
++		if err != nil {
++			return nil, err
++		}
++		ret := make([]netmon.Interface, len(ifs))
++		for i := range ifs {
++			// AltAddrs, not a second RegisterInterfaceGetter-style hook:
++			// netmon.Interface.Addrs() only consults i.Interface.Addrs()
++			// (the same netlink-based stdlib call) when AltAddrs is nil,
++			// so leaving it unset here would hit the identical permission
++			// denial one level down, per interface, right after fixing the
++			// enumeration itself.
++			addrs, _ := anet.InterfaceAddrsByInterface(&ifs[i])
++			ret[i] = netmon.Interface{Interface: &ifs[i], AltAddrs: addrs}
++		}
++		return ret, nil
++	})
++}

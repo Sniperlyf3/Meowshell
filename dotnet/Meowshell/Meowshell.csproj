@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 carries the whole implementation; the android target adds the
+         helper that reads paths from the application context. -->
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(IncludeAndroidTarget)' == 'true'">net8.0;net10.0-android36.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>Meowshell</PackageId>
+    <Authors>Sniperlyf3</Authors>
+    <Description>Runs a tailcat shell server for a bounded period and shuts it down afterwards, for remote debugging over Tailscale's data plane without its control plane.</Description>
+    <PackageTags>tailcat;tailscale;android;shell;remote-debugging;wireguard</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/Sniperlyf3/meowshell</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/Sniperlyf3/meowshell</PackageProjectUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- Depending on the runtime packages here, rather than leaving it to
+       each consumer, is what lets referencing this one package be enough:
+       from there, NuGet's own RID-based asset selection is what keeps only
+       the matching platform's binaries in a consumer's build, not this
+       dependency by itself. Gated behind IncludeRuntimeDependencies rather
+       than declared unconditionally: those packages are themselves built
+       from this repo's own dist/ output, so a plain "dotnet build" or
+       "dotnet test" of this library or Meowshell.Tests, which every
+       contributor does constantly without ever running build.sh, would
+       otherwise fail to restore. CI sets this flag only for the one
+       "dotnet pack" that produces the artifact people actually install,
+       after packing the runtime packages it depends on. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0' AND '$(IncludeRuntimeDependencies)' == 'true'">
+    <PackageReference Include="Meowshell.Runtime.linux" Version="$(Version)" />
+    <PackageReference Include="Meowshell.Runtime.windows" Version="$(Version)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-android36.0' AND '$(IncludeRuntimeDependencies)' == 'true'">
+    <PackageReference Include="Meowshell.Runtime.android" Version="$(Version)" />
+  </ItemGroup>
+
+</Project>

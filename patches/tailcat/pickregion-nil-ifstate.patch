@@ -1,0 +1,26 @@
+--- a/pickregion.go
++++ b/pickregion.go
+@@ -31,8 +31,22 @@
+ 	// netcheck against a loopback DERP map burn the full 3-second
+ 	// STUN timeout before falling back to HTTPS probes.
+ 	netns.SetEnabled(false)
++	mon := netmon.NewStatic()
++	if mon.InterfaceState() == nil {
++		// netmon.NewStatic silently leaves the interface state nil (with no
++		// error surfaced anywhere) whenever interface enumeration fails, and
++		// netcheck.GetReport's probe planning then dereferences it
++		// unconditionally and panics -- a real gap in tailscale.com's
++		// net/netmon and net/netcheck packages, hit reliably by Android's
++		// sandboxed interface enumeration. Report it the same way netcheck
++		// itself reports "no usable region latency": the caller already
++		// falls back to a random region for that case (see
++		// ConnInfo.Expand), so this is not a behavior change on any
++		// platform where interface enumeration actually works.
++		return 0, nil
++	}
+ 	nc := &netcheck.Client{
+-		NetMon:  netmon.NewStatic(),
++		NetMon:  mon,
+ 		Verbose: Verbose,
+ 		Logf:    logger.Discard,
+ 	}

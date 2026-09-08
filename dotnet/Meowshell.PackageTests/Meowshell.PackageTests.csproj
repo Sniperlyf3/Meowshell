@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Consumes Meowshell purely as a NuGet package; see nuget.config,
+       which points only at ./nupkg and nuget.org, and note there is no
+       ProjectReference here. Only Meowshell is referenced below, not
+       Meowshell.Runtime.linux: it is a transitive dependency of the
+       package built with -p:IncludeRuntimeDependencies=true, and that
+       transitivity is itself the thing under test. Run with
+       "dotnet test dotnet/Meowshell.PackageTests -c Release"
+       only after "dotnet pack" has produced those packages: this is
+       deliberately not part of Meowshell.sln, whose tests run before
+       packing. -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.0" />
+    <PackageReference Include="xunit" Version="2.4.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="6.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+
+    <PackageReference Include="Meowshell" Version="$(MeowshellVersion)" />
+  </ItemGroup>
+
+</Project>
