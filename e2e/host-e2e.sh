@@ -144,6 +144,7 @@ pass "loaded the ssh key into an agent"
 
 "$TAILCAT" genkey --client --key=client-default > /dev/null
 clientpub=$("$TAILCAT" printpub)
+mask "$clientpub"
 pass "generated a client key ($clientpub)"
 
 serverkey=$work/config/tailcat/keys/authed.private.json
