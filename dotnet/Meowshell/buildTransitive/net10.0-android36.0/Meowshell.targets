@@ -1,0 +1,16 @@
+<Project>
+
+  <!-- API 29+ only executes a file the OS extracted into
+       ApplicationInfo.NativeLibraryDir at install time, exactly where
+       MeowshellOptions.Create's Android branch looks, so this must be set
+       or Meowshell fails at runtime with no build-time warning otherwise.
+       Only imported into projects targeting net10.0-android36.0 (NuGet's
+       own TFM-scoped asset selection), so desktop consumers never see
+       this. -->
+  <Target Name="MeowshellRequireExtractNativeLibs" BeforeTargets="Build;Publish">
+    <Error
+      Condition="'$(AndroidExtractNativeLibraries)' != 'true' AND '$(MeowshellSkipExtractNativeLibsCheck)' != 'true'"
+      Text="Meowshell requires &lt;AndroidExtractNativeLibraries&gt;true&lt;/AndroidExtractNativeLibraries&gt; in this project's PropertyGroup, or MeowshellOptions.Create finds no binaries on API 29+. Set it, or set MeowshellSkipExtractNativeLibsCheck=true if you are managing binaries yourself." />
+  </Target>
+
+</Project>

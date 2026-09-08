@@ -40,6 +40,11 @@ inside the APK and never exist on disk to execute:
 <application android:extractNativeLibs="true" />
 ```
 
+`Meowshell` fails your build with a clear error if the corresponding MSBuild
+property (`<AndroidExtractNativeLibraries>true</AndroidExtractNativeLibraries>`)
+isn't set on an Android-targeting project — this is a build-time check, not
+a runtime surprise.
+
 ## Supplying a key at runtime
 
 To debug a fleet device, generate its key yourself and keep the address:

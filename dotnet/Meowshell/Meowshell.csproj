@@ -28,6 +28,8 @@
 
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="buildTransitive/net10.0-android36.0/Meowshell.targets"
+          Pack="true" PackagePath="buildTransitive/net10.0-android36.0/" />
   </ItemGroup>
 
   <!-- Depending on the runtime packages here, rather than leaving it to
