@@ -15,6 +15,14 @@
 # booted device are already in scope.
 set -euo pipefail
 
+# tailcat's own diagnostics (forwarded to logcat by MainActivity's onLog)
+# include the address it just published; with InsecureNoAuth that address
+# alone is a live credential, so it must never reach a CI log verbatim
+# (public repo, live-streamed while the job runs). $log below stays
+# unredacted for internal use (extracting $addr to actually dial in); only
+# what gets echoed into this script's own stdout is redacted.
+redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
+
 APP_ID=com.meowshell.androidprobe
 # set -e + pipefail means a "not found" from grep or find has to be
 # neutralized here, or the script would abort before ever reaching the
@@ -56,8 +64,8 @@ for _ in $(seq 45); do
 	sleep 2
 done
 
-echo "--- probe log ---"
-adb logcat -d -s MeowshellProbe:V || true
+echo "--- probe log (redacted) ---"
+adb logcat -d -s MeowshellProbe:V | redact || true
 echo "-----------------"
 
 case "$result" in

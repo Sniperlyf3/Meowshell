@@ -17,6 +17,13 @@ namespace Meowshell.Tests;
 /// </summary>
 public sealed class MeowshellServerE2ETests : IDisposable
 {
+    // tailcat's own diagnostics include the address it just published; with
+    // InsecureNoAuth that address alone is a live credential, so it must
+    // never reach a CI log verbatim (public repo; a failing assertion's
+    // message here becomes part of the "dotnet test" job's captured output).
+    private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
+    private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
+
     private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";
     private const string MeowshellEnvVar = "DOTNET_E2E_MEOWSHELL_BIN";
 
@@ -125,7 +132,8 @@ public sealed class MeowshellServerE2ETests : IDisposable
         var marker = $"dotnet-e2e-{Guid.NewGuid():N}";
         var (exitCode, stdout, stderr) = await RunAsync(tailcatPath, "ssh", server.Address, $"echo {marker}");
 
-        Assert.True(exitCode == 0, $"tailcat ssh failed (exit {exitCode}): {stderr}\n---server log---\n{string.Join('\n', logs)}");
+        var redactedLogs = logs.Select(Redact);
+        Assert.True(exitCode == 0, $"tailcat ssh failed (exit {exitCode}): {Redact(stderr)}\n---server log (redacted)---\n{string.Join('\n', redactedLogs)}");
         Assert.Contains(marker, stdout);
 
         await server.StopAsync();

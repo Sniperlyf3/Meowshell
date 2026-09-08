@@ -17,6 +17,11 @@ fail() { printf 'FAIL  %s\n' "$1" >&2; failed=1; }
 # shellcheck disable=SC2001 # prefixing every line; not a parameter expansion
 indent() { printf '%s\n' "$1" | sed 's/^/      /'; }
 assert_grep() { if printf '%s\n' "$3" | grep -q "$2"; then pass "$1"; else fail "$1"; fi; }
+# tailcat's own diagnostics include the address it just published; with
+# --insecure-no-auth that address alone is a live credential, so it must
+# never reach a CI log verbatim (public repo, live-streamed while the job
+# runs).
+redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
 
 # The node key an address carries. A server picks a DERP region at startup
 # and embeds it, so the address it publishes is not byte-identical to the
@@ -80,7 +85,7 @@ for _ in $(seq 40); do
 	sleep 2
 done
 if [ -z "$addr" ]; then
-	echo "--- server log ---"; cat "$work/server.log" || true
+	echo "--- server log (redacted) ---"; redact < "$work/server.log" || true
 	fail "server published no address"; exit 1
 fi
 pass "server published an address"
@@ -95,7 +100,7 @@ if out=$(timeout 90 "$TAILCAT" ssh "$provisioned" "echo $MARKER; echo P=\$PATH" 
 	assert_grep "remote command ran"           "$MARKER"  "$out"
 	assert_grep "remote command had a PATH"    "P=/.*bin" "$out"
 else
-	indent "$out"; echo "--- server log ---"; cat "$work/server.log" || true
+	indent "$out"; echo "--- server log (redacted) ---"; redact < "$work/server.log" || true
 	fail "could not open a session"
 fi
 
@@ -152,7 +157,7 @@ for _ in $(seq 40); do
 	sleep 2
 done
 if [ -z "$addr2" ]; then
-	echo "--- server log ---"; cat "$work/server2.log" || true
+	echo "--- server log (redacted) ---"; redact < "$work/server2.log" || true
 	fail "authenticated server published no address"
 else
 	pass "authenticated server started (--key=<path> accepted)"
@@ -167,7 +172,7 @@ else
 		indent "$out"
 		assert_grep "meowshell connect opened an authenticated session" "A_$MARKER" "$out"
 	else
-		indent "$out"; echo "--- server log ---"; cat "$work/server2.log" || true
+		indent "$out"; echo "--- server log (redacted) ---"; redact < "$work/server2.log" || true
 		fail "meowshell connect could not open an authenticated session"
 	fi
 

@@ -69,16 +69,35 @@ try {
     $env:TAILCAT_ADDR_FILE = $addrFile
 
     # Start-Process refuses a RedirectStandardInput path outright here, so
-    # drive the process directly. stdout and stderr are left attached to the
-    # console so the server's own diagnostics land in the job log.
+    # drive the process directly. stdout/stderr are captured rather than
+    # left attached to the console, and redacted at capture time, since
+    # the server's own diagnostics include the address it just published.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $meowshell
     foreach ($a in @('serve', '--key-stdin', '--insecure-no-auth')) {
         $psi.ArgumentList.Add($a)
     }
     $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
-    $server = [System.Diagnostics.Process]::Start($psi)
+
+    $serverOutput = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $server = [System.Diagnostics.Process]::new()
+    $server.StartInfo = $psi
+    # Redacted inline, not via a script-scope function: Register-ObjectEvent's
+    # -Action block does not reliably see functions defined outside it, so
+    # this stays self-contained rather than risk a silent no-op.
+    $onLine = {
+        if ($null -ne $Event.SourceEventArgs.Data) {
+            $Event.MessageData.Enqueue(($Event.SourceEventArgs.Data -replace 'tc[A-Za-z0-9_-]{10,}', 'tc<redacted>'))
+        }
+    }
+    $outSub = Register-ObjectEvent -InputObject $server -EventName OutputDataReceived -Action $onLine -MessageData $serverOutput
+    $errSub = Register-ObjectEvent -InputObject $server -EventName ErrorDataReceived -Action $onLine -MessageData $serverOutput
+    $server.Start() | Out-Null
+    $server.BeginOutputReadLine()
+    $server.BeginErrorReadLine()
     $server.StandardInput.Write((Get-Content $keyfile -Raw))
     $server.StandardInput.Close()
 
@@ -92,7 +111,8 @@ try {
     }
 
     if (-not $addr) {
-        Fail 'server published no address (its output is above)'
+        Fail 'server published no address (redacted server output below)'
+        $serverOutput.ToArray() | ForEach-Object { Write-Host "      $_" }
     } else {
         Pass 'server published an address'
         if ((Get-Identity $addr) -eq (Get-Identity $provisioned) -and (Get-Identity $addr)) {
@@ -119,6 +139,8 @@ try {
         Fail "$($left.Count) staged key file(s) left behind"
     }
 } finally {
+    if ($outSub) { Unregister-Event -SourceIdentifier $outSub.Name -ErrorAction SilentlyContinue }
+    if ($errSub) { Unregister-Event -SourceIdentifier $errSub.Name -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 

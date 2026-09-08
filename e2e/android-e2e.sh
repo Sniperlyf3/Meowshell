@@ -24,7 +24,10 @@ assert_grep() { # assert_grep <description> <pattern> <text>
 assert_not_grep() { # assert_not_grep <description> <pattern> <text>
 	if printf '%s\n' "$3" | grep -q "$2"; then fail "$1"; else pass "$1"; fi
 }
-server_log() { echo "--- server log ---"; adb shell "cat $DEV/server.log" 2>&1 || true; }
+# See host-e2e.sh's redact() comment: tailcat's own diagnostics include the
+# address it just published, which must never reach a CI log verbatim.
+redact() { sed -E 's/\btc[A-Za-z0-9_-]{10,}/tc<redacted>/g'; }
+server_log() { echo "--- server log (redacted) ---"; adb shell "cat $DEV/server.log" 2>&1 | redact || true; }
 
 # shellcheck disable=SC2317 # invoked via trap
 cleanup() {
@@ -178,7 +181,7 @@ if [ -n "$connected" ]; then
 	pass "connected using the host-generated address, with no handoff from the device"
 else
 	indent "${out:-}"
-	echo "--- server log ---"; adb shell "cat $DEV/server-key.log" 2>&1 || true
+	echo "--- server log (redacted) ---"; adb shell "cat $DEV/server-key.log" 2>&1 | redact || true
 	fail "could not connect with the provisioned key"
 fi
 
@@ -232,7 +235,7 @@ if [ -n "$authok" ]; then
 	pass "opened a session gated on --allow and --authorized-keys"
 else
 	indent "${out:-}"
-	echo "--- server log ---"; adb shell "cat $DEV/server-auth.log" 2>&1 || true
+	echo "--- server log (redacted) ---"; adb shell "cat $DEV/server-auth.log" 2>&1 | redact || true
 	fail "could not open an authenticated session to the device"
 fi
 
