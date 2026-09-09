@@ -267,6 +267,11 @@ sleep 1
 content="scp-e2e-$$-$RANDOM"
 adb shell "mkdir -p $DEV/served && printf '%s\n' '$content' > $DEV/served/greeting.txt"
 
+# $DEV/addr is reused from section 4; without removing it first, the poll
+# loop below reads that already-published (and by now dead) address on its
+# first iteration instead of waiting for this section's own server.
+adb shell "rm -f $DEV/addr"
+
 adb shell "nohup env TAILCAT_BIN=$DEV/tailcat HOME=$DEV/home TAILCAT_ADDR_FILE=$DEV/addr \
 	$DEV/meowshell serve --key=new --files=$DEV/served:rw \
 	> $DEV/server-files.log 2>&1 < /dev/null &" >/dev/null
@@ -278,7 +283,7 @@ for _ in $(seq 60); do
 	sleep 2
 done
 if [ -z "$scpaddr" ]; then
-	server_log
+	echo "--- server log (redacted) ---"; adb shell "cat $DEV/server-files.log" 2>&1 | redact || true
 	fail "files-only server published no address"; exit 1
 fi
 pass "files-only server published an address (no shell service running)"
@@ -292,7 +297,8 @@ if out=$(timeout 60 "$HOST_TAILCAT" cp "$scpaddr:greeting.txt" "$localcopy" 2>&1
 		fail "copied file's content did not match what was on the device"
 	fi
 else
-	indent "$out"; server_log
+	indent "$out"
+	echo "--- server log (redacted) ---"; adb shell "cat $DEV/server-files.log" 2>&1 | redact || true
 	fail "could not copy a file from the device"
 fi
 
@@ -307,7 +313,8 @@ if out=$(timeout 60 "$HOST_TAILCAT" cp "$localupload" "$scpaddr:uploaded.txt" 2>
 		fail "uploaded file's content did not match on the device"
 	fi
 else
-	indent "$out"; server_log
+	indent "$out"
+	echo "--- server log (redacted) ---"; adb shell "cat $DEV/server-files.log" 2>&1 | redact || true
 	fail "could not copy a file to the device"
 fi
 rm -f "$localcopy" "$localupload"
