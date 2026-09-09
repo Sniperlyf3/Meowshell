@@ -62,11 +62,15 @@ public sealed class MeowshellServerTests : IDisposable
     }
 
     [Fact]
-    public async Task StartAsync_RequiresExactlyOneAuthenticationMode()
+    public async Task StartAsync_RequiresSomethingToServe()
     {
-        var neither = Fake(PublishesAddress) with { InsecureNoAuth = false };
-        await Assert.ThrowsAsync<ArgumentException>(() => MeowshellServer.StartAsync(neither));
+        var nothing = Fake(PublishesAddress) with { InsecureNoAuth = false };
+        await Assert.ThrowsAsync<ArgumentException>(() => MeowshellServer.StartAsync(nothing));
+    }
 
+    [Fact]
+    public async Task StartAsync_RejectsBothAuthenticationModesTogether()
+    {
         var both = Fake(PublishesAddress) with { AuthorizedKeys = "alice@github" };
         await Assert.ThrowsAsync<ArgumentException>(() => MeowshellServer.StartAsync(both));
     }
@@ -217,6 +221,50 @@ public sealed class MeowshellServerTests : IDisposable
         var separator = Array.IndexOf(args, "--");
         Assert.True(separator >= 0, "no -- separator found in: " + string.Join(' ', args));
         Assert.Equal(["echo", "hi there"], args[(separator + 1)..]);
+    }
+
+    [Fact]
+    public async Task FilesAloneRequiresNoAuthenticationMode()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(
+            options with { InsecureNoAuth = false, Files = "/srv/drop" });
+
+        var args = File.ReadAllLines(argsFile);
+        Assert.Contains("--files=/srv/drop", args);
+        Assert.DoesNotContain("--insecure-no-auth", args);
+    }
+
+    [Fact]
+    public async Task FilesCombinedWithNoAuthSshServesBoth()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(options with { Files = "/srv/drop:rw" });
+
+        var args = File.ReadAllLines(argsFile);
+        Assert.Contains("--insecure-no-auth", args);
+        Assert.Contains("--files=/srv/drop:rw", args);
+    }
+
+    [Fact]
+    public async Task FilesWithForcedCommandOnSshThrows()
+    {
+        var opts = Fake(PublishesAddress) with { Files = "/srv/drop", ForcedCommand = ["echo", "hi"] };
+        await Assert.ThrowsAsync<ArgumentException>(() => MeowshellServer.StartAsync(opts));
+    }
+
+    [Fact]
+    public async Task ForcedCommandAloneRequiresNoAuthenticationMode()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(
+            options with { InsecureNoAuth = false, ForcedCommand = ["echo", "hi"] });
+
+        var args = File.ReadAllLines(argsFile);
+        Assert.DoesNotContain("--insecure-no-auth", args);
+        var separator = Array.IndexOf(args, "--");
+        Assert.True(separator >= 0, "no -- separator found in: " + string.Join(' ', args));
+        Assert.Equal(["echo", "hi"], args[(separator + 1)..]);
     }
 
     [Fact]

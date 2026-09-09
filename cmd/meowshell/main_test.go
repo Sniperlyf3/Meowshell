@@ -129,6 +129,26 @@ func TestServeArgv(t *testing.T) {
 				"no-auth-ssh", "--", "echo", "hi",
 			},
 		},
+		{
+			name: "files alone, no ssh service token",
+			args: []string{"--files=/srv/drop", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "--files=/srv/drop"},
+		},
+		{
+			name: "files combined with no-auth-ssh serves both",
+			args: []string{"--insecure-no-auth", "--files=/srv/drop", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "--files=/srv/drop", "no-auth-ssh"},
+		},
+		{
+			name: "files combined with authorized-keys serves both",
+			args: []string{"--authorized-keys=alice@github", "--files=/srv/drop:rw", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "--ssh-authorized-keys=alice@github", "--files=/srv/drop:rw", "ssh"},
+		},
+		{
+			name: "a standalone forced command with no ssh or files selects tailcat's auto-detected exec service",
+			args: []string{"--tailcat=" + tailcat, "--", "echo", "hi"},
+			want: []string{tailcat, "serve", "--", "echo", "hi"},
+		},
 	}
 
 	for _, c := range cases {
@@ -239,5 +259,27 @@ func TestForwardRequiresAnAddressAndAMapping(t *testing.T) {
 		if err := forward(args); err == nil {
 			t.Errorf("forward(%v) did not error", args)
 		}
+	}
+}
+
+func TestServeValidation(t *testing.T) {
+	tailcat := writeFakeTailcat(t)
+	captureRunTailcat(t)
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"nothing at all selected", []string{"--tailcat=" + tailcat}},
+		{"authorized-keys and insecure-no-auth together", []string{"--authorized-keys=alice@github", "--insecure-no-auth", "--tailcat=" + tailcat}},
+		{"files with a forced command on the ssh service", []string{"--authorized-keys=alice@github", "--files=/srv/drop", "--tailcat=" + tailcat, "--", "echo", "hi"}},
+		{"files with a forced command on the no-auth-ssh service", []string{"--insecure-no-auth", "--files=/srv/drop", "--tailcat=" + tailcat, "--", "echo", "hi"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := serve(c.args); err == nil {
+				t.Fatalf("serve(%v) did not error", c.args)
+			}
+		})
 	}
 }
