@@ -83,24 +83,28 @@ public static class TailcatClient
         return psi;
     }
 
-    private static async Task<TailcatResult> RunAsync(TailcatClientOptions options, params string[] args)
+    private static Task<TailcatResult> RunAsync(TailcatClientOptions options, params string[] args)
     {
         var psi = Prepare(options);
         foreach (var a in args) psi.ArgumentList.Add(a);
+        return RunAsync(psi, options.Timeout, "tailcat " + string.Join(' ', args));
+    }
 
+    private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
+    {
         using var process = new Process { StartInfo = psi };
         MeowshellProcessControl.Start(process);
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(options.Timeout);
+        using var cts = new CancellationTokenSource(timeout);
         try
         {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* already gone */ }
-            throw new TimeoutException($"tailcat {string.Join(' ', args)} did not finish within {options.Timeout}");
+            throw new TimeoutException($"{commandForTimeoutMessage} did not finish within {timeout}");
         }
         return new TailcatResult(
             process.ExitCode,
@@ -272,7 +276,12 @@ public static class TailcatClient
     public static Task<TailcatResult> SshAsync(
         TailcatClientOptions options, string destination, IReadOnlyList<string>? command = null, string? port = null)
     {
-        RequireNotAndroid("ssh");
+        if (OperatingSystem.IsAndroid())
+        {
+            throw new PlatformNotSupportedException(
+                "tailcat ssh shells out to the system ssh client, which an Android app sandbox doesn't provide. " +
+                "Use MeowshellServer or 'meowshell connect' for shell access instead.");
+        }
         var args = new List<string> { "ssh" };
         if (!string.IsNullOrEmpty(port)) args.AddRange(["-p", port]);
         args.Add(destination);
@@ -281,7 +290,7 @@ public static class TailcatClient
     }
 
     /// <summary>
-    /// Copies one source to <paramref name="target"/>, using the system scp.
+    /// Copies one source to <paramref name="target"/>.
     /// </summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="source">The file or directory to copy: <see cref="TailcatPath.Local"/> to upload, or <see cref="TailcatPath.Remote"/>/<see cref="TailcatPath.RemoteHost"/> to download.</param>
@@ -290,18 +299,17 @@ public static class TailcatClient
     /// <param name="preserve">Preserve modification times and modes.</param>
     /// <param name="port">The server's SSH (file service) port, when it isn't 22.</param>
     /// <exception cref="ArgumentException">Neither <paramref name="source"/> nor <paramref name="target"/> is remote.</exception>
-    /// <exception cref="PlatformNotSupportedException">
-    /// Running on Android: this shells out to a system <c>scp</c> binary, which an app sandbox does not provide.
-    /// </exception>
     public static Task<TailcatResult> CpAsync(
         TailcatClientOptions options, TailcatPath source, TailcatPath target,
         bool recursive = false, bool preserve = false, string? port = null) =>
         CpAsync(options, [source], target, recursive, preserve, port);
 
     /// <summary>
-    /// Copies one or more sources to <paramref name="target"/>, using the system scp -- the multi-source form of
+    /// Copies one or more sources to <paramref name="target"/> -- the multi-source form of
     /// <see cref="CpAsync(TailcatClientOptions, TailcatPath, TailcatPath, bool, bool, string?)"/>, for copying
-    /// several local files to one remote directory in a single call.
+    /// several local files to one remote directory in a single call. Uses the system scp everywhere except
+    /// Android, where an app sandbox provides no such binary; there it speaks SFTP directly instead, through
+    /// meowshell's own "cp" subcommand (routed over tailcat's own client mode, not a system ssh/scp client).
     /// </summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="sources">The files or directories to copy.</param>
@@ -313,14 +321,10 @@ public static class TailcatClient
     /// <paramref name="sources"/> is empty; none of <paramref name="sources"/> or <paramref name="target"/> is
     /// remote (there would be no tailcat server to route the copy through); or they don't all name the same server.
     /// </exception>
-    /// <exception cref="PlatformNotSupportedException">
-    /// Running on Android: this shells out to a system <c>scp</c> binary, which an app sandbox does not provide.
-    /// </exception>
     public static Task<TailcatResult> CpAsync(
         TailcatClientOptions options, IReadOnlyList<TailcatPath> sources, TailcatPath target,
         bool recursive = false, bool preserve = false, string? port = null)
     {
-        RequireNotAndroid("cp");
         if (sources.Count == 0)
             throw new ArgumentException("At least one source is required.", nameof(sources));
 
@@ -341,23 +345,44 @@ public static class TailcatClient
                 $"All remote paths must name the same server ({string.Join(" and ", servers)} differ).", nameof(sources));
         }
 
-        var args = new List<string> { "cp" };
-        if (recursive) args.Add("-r");
-        if (preserve) args.Add("-p");
-        if (!string.IsNullOrEmpty(port)) args.AddRange(["-P", port]);
-        args.AddRange(sources.Select(s => s.ToString()));
-        args.Add(target.ToString());
-        return RunAsync(options, [.. args]);
+        var cpArgs = new List<string>();
+        if (recursive) cpArgs.Add("-r");
+        if (preserve) cpArgs.Add("-p");
+        if (!string.IsNullOrEmpty(port)) cpArgs.AddRange(["-P", port]);
+        cpArgs.AddRange(sources.Select(s => s.ToString()));
+        cpArgs.Add(target.ToString());
+
+        return OperatingSystem.IsAndroid()
+            ? RunMeowshellCpAsync(options, cpArgs)
+            : RunAsync(options, ["cp", .. cpArgs]);
     }
 
-    private static void RequireNotAndroid(string command)
+    /// <summary>
+    /// Android counterpart to the system-scp path above: runs meowshell's own "cp" subcommand, which speaks SFTP
+    /// directly (routed over tailcat's own bare client mode, not a system ssh/scp binary an app sandbox lacks)
+    /// instead of shelling out to scp.
+    /// </summary>
+    private static Task<TailcatResult> RunMeowshellCpAsync(TailcatClientOptions options, IReadOnlyList<string> cpArgs)
     {
-        if (OperatingSystem.IsAndroid())
+        var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
+        Directory.CreateDirectory(options.HomeDirectory);
+        var psi = new ProcessStartInfo(meowshell)
         {
-            throw new PlatformNotSupportedException(
-                $"tailcat {command} shells out to the system {command switch { "cp" => "scp", var c => c }} " +
-                "client, which an Android app sandbox doesn't provide. Use MeowshellServer or " +
-                "'meowshell connect' for shell access instead.");
-        }
+            WorkingDirectory = options.HomeDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("cp");
+        if (!string.IsNullOrEmpty(options.DerpMapUrl))
+            psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
+        if (options.Verbose)
+            psi.ArgumentList.Add("--verbose");
+        foreach (var a in cpArgs) psi.ArgumentList.Add(a);
+        // meowshell looks for a sibling file literally named "tailcat"; under
+        // NativeLibraryDir everything is lib*.so, so point it at the binary.
+        psi.Environment["TAILCAT_BIN"] = tailcat;
+        psi.Environment["HOME"] = options.HomeDirectory;
+        return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));
     }
 }

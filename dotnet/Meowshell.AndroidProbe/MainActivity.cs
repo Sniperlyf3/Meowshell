@@ -65,6 +65,12 @@ public sealed class MainActivity : Activity
                 throw new InvalidOperationException("StartAsync returned an empty address");
             }
 
+            // Runs (and logs its own PROBE_CP_PASS/PROBE_CP_FAIL) before
+            // PROBE_PASS below: android-probe-e2e.sh's polling loop exits as
+            // soon as it sees PROBE_PASS, so that marker has to already be
+            // in logcat by then, not still pending on a fire-and-forget task.
+            await RunCpProbeAsync(options);
+
             Log.Info(Tag, $"PROBE_PASS address_len={server.Address.Length}");
             status.Text = "PROBE_PASS";
 
@@ -77,6 +83,61 @@ public sealed class MainActivity : Activity
         {
             Log.Error(Tag, $"PROBE_FAIL {ex}");
             status.Text = "PROBE_FAIL: " + ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// A second, fully self-contained round trip, independent of the shell
+    /// server above: starts its own files-only server and pulls a file back
+    /// from it via TailcatClient.CpAsync. This is the only way to prove
+    /// CpAsync's Android branch (meowshell's own "cp", speaking SFTP
+    /// directly, never the system scp this sandbox has no room for)
+    /// actually works under a real installed app's exec constraints, not
+    /// just adb shell's much looser ones. Non-fatal: a failure here is
+    /// logged and reported, but does not stop the shell probe above from
+    /// staying up for android-probe-e2e.sh's own host round-trip.
+    /// </summary>
+    private async Task RunCpProbeAsync(MeowshellOptions shellOptions)
+    {
+        try
+        {
+            var served = Path.Combine(CacheDir!.AbsolutePath, "cp-probe-served");
+            Directory.CreateDirectory(served);
+            var content = $"cp probe {Guid.NewGuid():N}\n";
+            await File.WriteAllTextAsync(Path.Combine(served, "probe.txt"), content);
+
+            var filesOptions = shellOptions with
+            {
+                InsecureNoAuth = false,
+                AuthorizedKeys = null,
+                Files = served + ":ro",
+            };
+            await using var filesServer = await MeowshellServer.StartAsync(
+                filesOptions, onLog: line => Log.Info(Tag, $"tailcat(cp-probe): {line}"));
+
+            var clientOptions = new TailcatClientOptions
+            {
+                BinaryDirectory = shellOptions.BinaryDirectory,
+                HomeDirectory = shellOptions.HomeDirectory,
+            };
+            var downloadPath = Path.Combine(CacheDir!.AbsolutePath, "cp-probe-downloaded.txt");
+            var result = await TailcatClient.CpAsync(
+                clientOptions,
+                TailcatPath.Remote(new TailcatAddress(filesServer.Address), "probe.txt"),
+                TailcatPath.Local(downloadPath));
+            if (!result.Success)
+                throw new InvalidOperationException($"CpAsync failed: {result.Stderr}");
+
+            var downloaded = await File.ReadAllTextAsync(downloadPath);
+            if (downloaded != content)
+                throw new InvalidOperationException($"content mismatch: wrote {content.Length} chars, read back {downloaded.Length}");
+
+            await filesServer.StopAsync();
+            Log.Info(Tag, "PROBE_CP_PASS");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(Tag, $"PROBE_CP_FAIL {ex}");
         }
     }
 }

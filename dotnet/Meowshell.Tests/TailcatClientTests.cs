@@ -6,9 +6,11 @@ namespace Meowshell.Tests;
 /// Exercises TailcatClient against a stand-in for the bare tailcat binary --
 /// unlike MeowshellServer/MeowshellSocksProxy/MeowshellPortForward, these
 /// calls never go through meowshell, so the fake here plays "tailcat"
-/// directly. The PlatformNotSupportedException SshAsync/CpAsync raise on
-/// Android isn't covered here: OperatingSystem.IsAndroid() reflects the
-/// real runtime, not something this net8.0 test process can fake.
+/// directly (CpAsync goes through meowshell too, but only on Android; this
+/// non-Android test process always takes its system-scp path). The
+/// PlatformNotSupportedException SshAsync raises on Android isn't covered
+/// here: OperatingSystem.IsAndroid() reflects the real runtime, not
+/// something this net8.0 test process can fake.
 ///
 /// The parsing tests below feed real output captured from the actual
 /// tailcat binary (built from tailscale/tailcat, run against a hermetic

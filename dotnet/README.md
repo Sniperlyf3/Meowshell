@@ -87,7 +87,7 @@ shell server above:
 | `MeowshellServer` | `meowshell serve` | An interactive shell, an SFTP file service, or a forced command for one session — combinable (a shell plus file access), or standalone. |
 | `MeowshellSocksProxy` | `meowshell socks` | A local SOCKS5 proxy that dials out through a tailcat server. |
 | `MeowshellPortForward` | `meowshell forward` | One or more local TCP ports forwarded to a tailcat server. |
-| `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing, and (not on Android) `ssh`/`scp`. |
+| `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing and transfer (all four work on Android too), and (not on Android) `ssh`. |
 
 ### Why the long-lived ones go through meowshell
 
@@ -246,15 +246,20 @@ diagnose that without polling.
 
 ### What's not available on Android
 
-`TailcatClient.SshAsync` and `CpAsync` shell out to a system `ssh`/`scp`
-client, which a typical Android app sandbox doesn't provide. Both methods
-exist in the API on every platform — same class, same signatures, full
-IntelliSense — but throw `PlatformNotSupportedException` specifically when
-running on Android, naming the alternative: `MeowshellServer` for shell
-access, `TailcatClient.ListFilesAsync` for listing files over SFTP (no
-system binary needed there). Everything else in this library, including
-`Files`/`ForcedCommand` on `MeowshellServer`, works the same on Android as
-anywhere else.
+`TailcatClient.SshAsync` shells out to a system `ssh` client, which a
+typical Android app sandbox doesn't provide. It exists in the API on every
+platform — same class, same signature, full IntelliSense — but throws
+`PlatformNotSupportedException` specifically when running on Android,
+naming the alternative: `MeowshellServer` for shell access.
+
+`CpAsync` and `ListFilesAsync` both work on Android too, unchanged in the
+API: `ListFilesAsync` already spoke SFTP directly (no system binary
+involved anywhere). `CpAsync` uses the system `scp` everywhere else, but on
+Android routes through meowshell's own native SFTP `cp` instead — same
+`TailcatPath` arguments, same `TailcatResult`, no platform check needed in
+your own code. Everything else in this library, including
+`Files`/`ForcedCommand` on `MeowshellServer`, also works the same on
+Android as anywhere else.
 
 ## Packages
 

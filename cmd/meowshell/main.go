@@ -15,10 +15,18 @@
 // shell; invoked that way (with -l or -c) meowshell repairs PATH, TERM and
 // LANG in the session's own environment and execs the real shell.
 //
-// Every subcommand runs tailcat through runTailcat, which also arms a
-// parent-death watchdog (exec_unix.go, exec_windows.go). That matters most
-// for serve, socks and forward: each is a long-lived listener that would
-// otherwise survive an orphaning host process indefinitely.
+// serve/connect/socks/forward run tailcat through runTailcat, which also
+// arms a parent-death watchdog (exec_unix.go, exec_windows.go). That
+// matters most for serve, socks and forward: each is a long-lived listener
+// that would otherwise survive an orphaning host process indefinitely.
+//
+// cp solves a different Android problem: tailcat's own cp shells out to a
+// system scp client, which an app sandbox does not provide (tailcat's ls
+// has no such dependency -- it already speaks SFTP directly in-process,
+// and works on Android unchanged). cp speaks SFTP directly instead
+// (sftp.go), routed through tailcat's own bare client mode as a
+// subprocess rather than a system ssh/scp binary, so file transfer works
+// there too.
 package main
 
 import (
@@ -48,6 +56,7 @@ USAGE
   meowshell connect [flags] <tc-addr>
   meowshell socks [flags]
   meowshell forward [flags] <tc-addr> <mapping> [<mapping> ...]
+  meowshell cp [flags] <source>... <target>
   meowshell env
 
 A command after "--" replaces the login shell for every session (like
@@ -66,6 +75,13 @@ to one tailcat client key:
 Connect to one:
 
 	meowshell connect <tc-addr>
+
+Copy a file to or from a server, speaking SFTP directly -- unlike
+"tailcat cp", this never shells out to a system ssh/scp client, so it
+also works in an Android app sandbox ("tailcat ls" already needs no
+such binary and works there unchanged):
+
+	meowshell cp foo.txt <tc-addr>:
 
 Show the shell environment meowshell would set up, and any problems
 it found:
@@ -100,6 +116,8 @@ func main() {
 		err = socks(os.Args[2:])
 	case "forward":
 		err = forward(os.Args[2:])
+	case "cp":
+		err = cp(os.Args[2:])
 	case "env":
 		err = printEnv()
 	case "-h", "--help", "help":

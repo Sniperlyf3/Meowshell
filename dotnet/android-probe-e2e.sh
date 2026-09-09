@@ -79,6 +79,21 @@ case "$result" in
 	*)    echo "FAIL  the probe never reported a result within the timeout" >&2; exit 1 ;;
 esac
 
+# RunCpProbeAsync logs its own marker before PROBE_PASS (see MainActivity),
+# so it's already in $log by now: a self-contained round trip proving
+# CpAsync's Android branch (meowshell's native-SFTP "cp", not the system
+# scp this sandbox has no room for) works under a real installed app's
+# exec constraints.
+if printf '%s' "$log" | grep -q PROBE_CP_PASS; then
+	echo "ok    CpAsync's Android branch worked entirely inside the app's own sandbox"
+elif printf '%s' "$log" | grep -q PROBE_CP_FAIL; then
+	echo "FAIL  CpAsync's Android branch failed inside the app's sandbox (see log above)" >&2
+	exit 1
+else
+	echo "FAIL  no PROBE_CP_PASS/PROBE_CP_FAIL marker in the probe's log" >&2
+	exit 1
+fi
+
 # MainActivity deliberately keeps the server up rather than stopping it
 # once PROBE_PASS is logged, so there's something to dial into here.
 if [ -z "${HOST_TAILCAT:-}" ]; then
@@ -87,7 +102,7 @@ if [ -z "${HOST_TAILCAT:-}" ]; then
 fi
 
 addr=$(printf '%s\n' "$log" | tr -d '\r' \
-	| sed -n 's/.*Server listening with new address: \(tc[A-Za-z0-9_-]*\).*/\1/p' | tail -1)
+	| sed -n 's/.*MeowshellProbe: tailcat: #.*Server listening with new address: \(tc[A-Za-z0-9_-]*\).*/\1/p' | tail -1)
 if [ -z "$addr" ]; then
 	echo "FAIL  PROBE_PASS but no tailcat address found in the probe's own log" >&2
 	exit 1

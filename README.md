@@ -33,8 +33,8 @@ wrapper around tailcat: an SFTP file service and forced-command sessions
 alongside the shell, a SOCKS5 proxy, TCP port forwarding, and one-shot
 operations for key management, address inspection, connectivity checks, and
 file transfer. See [`dotnet/README.md`](dotnet/README.md) for the full
-surface, every option, and the one or two things (`ssh`/`scp`) an Android
-app sandbox can't run.
+surface, every option, and the one thing (an interactive `ssh` client) an
+Android app sandbox can't run.
 
 ## What's in this repo
 
