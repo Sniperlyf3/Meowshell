@@ -94,6 +94,21 @@ else
 	exit 1
 fi
 
+# RunSshSessionProbeAsync logs its own marker before PROBE_PASS too, same
+# reasoning as the cp probe above: a self-contained pseudo-terminal session
+# proving TailcatSshSession's Android branch (meowshell's native "connect",
+# not the system ssh this sandbox has no room for) works under a real
+# installed app's exec constraints.
+if printf '%s' "$log" | grep -q PROBE_SSH_PASS; then
+	echo "ok    TailcatSshSession's Android branch worked entirely inside the app's own sandbox"
+elif printf '%s' "$log" | grep -q PROBE_SSH_FAIL; then
+	echo "FAIL  TailcatSshSession's Android branch failed inside the app's sandbox (see log above)" >&2
+	exit 1
+else
+	echo "FAIL  no PROBE_SSH_PASS/PROBE_SSH_FAIL marker in the probe's log" >&2
+	exit 1
+fi
+
 # MainActivity deliberately keeps the server up rather than stopping it
 # once PROBE_PASS is logged, so there's something to dial into here.
 if [ -z "${HOST_TAILCAT:-}" ]; then

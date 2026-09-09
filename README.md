@@ -30,11 +30,13 @@ for when the address itself is the only credential you want — pair it with
 
 That one call is the common case, but the same package is a complete C#
 wrapper around tailcat: an SFTP file service and forced-command sessions
-alongside the shell, a SOCKS5 proxy, TCP port forwarding, and one-shot
-operations for key management, address inspection, connectivity checks, and
-file transfer. See [`dotnet/README.md`](dotnet/README.md) for the full
-surface, every option, and the one thing (an interactive `ssh` client) an
-Android app sandbox can't run.
+alongside the shell, a SOCKS5 proxy, TCP port forwarding, native interactive
+sessions and file transfer as a *client* too (no system `ssh`/`scp` needed,
+so this also works from inside an Android app), and one-shot operations for
+key management, address inspection, and connectivity checks. See
+[`dotnet/README.md`](dotnet/README.md) for the full surface, every option,
+and the one thing (a console-attached `ssh` client, as opposed to a
+programmatic session) an Android app sandbox can't run.
 
 ## What's in this repo
 

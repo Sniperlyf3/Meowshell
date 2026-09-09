@@ -73,26 +73,28 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "tailcat" }
 func (pipeAddr) String() string  { return "tailcat" }
 
-// dialSFTP starts tailcat's own bare client mode as a subprocess (argv from
-// tailcatClientArgv) and speaks SSH, then SFTP, directly over its
-// stdin/stdout -- no system ssh/sftp/scp binary involved, which is what
-// makes this work in an Android app sandbox. The server accepts the SSH
-// "none" auth method unconditionally: tailcat's own WireGuard peer
-// handshake, keyed by the address, already established who is connecting,
-// the same trust tailcat's own native "ls" subcommand relies on.
-func dialSFTP(tailcatBin string, argv []string) (*sftp.Client, io.Closer, error) {
+// dialSSHClient starts tailcat's own bare client mode as a subprocess (argv
+// from tailcatClientArgv) and speaks SSH directly over its stdin/stdout --
+// no system ssh binary involved, which is what makes this work in an
+// Android app sandbox (and piped into from anywhere else with no real
+// terminal attached at all). The server accepts the SSH "none" auth method
+// unconditionally: tailcat's own WireGuard peer handshake, keyed by the
+// address, already established who is connecting, the same trust tailcat's
+// own native "ls" subcommand relies on. Closing the returned client also
+// tears down the subprocess.
+func dialSSHClient(tailcatBin string, argv []string) (*ssh.Client, error) {
 	cmd := exec.Command(tailcatBin, argv...)
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	conn := &pipeConn{cmd: cmd, stdout: stdout, stdin: stdin}
 
@@ -101,9 +103,17 @@ func dialSFTP(tailcatBin string, argv []string) (*sftp.Client, io.Closer, error)
 	})
 	if err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("SSH handshake: %w", err)
+		return nil, fmt.Errorf("SSH handshake: %w", err)
 	}
-	sc := ssh.NewClient(sshConn, chans, reqs)
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+// dialSFTP is dialSSHClient plus opening the SFTP subsystem on top.
+func dialSFTP(tailcatBin string, argv []string) (*sftp.Client, io.Closer, error) {
+	sc, err := dialSSHClient(tailcatBin, argv)
+	if err != nil {
+		return nil, nil, err
+	}
 	sf, err := sftp.NewClient(sc)
 	if err != nil {
 		sc.Close()

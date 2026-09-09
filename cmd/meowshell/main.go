@@ -15,18 +15,22 @@
 // shell; invoked that way (with -l or -c) meowshell repairs PATH, TERM and
 // LANG in the session's own environment and execs the real shell.
 //
-// serve/connect/socks/forward run tailcat through runTailcat, which also
-// arms a parent-death watchdog (exec_unix.go, exec_windows.go). That
-// matters most for serve, socks and forward: each is a long-lived listener
-// that would otherwise survive an orphaning host process indefinitely.
+// serve/socks/forward run tailcat through runTailcat, which also arms a
+// parent-death watchdog (exec_unix.go, exec_windows.go): each is a
+// long-lived listener that would otherwise survive an orphaning host
+// process indefinitely.
 //
-// cp solves a different Android problem: tailcat's own cp shells out to a
-// system scp client, which an app sandbox does not provide (tailcat's ls
-// has no such dependency -- it already speaks SFTP directly in-process,
-// and works on Android unchanged). cp speaks SFTP directly instead
-// (sftp.go), routed through tailcat's own bare client mode as a
-// subprocess rather than a system ssh/scp binary, so file transfer works
-// there too.
+// cp and connect solve a related Android problem each: tailcat's own
+// cp/ssh shell out to a system scp/ssh client, which an app sandbox does
+// not provide (tailcat's ls has no such dependency -- it already speaks
+// SFTP directly in-process, and works on Android unchanged). Both speak
+// SSH themselves instead (sftp.go, connect.go), routed through tailcat's
+// own bare client mode as a subprocess rather than a system ssh/scp
+// binary, so file transfer and interactive sessions both work there too --
+// connect's session is plain stdin/stdout either way, so it works exactly
+// as well piped into from another process (an Android app driving it as a
+// child process, with no real terminal anywhere in the picture) as it does
+// from a real terminal.
 package main
 
 import (
@@ -53,7 +57,7 @@ const usage = `meowshell -- an interactive shell over a tailcat address
 
 USAGE
   meowshell serve [flags] [-- <command> [args...]]
-  meowshell connect [flags] <tc-addr>
+  meowshell connect [flags] <tc-addr> [command [args...]]
   meowshell socks [flags]
   meowshell forward [flags] <tc-addr> <mapping> [<mapping> ...]
   meowshell cp [flags] <source>... <target>
@@ -325,39 +329,6 @@ func setEnv(environ []string, vars [][2]string) []string {
 		out = append(out, v[0]+"="+v[1])
 	}
 	return out
-}
-
-func connect(args []string) error {
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	key := fs.String("key", "", "tailcat client key name or path")
-	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
-	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
-	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("connect needs a tailcat address")
-	}
-
-	bin, err := findTailcat(*tailcatBin)
-	if err != nil {
-		return err
-	}
-	argv := []string{bin}
-	if *key != "" {
-		argv = append(argv, "--key="+*key)
-	}
-	if *derpMapURL != "" {
-		argv = append(argv, "--derpmap-url="+*derpMapURL)
-	}
-	if *verbose {
-		argv = append(argv, "--verbose")
-	}
-	argv = append(argv, "ssh")
-	argv = append(argv, fs.Args()...)
-	return runTailcatFn(bin, argv, os.Environ())
 }
 
 // socks runs "tailcat socks" through runTailcat rather than execing it

@@ -164,44 +164,24 @@ func TestServeArgv(t *testing.T) {
 	}
 }
 
-func TestConnectArgv(t *testing.T) {
-	tailcat := writeFakeTailcat(t)
+// connect's argv building (tailcatClientArgv) is covered by
+// TestTailcatClientArgv in cp_test.go, shared with cp; shell-quoting a
+// remote command by TestShellQuoteJoin in connect_test.go. The session
+// itself (dialing, pty allocation, exit status) has no local server to
+// dial in this package, so it's covered end-to-end against a real one by
+// dotnet/Meowshell.Tests' TailcatSshSession tests instead.
 
-	cases := []struct {
-		name string
-		args []string
-		want []string
-	}{
-		{
-			name: "derpmap-url and verbose reach tailcat, before ssh",
-			args: []string{"--tailcat=" + tailcat, "--derpmap-url=https://derp.example/map.json", "--verbose", "tcaddr"},
-			want: []string{tailcat, "--derpmap-url=https://derp.example/map.json", "--verbose", "ssh", "tcaddr"},
-		},
-		{
-			name: "a remote command passes through after the address",
-			args: []string{"--tailcat=" + tailcat, "tcaddr", "echo", "hi"},
-			want: []string{tailcat, "ssh", "tcaddr", "echo", "hi"},
-		},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			captured := captureRunTailcat(t)
-			if err := connect(c.args); err != nil {
-				t.Fatalf("connect(%v) = %v", c.args, err)
-			}
-			if !slices.Equal(captured.argv, c.want) {
-				t.Errorf("argv = %v, want %v", captured.argv, c.want)
-			}
-		})
+func TestConnectRequiresAnAddress(t *testing.T) {
+	// Fails at flag/argument validation, before findTailcat or any dial --
+	// no fake binary needed.
+	if err := connect(nil); err == nil {
+		t.Fatal("connect with no address did not error")
 	}
 }
 
-func TestConnectRequiresAnAddress(t *testing.T) {
-	tailcat := writeFakeTailcat(t)
-	captureRunTailcat(t)
-	if err := connect([]string{"--tailcat=" + tailcat}); err == nil {
-		t.Fatal("connect with no address did not error")
+func TestConnectRejectsConflictingPtyFlags(t *testing.T) {
+	if err := connect([]string{"-t", "-T", "tcaddr"}); err == nil {
+		t.Fatal("connect with both -t and -T did not error")
 	}
 }
 
