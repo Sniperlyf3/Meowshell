@@ -30,28 +30,8 @@ public readonly record struct BinaryNaming(string Prefix, string Suffix)
 }
 
 /// <summary>Configuration for a <see cref="MeowshellServer"/>.</summary>
-public sealed record MeowshellOptions
+public sealed record MeowshellOptions : TailcatListenerOptions
 {
-    /// <summary>
-    /// Directory holding the meowshell and tailcat binaries. Leave null to
-    /// search for the ones shipped by a runtime package; see
-    /// <see cref="BinaryLocator"/>. On Android this must be
-    /// ApplicationInfo.NativeLibraryDir, because for apps targeting API 29+
-    /// it is the only location an app may execute a file from.
-    /// </summary>
-    public string? BinaryDirectory { get; init; }
-
-    /// <summary>
-    /// How the binaries are named in <see cref="BinaryDirectory"/>. Defaults
-    /// to the convention for the running platform: <c>lib*.so</c> on Android,
-    /// because only files named that way are unpacked into the native library
-    /// directory; <c>*.exe</c> on Windows; a bare name elsewhere.
-    /// </summary>
-    public BinaryNaming Naming { get; init; } = BinaryNaming.ForCurrentPlatform();
-
-    /// <summary>A writable HOME for the session. Use the app's FilesDir.</summary>
-    public required string HomeDirectory { get; init; }
-
     /// <summary>Scratch directory for the address handoff file. Use CacheDir.</summary>
     public required string WorkDirectory { get; init; }
 
@@ -94,19 +74,6 @@ public sealed record MeowshellOptions
 
     /// <summary>How long to wait for the server to publish its address.</summary>
     public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
-
-    /// <summary>How long SIGTERM gets before SIGKILL.</summary>
-    public TimeSpan GracePeriod { get; init; } = TimeSpan.FromSeconds(3);
-
-    /// <summary>
-    /// URL of a self-hosted, JSON-encoded DERP map to use instead of
-    /// tailcat's default (<c>https://tailcat.dev/derpmap.json</c>). Passed
-    /// to tailcat's own <c>--derpmap-url</c>.
-    /// </summary>
-    public string? DerpMapUrl { get; init; }
-
-    /// <summary>Passed to tailcat's own <c>--verbose</c>.</summary>
-    public bool Verbose { get; init; }
 
     /// <summary>
     /// Embed the DERP server's own info in the published address instead of

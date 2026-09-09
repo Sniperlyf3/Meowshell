@@ -107,6 +107,11 @@ running afterward to orphan.
 
 ### Every option
 
+`BinaryDirectory`/`Naming`/`HomeDirectory`/`DerpMapUrl`/`Verbose` (and, on
+the three listeners, `GracePeriod`) are declared once, on `TailcatOptions`
+and `TailcatListenerOptions`, and inherited by all four options types below
+— not duplicated per type.
+
 **`MeowshellOptions`** (for `MeowshellServer`) — `HomeDirectory` and
 `WorkDirectory` are required; everything else has a default.
 

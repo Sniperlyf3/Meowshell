@@ -4,17 +4,8 @@ using System.Diagnostics;
 namespace Meowshell;
 
 /// <summary>Configuration for a <see cref="MeowshellPortForward"/>.</summary>
-public sealed record MeowshellPortForwardOptions
+public sealed record MeowshellPortForwardOptions : TailcatListenerOptions
 {
-    /// <summary>Directory holding the meowshell and tailcat binaries. See <see cref="MeowshellOptions.BinaryDirectory"/>.</summary>
-    public string? BinaryDirectory { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Naming"/>.</summary>
-    public BinaryNaming Naming { get; init; } = BinaryNaming.ForCurrentPlatform();
-
-    /// <summary>A writable HOME. Use the app's FilesDir.</summary>
-    public required string HomeDirectory { get; init; }
-
     /// <summary>The tailcat address to forward to.</summary>
     public required string Address { get; init; }
 
@@ -36,15 +27,6 @@ public sealed record MeowshellPortForwardOptions
 
     /// <summary>tailcat client key name or path (see 'tailcat genkey').</summary>
     public string? ClientKey { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.DerpMapUrl"/>.</summary>
-    public string? DerpMapUrl { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Verbose"/>.</summary>
-    public bool Verbose { get; init; }
-
-    /// <summary>How long SIGTERM gets before SIGKILL.</summary>
-    public TimeSpan GracePeriod { get; init; } = TimeSpan.FromSeconds(3);
 }
 
 /// <summary>

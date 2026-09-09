@@ -4,17 +4,8 @@ using System.Diagnostics;
 namespace Meowshell;
 
 /// <summary>Configuration for a <see cref="MeowshellSocksProxy"/>.</summary>
-public sealed record MeowshellSocksOptions
+public sealed record MeowshellSocksOptions : TailcatListenerOptions
 {
-    /// <summary>Directory holding the meowshell and tailcat binaries. See <see cref="MeowshellOptions.BinaryDirectory"/>.</summary>
-    public string? BinaryDirectory { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Naming"/>.</summary>
-    public BinaryNaming Naming { get; init; } = BinaryNaming.ForCurrentPlatform();
-
-    /// <summary>A writable HOME. Use the app's FilesDir.</summary>
-    public required string HomeDirectory { get; init; }
-
     /// <summary>
     /// SOCKS5 proxy listen <c>[address]:port</c>; a bare port means
     /// localhost, a bare address means an OS-assigned port. Empty lets
@@ -25,15 +16,6 @@ public sealed record MeowshellSocksOptions
 
     /// <summary>tailcat client key name or path (see 'tailcat genkey').</summary>
     public string? ClientKey { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.DerpMapUrl"/>.</summary>
-    public string? DerpMapUrl { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Verbose"/>.</summary>
-    public bool Verbose { get; init; }
-
-    /// <summary>How long SIGTERM gets before SIGKILL.</summary>
-    public TimeSpan GracePeriod { get; init; } = TimeSpan.FromSeconds(3);
 }
 
 /// <summary>

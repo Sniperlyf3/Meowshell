@@ -16,23 +16,8 @@ public readonly record struct TailcatResult(int ExitCode, string Stdout, string 
 }
 
 /// <summary>Configuration shared by every <see cref="TailcatClient"/> call.</summary>
-public sealed record TailcatClientOptions
+public sealed record TailcatClientOptions : TailcatOptions
 {
-    /// <summary>Directory holding the meowshell and tailcat binaries. See <see cref="MeowshellOptions.BinaryDirectory"/>.</summary>
-    public string? BinaryDirectory { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Naming"/>.</summary>
-    public BinaryNaming Naming { get; init; } = BinaryNaming.ForCurrentPlatform();
-
-    /// <summary>A writable HOME. Use the app's FilesDir.</summary>
-    public required string HomeDirectory { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.DerpMapUrl"/>.</summary>
-    public string? DerpMapUrl { get; init; }
-
-    /// <summary>See <see cref="MeowshellOptions.Verbose"/>.</summary>
-    public bool Verbose { get; init; }
-
     /// <summary>How long to wait for the command to finish.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 }

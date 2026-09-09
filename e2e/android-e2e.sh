@@ -258,6 +258,60 @@ else
 fi
 rm -rf "$authdir" "$otherdir"
 
+# 7. Copying files to and from the device over scp, routed through tailcat --
+# the "files" service on its own, with no shell running at all.
+echo "== 7. copying files to and from the device (the 'files' service) =="
+adb shell "pkill -f meowshell-e2e" >/dev/null 2>&1 || true
+sleep 1
+
+content="scp-e2e-$$-$RANDOM"
+adb shell "mkdir -p $DEV/served && printf '%s\n' '$content' > $DEV/served/greeting.txt"
+
+adb shell "nohup env TAILCAT_BIN=$DEV/tailcat HOME=$DEV/home TAILCAT_ADDR_FILE=$DEV/addr \
+	$DEV/meowshell serve --key=new --files=$DEV/served:rw \
+	> $DEV/server-files.log 2>&1 < /dev/null &" >/dev/null
+
+scpaddr=""
+for _ in $(seq 60); do
+	scpaddr=$(adb shell "cat $DEV/addr 2>/dev/null" | tr -d '\r\n' || true)
+	[ -n "$scpaddr" ] && { mask "$scpaddr"; break; }
+	sleep 2
+done
+if [ -z "$scpaddr" ]; then
+	server_log
+	fail "files-only server published no address"; exit 1
+fi
+pass "files-only server published an address (no shell service running)"
+
+localcopy=$(mktemp)
+if out=$(timeout 60 "$HOST_TAILCAT" cp "$scpaddr:greeting.txt" "$localcopy" 2>&1); then
+	if [ "$(cat "$localcopy")" = "$content" ]; then
+		pass "copied a file from the device to the host and its content matched"
+	else
+		indent "device had: $content, host got: $(cat "$localcopy")"
+		fail "copied file's content did not match what was on the device"
+	fi
+else
+	indent "$out"; server_log
+	fail "could not copy a file from the device"
+fi
+
+upload_content="host-to-device-$$-$RANDOM"
+localupload=$(mktemp)
+printf '%s\n' "$upload_content" > "$localupload"
+if out=$(timeout 60 "$HOST_TAILCAT" cp "$localupload" "$scpaddr:uploaded.txt" 2>&1); then
+	devcontent=$(adb shell "cat $DEV/served/uploaded.txt 2>/dev/null" | tr -d '\r')
+	if [ "$devcontent" = "$upload_content" ]; then
+		pass "copied a file from the host to the device and its content matched"
+	else
+		fail "uploaded file's content did not match on the device"
+	fi
+else
+	indent "$out"; server_log
+	fail "could not copy a file to the device"
+fi
+rm -f "$localcopy" "$localupload"
+
 echo
 if [ "$failed" -eq 0 ]; then
 	echo "all end-to-end checks passed"
