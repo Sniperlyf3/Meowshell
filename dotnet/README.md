@@ -101,7 +101,10 @@ and stops with SIGTERM before SIGKILL. It defaults to a fresh ephemeral key
 per call — without that, tailcat would reuse a saved `default` key if one
 exists, silently turning a throwaway address into a permanent one.
 
-The deadline is enforced in-process, so it only holds while your app is
-alive. If the host process is killed outright, the server keeps running
-until the OS reaps it — there's no watchdog outside the process to close
-that gap.
+The deadline itself is enforced in-process, so it only fires while your app
+is alive and running its own code. If the host process is killed outright
+instead — a crash, an OOM kill, a force-stop — the OS closes the gap for
+you: on Linux and Android, tailcat is armed with `PR_SET_PDEATHSIG` and the
+kernel kills it the moment its parent disappears; on Windows, tailcat is
+assigned to a job object that the OS tears down as soon as your process's
+handles are released, which happens automatically on a crash.
