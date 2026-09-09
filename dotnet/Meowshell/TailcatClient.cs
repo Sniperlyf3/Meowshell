@@ -245,7 +245,24 @@ public static class TailcatClient
 
     /// <summary>Lists files on a tailcat server (a "files" service, or the home directory of an ssh/no-auth-ssh one), over SFTP directly -- no ssh or sftp binary is involved.</summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
-    /// <param name="target">A tailcat address, optionally suffixed <c>:path</c>.</param>
+    /// <param name="target">A remote path: <see cref="TailcatPath.Remote"/> or <see cref="TailcatPath.RemoteHost"/>, with an optional path under the served/home directory.</param>
+    /// <param name="longListing">Include permissions, size, and modification time.</param>
+    /// <exception cref="ArgumentException"><paramref name="target"/> is a local path.</exception>
+    /// <exception cref="TailcatException">tailcat exited non-zero, or a line didn't match the expected shape.</exception>
+    public static Task<IReadOnlyList<TailcatFileEntry>> ListFilesAsync(
+        TailcatClientOptions options, TailcatPath target, bool longListing = false)
+    {
+        if (!target.IsRemote)
+        {
+            throw new ArgumentException(
+                "target must be remote: TailcatPath.Remote(address) or TailcatPath.RemoteHost(dnsName).", nameof(target));
+        }
+        return ListFilesAsync(options, target.ToString(), longListing);
+    }
+
+    /// <summary>Lists files on a tailcat server, given the raw scp-style "server:path" text directly -- prefer the <see cref="TailcatPath"/> overload.</summary>
+    /// <param name="options">Where the binaries live and how to reach the server.</param>
+    /// <param name="target">A tailcat address or DNS name, optionally suffixed <c>:path</c>.</param>
     /// <param name="longListing">Include permissions, size, and modification time.</param>
     /// <exception cref="TailcatException">tailcat exited non-zero, or a line didn't match the expected shape.</exception>
     public static async Task<IReadOnlyList<TailcatFileEntry>> ListFilesAsync(
@@ -278,23 +295,72 @@ public static class TailcatClient
     }
 
     /// <summary>
-    /// Copies files to or from a tailcat server, using the system scp.
+    /// Copies one source to <paramref name="target"/>, using the system scp.
     /// </summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
-    /// <param name="paths">One or more sources followed by a target, scp-style; a remote path is written <c>&lt;tc-addr&gt;:[path]</c>.</param>
+    /// <param name="source">The file or directory to copy: <see cref="TailcatPath.Local"/> to upload, or <see cref="TailcatPath.Remote"/>/<see cref="TailcatPath.RemoteHost"/> to download.</param>
+    /// <param name="target">Where to copy it to: local for a download, remote for an upload.</param>
     /// <param name="recursive">Recursively copy directories.</param>
     /// <param name="preserve">Preserve modification times and modes.</param>
+    /// <param name="port">The server's SSH (file service) port, when it isn't 22.</param>
+    /// <exception cref="ArgumentException">Neither <paramref name="source"/> nor <paramref name="target"/> is remote.</exception>
     /// <exception cref="PlatformNotSupportedException">
     /// Running on Android: this shells out to a system <c>scp</c> binary, which an app sandbox does not provide.
     /// </exception>
     public static Task<TailcatResult> CpAsync(
-        TailcatClientOptions options, IReadOnlyList<string> paths, bool recursive = false, bool preserve = false)
+        TailcatClientOptions options, TailcatPath source, TailcatPath target,
+        bool recursive = false, bool preserve = false, string? port = null) =>
+        CpAsync(options, [source], target, recursive, preserve, port);
+
+    /// <summary>
+    /// Copies one or more sources to <paramref name="target"/>, using the system scp -- the multi-source form of
+    /// <see cref="CpAsync(TailcatClientOptions, TailcatPath, TailcatPath, bool, bool, string?)"/>, for copying
+    /// several local files to one remote directory in a single call.
+    /// </summary>
+    /// <param name="options">Where the binaries live and how to reach the server.</param>
+    /// <param name="sources">The files or directories to copy.</param>
+    /// <param name="target">Where to copy them to.</param>
+    /// <param name="recursive">Recursively copy directories.</param>
+    /// <param name="preserve">Preserve modification times and modes.</param>
+    /// <param name="port">The server's SSH (file service) port, when it isn't 22.</param>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="sources"/> is empty; none of <paramref name="sources"/> or <paramref name="target"/> is
+    /// remote (there would be no tailcat server to route the copy through); or they don't all name the same server.
+    /// </exception>
+    /// <exception cref="PlatformNotSupportedException">
+    /// Running on Android: this shells out to a system <c>scp</c> binary, which an app sandbox does not provide.
+    /// </exception>
+    public static Task<TailcatResult> CpAsync(
+        TailcatClientOptions options, IReadOnlyList<TailcatPath> sources, TailcatPath target,
+        bool recursive = false, bool preserve = false, string? port = null)
     {
         RequireNotAndroid("cp");
+        if (sources.Count == 0)
+            throw new ArgumentException("At least one source is required.", nameof(sources));
+
+        var servers = new List<string>();
+        foreach (var p in sources.Append(target))
+        {
+            if (p.Server is { } server && !servers.Contains(server)) servers.Add(server);
+        }
+        if (servers.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one of the sources or the target must be remote (TailcatPath.Remote/RemoteHost); there would be no tailcat server to route the copy through.",
+                nameof(sources));
+        }
+        if (servers.Count > 1)
+        {
+            throw new ArgumentException(
+                $"All remote paths must name the same server ({string.Join(" and ", servers)} differ).", nameof(sources));
+        }
+
         var args = new List<string> { "cp" };
         if (recursive) args.Add("-r");
         if (preserve) args.Add("-p");
-        args.AddRange(paths);
+        if (!string.IsNullOrEmpty(port)) args.AddRange(["-P", port]);
+        args.AddRange(sources.Select(s => s.ToString()));
+        args.Add(target.ToString());
         return RunAsync(options, [.. args]);
     }
 

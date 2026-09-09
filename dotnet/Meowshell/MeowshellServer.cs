@@ -1,6 +1,5 @@
 #nullable enable
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace Meowshell;
 
@@ -204,25 +203,10 @@ public sealed record MeowshellOptions
 /// </summary>
 public sealed class MeowshellServer : IAsyncDisposable
 {
-    private const int SIGTERM = 15;
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int kill(int pid, int sig);
-
     private readonly MeowshellOptions _options;
-    private readonly Process _process;
+    private readonly TailcatListener _listener;
     private readonly string _addressFile;
     private readonly CancellationTokenSource _deadline = new();
-    private readonly TaskCompletionSource _exited =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly SemaphoreSlim _stopLock = new(1, 1);
-    private readonly TailcatDiagnostics _diagnostics = new();
-    private bool _stopped;
-    // Windows-only crash backstop: if the host process dies without running
-    // StopAsync, closing this handle is what stops tailcat surviving as an
-    // orphan. See JobObject's own doc comment for why Unix needs no
-    // equivalent (there, PR_SET_PDEATHSIG in exec_unix.go does the same job).
-    private JobObject? _job;
 
     /// <summary>The tailcat address clients connect to: <c>tailcat ssh &lt;address&gt;</c>.</summary>
     public string Address { get; private set; } = "";
@@ -241,15 +225,19 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// (a crash, an OOM kill), so awaiting this is enough to notice and
     /// diagnose that without polling.
     /// </summary>
-    public Task Completed => _exited.Task;
+    public Task Completed => _listener.Completed;
 
     /// <summary>Diagnostic output from tailcat. Raised on a background thread.</summary>
-    public event Action<string>? Log;
+    public event Action<string>? Log
+    {
+        add => _listener.Log += value;
+        remove => _listener.Log -= value;
+    }
 
-    private MeowshellServer(MeowshellOptions options, Process process, string addressFile)
+    private MeowshellServer(MeowshellOptions options, TailcatListener listener, string addressFile)
     {
         _options = options;
-        _process = process;
+        _listener = listener;
         _addressFile = addressFile;
         ExpiresAt = DateTimeOffset.UtcNow + options.Lifetime;
     }
@@ -354,16 +342,13 @@ public sealed class MeowshellServer : IAsyncDisposable
         psi.Environment["TMPDIR"] = options.WorkDirectory;
         psi.Environment["TAILCAT_ADDR_FILE"] = addressFile;
 
-        var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        var process = new Process { StartInfo = psi };
         MeowshellServer? server = null;
+        TailcatListener? listener = null;
         try
         {
-            process.Start();
-            server = new MeowshellServer(options, process, addressFile);
-            if (OperatingSystem.IsWindows())
-            {
-                server._job = JobObject.Wrap(process);
-            }
+            listener = TailcatListener.Start(process, options.GracePeriod, onLog);
+            server = new MeowshellServer(options, listener, addressFile);
 
             if (options.PrivateKeyJson is not null)
             {
@@ -374,29 +359,6 @@ public sealed class MeowshellServer : IAsyncDisposable
                 process.StandardInput.Close();
             }
 
-            process.Exited += async (_, _) =>
-            {
-                // Exited can fire before the async reads behind
-                // BeginErrorReadLine finish delivering the last lines;
-                // WaitForExitAsync (unlike the Exited event itself) is
-                // documented to synchronize with that, so _diagnostics is
-                // complete by the time this reads it.
-                await process.WaitForExitAsync().ConfigureAwait(false);
-                if (server._stopped) server._exited.TrySetResult();
-                else server._exited.TrySetException(new TailcatException(
-                    "tailcat exited unexpectedly", process.ExitCode, server._diagnostics.Tail()));
-            };
-            process.OutputDataReceived += (_, e) => { if (e.Data is not null) { server.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (e.Data is null) return;
-                server._diagnostics.Add(e.Data);
-                server.Log?.Invoke(e.Data);
-                onLog?.Invoke(e.Data);
-            };
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
             server.Address = await server.WaitForAddressAsync(cancellationToken)
                 .ConfigureAwait(false);
             server.StartDeadline();
@@ -405,6 +367,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         catch
         {
             if (server is not null) await server.DisposeAsync().ConfigureAwait(false);
+            else if (listener is not null) await listener.DisposeAsync().ConfigureAwait(false);
             else MeowshellProcessControl.TryKill(process);
             throw;
         }
@@ -427,14 +390,8 @@ public sealed class MeowshellServer : IAsyncDisposable
                     .ConfigureAwait(false)).Trim();
                 if (text.Length > 0) return text;
             }
-            if (_process.HasExited)
-            {
-                // See the Exited handler in StartAsync for why this is
-                // needed before _diagnostics can be trusted as complete.
-                await _process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-                throw new TailcatException(
-                    "tailcat exited before publishing an address", _process.ExitCode, _diagnostics.Tail());
-            }
+            await _listener.ThrowIfExitedAsync(
+                "tailcat exited before publishing an address", cancellationToken).ConfigureAwait(false);
             try
             {
                 await Task.Delay(50, timeout.Token).ConfigureAwait(false);
@@ -463,31 +420,13 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// </summary>
     public async Task StopAsync()
     {
-        await _stopLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_stopped) return;
-            _stopped = true;
             await _deadline.CancelAsync().ConfigureAwait(false);
-
-            if (!_process.HasExited)
-            {
-                MeowshellProcessControl.RequestStop(_process, kill, SIGTERM);
-                using var grace = new CancellationTokenSource(_options.GracePeriod);
-                try
-                {
-                    await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    MeowshellProcessControl.TryKill(_process);
-                }
-            }
-            _exited.TrySetResult();
+            await _listener.StopAsync().ConfigureAwait(false);
         }
         finally
         {
-            _stopLock.Release();
             try { if (File.Exists(_addressFile)) File.Delete(_addressFile); } catch { /* best effort */ }
         }
     }
@@ -497,12 +436,6 @@ public sealed class MeowshellServer : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _deadline.Dispose();
-        _stopLock.Dispose();
-        _process.Dispose();
-        if (OperatingSystem.IsWindows())
-        {
-            _job?.Dispose();
-        }
+        await _listener.DisposeAsync().ConfigureAwait(false);
     }
-
 }

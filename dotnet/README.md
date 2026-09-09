@@ -169,8 +169,8 @@ freely except for that one case above — set none of the three and
 when tailcat printed one, and `Success` doesn't throw on its own, since
 e.g. `--until-direct` timing out is meaningful information, not an error),
 `ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp` binary
-involved — returns typed `TailcatFileEntry` records, not raw text), and
-`SshAsync`/`CpAsync`. `GenerateKeyAsync` takes a **`TailcatKeyOptions`** —
+involved — returns typed `TailcatFileEntry` records, not raw text), `SshAsync`,
+and `CpAsync`. `GenerateKeyAsync` takes a **`TailcatKeyOptions`** —
 `Name` required:
 
 | Option | Default | What it does |
@@ -181,6 +181,33 @@ involved — returns typed `TailcatFileEntry` records, not raw text), and
 | `FixedRegion` | `false` | Discover the nearest region once, now, and bake it into the key. |
 | `EmbedDerpMap` | `false` | Embed the DERP map nodes in the address (implies `FixedRegion` unless `Region` names one). |
 | `Psk` | `true` | Same as `MeowshellOptions.Psk`. |
+
+### Remote paths
+
+`CpAsync` and `ListFilesAsync` take **`TailcatPath`** instead of a
+hand-built `"tc-addr:path"` string, so there's no scp-style text to get
+subtly wrong (a missing colon, sources and target swapped):
+
+```csharp
+// Upload a local file to a directory a server offers read-write:
+await TailcatClient.CpAsync(options,
+    source: "photo.jpg",                                  // a plain string is always local
+    target: TailcatPath.Remote(address, "photos/photo.jpg"));
+
+// Download, and list what's there first:
+var entries = await TailcatClient.ListFilesAsync(options, TailcatPath.Remote(address, "photos"));
+await TailcatClient.CpAsync(options, TailcatPath.Remote(address, "photos/photo.jpg"), "local-copy.jpg");
+```
+
+`TailcatPath.Local(path)` (or a bare `string`, which converts implicitly),
+`TailcatPath.Remote(address, path)`, and `TailcatPath.RemoteHost(dnsName, path)`
+(for a server named by a DNS name with a "tailcat=" TXT record, instead of
+a literal address) cover every case tailcat's own `cp`/`ls` accept. `CpAsync`
+also takes a multi-source overload (`IReadOnlyList<TailcatPath> sources`)
+for copying several local files to one remote directory in a single call,
+and throws `ArgumentException` up front if nothing in the call is remote,
+or if the sources and target don't all name the same server -- the same
+rule tailcat itself enforces, just reported before a process ever runs.
 
 ### Errors
 
