@@ -102,7 +102,7 @@ if [ -z "${HOST_TAILCAT:-}" ]; then
 fi
 
 addr=$(printf '%s\n' "$log" | tr -d '\r' \
-	| sed -n 's/.*Server listening with new address: \(tc[A-Za-z0-9_-]*\).*/\1/p' | tail -1)
+	| sed -n 's/.*MeowshellProbe: tailcat: #.*Server listening with new address: \(tc[A-Za-z0-9_-]*\).*/\1/p' | tail -1)
 if [ -z "$addr" ]; then
 	echo "FAIL  PROBE_PASS but no tailcat address found in the probe's own log" >&2
 	exit 1
