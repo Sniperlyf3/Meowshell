@@ -46,8 +46,8 @@ mkdir -p "$TMPDIR"
 
 # shellcheck disable=SC2317 # invoked via trap
 cleanup() {
-	[ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null
-	[ -n "${SSH_AGENT_PID:-}" ] && ssh-agent -k > /dev/null 2>&1
+	[ -n "${server_pid:-}" ] && { kill "$server_pid" 2>/dev/null || true; }
+	[ -n "${SSH_AGENT_PID:-}" ] && { ssh-agent -k > /dev/null 2>&1 || true; }
 	rm -rf "$work"
 	true
 }
