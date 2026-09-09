@@ -37,8 +37,8 @@ mask() { [ -n "$1" ] && printf '::add-mask::%s\n' "$1"; }
 # shellcheck disable=SC2317 # invoked via trap
 cleanup() {
 	adb shell "pkill -f meowshell-e2e" >/dev/null 2>&1 || true
-	[ -n "${keyfeed_pid:-}" ] && kill "$keyfeed_pid" 2>/dev/null
-	[ -n "${SSH_AGENT_PID:-}" ] && ssh-agent -k > /dev/null 2>&1
+	[ -n "${keyfeed_pid:-}" ] && { kill "$keyfeed_pid" 2>/dev/null || true; }
+	[ -n "${SSH_AGENT_PID:-}" ] && { ssh-agent -k > /dev/null 2>&1 || true; }
 	true
 }
 trap cleanup EXIT
