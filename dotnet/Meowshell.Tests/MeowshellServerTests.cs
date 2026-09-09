@@ -85,8 +85,11 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task StartAsync_FailsWhenTheServerExitsWithoutAnAddress()
     {
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => MeowshellServer.StartAsync(Fake("exit 3\n")));
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => MeowshellServer.StartAsync(Fake("echo 'derpmap fetch: boom' >&2\nexit 3\n")));
+        Assert.Equal(3, ex.ExitCode);
+        Assert.Contains("derpmap fetch: boom", ex.Diagnostics);
+        Assert.Contains("derpmap fetch: boom", ex.Message);
     }
 
     [Fact]
@@ -103,6 +106,30 @@ public sealed class MeowshellServerTests : IDisposable
         await server.StopAsync();
         await server.StopAsync();          // must not throw
         Assert.True(server.Completed.IsCompleted);
+        await server.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CompletedFaultsWhenTheServerCrashesOnItsOwn()
+    {
+        var script =
+            $"printf '%s' '{FakeAddress}' > \"$TAILCAT_ADDR_FILE\"\n" +
+            "sleep 0.2\n" +
+            "echo 'panic: something broke' >&2\n" +
+            "exit 2\n";
+        await using var server = await MeowshellServer.StartAsync(Fake(script));
+
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => server.Completed);
+        Assert.Equal(2, ex.ExitCode);
+        Assert.Contains("something broke", ex.Diagnostics);
+    }
+
+    [Fact]
+    public async Task CompletedSucceedsWhenStopAsyncInitiatedTheExit()
+    {
+        var server = await MeowshellServer.StartAsync(Fake(PublishesAddress));
+        await server.StopAsync();
+        await server.Completed; // must not throw
         await server.DisposeAsync();
     }
 
