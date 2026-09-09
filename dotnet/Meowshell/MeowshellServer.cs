@@ -100,6 +100,42 @@ public sealed record MeowshellOptions
     public TimeSpan GracePeriod { get; init; } = TimeSpan.FromSeconds(3);
 
     /// <summary>
+    /// URL of a self-hosted, JSON-encoded DERP map to use instead of
+    /// tailcat's default (<c>https://tailcat.dev/derpmap.json</c>). Passed
+    /// to tailcat's own <c>--derpmap-url</c>.
+    /// </summary>
+    public string? DerpMapUrl { get; init; }
+
+    /// <summary>Passed to tailcat's own <c>--verbose</c>.</summary>
+    public bool Verbose { get; init; }
+
+    /// <summary>
+    /// Embed the DERP server's own info in the published address instead of
+    /// a region reference, so a client can connect without first fetching a
+    /// DERP map. Passed to tailcat's own <c>--full-address</c>.
+    /// </summary>
+    public bool FullAddress { get; init; }
+
+    /// <summary>
+    /// Include a WireGuard pre-shared key in the address (recommended).
+    /// Disabling it only shortens the address and trades away security, for
+    /// compatibility with tailcat clients v0.5.0 and earlier. Passed to
+    /// tailcat's own <c>--psk</c>.
+    /// </summary>
+    public bool Psk { get; init; } = true;
+
+    /// <summary>
+    /// Run this command for every session instead of a login shell, like
+    /// OpenSSH's ForceCommand: the client gets no shell, no client-chosen
+    /// command, and no SFTP subsystem. The command sees the peer's node key
+    /// in <c>TAILCAT_PEER_KEY</c> (in <see cref="AllowClientKeys"/>'s
+    /// format), plus <c>TAILCAT_REMOTE_ADDR</c> and
+    /// <c>TAILCAT_LOCAL_ADDR</c>. Passed to tailcat's own <c>serve ... --
+    /// &lt;command&gt;</c>. Empty runs a normal login shell.
+    /// </summary>
+    public IReadOnlyList<string> ForcedCommand { get; init; } = [];
+
+    /// <summary>
     /// The one entry point: works unchanged on Android, Windows, and Linux,
     /// with no platform code, and no paths, of your own. Add just this
     /// package -- it carries the right native binaries for wherever you're
@@ -161,47 +197,6 @@ public sealed class MeowshellServer : IAsyncDisposable
 
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
-
-    /// <summary>
-    /// Makes sure a binary can be executed. NuGet restore does not reliably
-    /// carry the executable bit onto Unix filesystems, so a package-delivered
-    /// binary can arrive unrunnable; Android unpacks its own and needs
-    /// nothing. Failures here are ignored: if the bit really cannot be set,
-    /// starting the process reports it far better than guessing would.
-    /// </summary>
-    private static void EnsureExecutable(string path)
-    {
-        if (OperatingSystem.IsWindows()) return;
-        try
-        {
-            var mode = File.GetUnixFileMode(path);
-            const UnixFileMode exec =
-                UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
-            if ((mode & UnixFileMode.UserExecute) == 0)
-            {
-                File.SetUnixFileMode(path, mode | exec);
-            }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            // Left to the process start to report.
-        }
-    }
-
-    /// <summary>
-    /// Asks the server to stop. Unix gets SIGTERM so tailcat can close the
-    /// tunnel; Windows has no equivalent signal, so there the process is
-    /// killed outright, which still tears sessions down but less tidily.
-    /// </summary>
-    private static void RequestStop(Process process)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            TryKill(process);
-            return;
-        }
-        kill(process.Id, SIGTERM);
-    }
 
     private readonly MeowshellOptions _options;
     private readonly Process _process;
@@ -267,24 +262,7 @@ public sealed class MeowshellServer : IAsyncDisposable
                 "Set exactly one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
         }
 
-        var binaries = options.BinaryDirectory ?? BinaryLocator.Locate(options.Naming);
-        if (binaries is null)
-        {
-            var tried = string.Join(", ", BinaryLocator.SearchPath(AppContext.BaseDirectory));
-            throw new FileNotFoundException(
-                $"no meowshell and tailcat for {BinaryLocator.RuntimeIdentifier} (looked in {tried}). " +
-                $"Reference a Meowshell.Runtime.* package, set BinaryDirectory, " +
-                $"or point {BinaryLocator.DirectoryVariable} at them.");
-        }
-
-        var meowshell = Path.Combine(binaries, options.Naming.FileName("meowshell"));
-        var tailcat = Path.Combine(binaries, options.Naming.FileName("tailcat"));
-        foreach (var path in new[] { meowshell, tailcat })
-        {
-            if (!File.Exists(path))
-                throw new FileNotFoundException($"missing native binary: {path}", path);
-            EnsureExecutable(path);
-        }
+        var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
 
         Directory.CreateDirectory(options.WorkDirectory);
         Directory.CreateDirectory(options.HomeDirectory);
@@ -314,6 +292,20 @@ public sealed class MeowshellServer : IAsyncDisposable
         else if (options.EphemeralKey)
         {
             psi.ArgumentList.Add("--key=new");
+        }
+        if (!string.IsNullOrEmpty(options.DerpMapUrl))
+            psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
+        if (options.Verbose)
+            psi.ArgumentList.Add("--verbose");
+        if (options.FullAddress)
+            psi.ArgumentList.Add("--full-address");
+        if (!options.Psk)
+            psi.ArgumentList.Add("--psk=false");
+        if (options.ForcedCommand.Count > 0)
+        {
+            psi.ArgumentList.Add("--");
+            foreach (var token in options.ForcedCommand)
+                psi.ArgumentList.Add(token);
         }
 
         // meowshell looks for a sibling file literally named "tailcat"; under
@@ -359,7 +351,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         catch
         {
             if (server is not null) await server.DisposeAsync().ConfigureAwait(false);
-            else TryKill(process);
+            else MeowshellProcessControl.TryKill(process);
             throw;
         }
     }
@@ -423,7 +415,7 @@ public sealed class MeowshellServer : IAsyncDisposable
 
             if (!_process.HasExited)
             {
-                RequestStop(_process);
+                MeowshellProcessControl.RequestStop(_process, kill, SIGTERM);
                 using var grace = new CancellationTokenSource(_options.GracePeriod);
                 try
                 {
@@ -431,7 +423,7 @@ public sealed class MeowshellServer : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
-                    TryKill(_process);
+                    MeowshellProcessControl.TryKill(_process);
                 }
             }
             _exited.TrySetResult();
@@ -441,15 +433,6 @@ public sealed class MeowshellServer : IAsyncDisposable
             _stopLock.Release();
             try { if (File.Exists(_addressFile)) File.Delete(_addressFile); } catch { /* best effort */ }
         }
-    }
-
-    private static void TryKill(Process p)
-    {
-        // Kill the tree, not just the process. On Windows meowshell stays as
-        // a parent of tailcat, so killing it alone would orphan the server;
-        // on Unix the exec means there is only one process, and asking for
-        // the tree is harmless.
-        try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { /* already gone */ }
     }
 
     /// <summary>Stops the server and releases everything it holds.</summary>
