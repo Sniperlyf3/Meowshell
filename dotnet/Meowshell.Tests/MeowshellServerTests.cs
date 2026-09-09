@@ -43,6 +43,17 @@ public sealed class MeowshellServerTests : IDisposable
     private const string PublishesAddress =
         $"printf '%s' '{FakeAddress}' > \"$TAILCAT_ADDR_FILE\"\nexec sleep 300\n";
 
+    /// <summary>A fake that records its own argv, one element per line, before publishing an address.</summary>
+    private (MeowshellOptions options, string argsFile) FakeCapturingArgv()
+    {
+        var argsFile = Path.Combine(_dir, "args-" + Guid.NewGuid().ToString("N"));
+        var script =
+            $"printf '%s\\n' \"$@\" > {argsFile}\n" +
+            $"printf '%s' '{FakeAddress}' > \"$TAILCAT_ADDR_FILE\"\n" +
+            "exec sleep 300\n";
+        return (Fake(script), argsFile);
+    }
+
     [Fact]
     public async Task StartAsync_ReturnsTheAddressTheServerPublished()
     {
@@ -152,6 +163,60 @@ public sealed class MeowshellServerTests : IDisposable
         var lines = File.ReadAllLines(seen);
         Assert.Equal(Path.Combine(options.BinaryDirectory, "libtailcat.so"), lines[0]);
         Assert.Equal(options.HomeDirectory, lines[1]);
+    }
+
+    [Fact]
+    public async Task DerpMapUrlIsPassedThrough()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(
+            options with { DerpMapUrl = "https://derp.example/map.json" });
+        Assert.Contains("--derpmap-url=https://derp.example/map.json", File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task VerboseIsPassedThrough()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(options with { Verbose = true });
+        Assert.Contains("--verbose", File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task FullAddressIsPassedThrough()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(options with { FullAddress = true });
+        Assert.Contains("--full-address", File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task DisablingPskIsPassedThrough()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(options with { Psk = false });
+        Assert.Contains("--psk=false", File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task PskLeftAtItsDefaultTrueIsNotPassedThrough()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(options);
+        Assert.DoesNotContain("--psk=false", File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task ForcedCommandIsPassedThroughAfterADoubleDash()
+    {
+        var (options, argsFile) = FakeCapturingArgv();
+        await using var server = await MeowshellServer.StartAsync(
+            options with { ForcedCommand = ["echo", "hi there"] });
+
+        var args = File.ReadAllLines(argsFile);
+        var separator = Array.IndexOf(args, "--");
+        Assert.True(separator >= 0, "no -- separator found in: " + string.Join(' ', args));
+        Assert.Equal(["echo", "hi there"], args[(separator + 1)..]);
     }
 
     [Fact]
