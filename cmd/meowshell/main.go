@@ -37,6 +37,10 @@ import (
 
 var runtimeGOOS = runtime.GOOS
 
+// runTailcatFn is the seam tests replace to capture the argv a subcommand
+// built instead of actually launching a process.
+var runTailcatFn = runTailcat
+
 const usage = `meowshell -- an interactive shell over a tailcat address
 
 USAGE
@@ -211,7 +215,7 @@ func serve(args []string) error {
 			[2]string{"MEOWSHELL_SHELL", env.Shell},
 		)
 	}
-	return runTailcat(bin, argv, setEnv(os.Environ(), vars))
+	return runTailcatFn(bin, argv, setEnv(os.Environ(), vars))
 }
 
 // splitForcedCommand splits args on the first literal "--", returning the
@@ -325,7 +329,7 @@ func connect(args []string) error {
 	}
 	argv = append(argv, "ssh")
 	argv = append(argv, fs.Args()...)
-	return runTailcat(bin, argv, os.Environ())
+	return runTailcatFn(bin, argv, os.Environ())
 }
 
 // socks runs "tailcat socks" through runTailcat rather than execing it
@@ -362,7 +366,7 @@ func socks(args []string) error {
 		argv = append(argv, "--listen="+*listen)
 	}
 	argv = append(argv, fs.Args()...)
-	return runTailcat(bin, argv, os.Environ())
+	return runTailcatFn(bin, argv, os.Environ())
 }
 
 // forward runs "tailcat forward" through runTailcat for the same reason
@@ -402,7 +406,7 @@ func forward(args []string) error {
 		argv = append(argv, "--bind="+*bind)
 	}
 	argv = append(argv, fs.Args()...)
-	return runTailcat(bin, argv, os.Environ())
+	return runTailcatFn(bin, argv, os.Environ())
 }
 
 func printEnv() error {
