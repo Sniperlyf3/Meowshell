@@ -87,7 +87,8 @@ shell server above:
 | `MeowshellServer` | `meowshell serve` | An interactive shell, an SFTP file service, or a forced command for one session — combinable (a shell plus file access), or standalone. |
 | `MeowshellSocksProxy` | `meowshell socks` | A local SOCKS5 proxy that dials out through a tailcat server. |
 | `MeowshellPortForward` | `meowshell forward` | One or more local TCP ports forwarded to a tailcat server. |
-| `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing and transfer (all four work on Android too), and (not on Android) `ssh`. |
+| `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing and transfer, and (not on Android) a console-attached `ssh` session. All work on Android too, `ssh` included via `TailcatSshSession` below. |
+| `TailcatSshSession` | `meowshell connect` | A native (no system `ssh`/`sftp` binary, on any platform) interactive pseudo-terminal session, driven programmatically — raw `Output`/`WriteAsync`, not a console. The one to use anywhere there's no real console to inherit (an Android app, most of all). |
 
 ### Why the long-lived ones go through meowshell
 
@@ -214,6 +215,39 @@ and throws `ArgumentException` up front if nothing in the call is remote,
 or if the sources and target don't all name the same server -- the same
 rule tailcat itself enforces, just reported before a process ever runs.
 
+### Interactive sessions without a console
+
+`SshAsync` is the simplest option when there's a real console to hand
+tailcat's own `ssh` client — it inherits the caller's stdio directly, the
+same as running `ssh` yourself. That doesn't work at all in a process with
+no console of its own (an Android app, most notably), and doesn't fit a
+GUI app that wants to render the session in its own terminal widget rather
+than a real OS console either way.
+
+**`TailcatSshSession`** is for both of those: native (no system `ssh`
+client involved, on any platform), giving you raw bytes instead of a
+console.
+
+```csharp
+await using var session = await TailcatSshSession.ConnectAsync(options, address);
+await session.WriteAsync("ls -la\n"u8.ToArray());
+var buffer = new byte[4096];
+int n;
+while ((n = await session.Output.ReadAsync(buffer)) > 0)
+{
+    // Feed buffer[..n] to your own terminal renderer, or just Console.Write it.
+    Console.Write(Encoding.UTF8.GetString(buffer, 0, n));
+}
+```
+
+An interactive shell (the default, no `command` argument) gets a
+pseudo-terminal, sized by `columns`/`rows` at connect time — there's no
+live resize once the session is running. Pass `command` to run something
+other than a shell, still with a pseudo-terminal unless you set
+`requestPty: false`. `Completed` faults with a `TailcatException` if the
+process dies unexpectedly, the same as the three listener types; call
+`StopAsync` (or dispose the session) to end it deliberately.
+
 ### Errors
 
 Everything that can go wrong at the process level -- a non-zero exit, or a
@@ -250,16 +284,17 @@ diagnose that without polling.
 typical Android app sandbox doesn't provide. It exists in the API on every
 platform — same class, same signature, full IntelliSense — but throws
 `PlatformNotSupportedException` specifically when running on Android,
-naming the alternative: `MeowshellServer` for shell access.
+naming the alternative: `TailcatSshSession` for a programmatic session
+there (or anywhere else you don't want SshAsync taking over your own
+console), `MeowshellServer` for shell access as the server side instead.
 
-`CpAsync` and `ListFilesAsync` both work on Android too, unchanged in the
-API: `ListFilesAsync` already spoke SFTP directly (no system binary
-involved anywhere). `CpAsync` uses the system `scp` everywhere else, but on
-Android routes through meowshell's own native SFTP `cp` instead — same
-`TailcatPath` arguments, same `TailcatResult`, no platform check needed in
-your own code. Everything else in this library, including
-`Files`/`ForcedCommand` on `MeowshellServer`, also works the same on
-Android as anywhere else.
+Everything else works on Android too, unchanged in the API: `CpAsync` uses
+the system `scp` everywhere else, but on Android routes through
+meowshell's own native SFTP `cp` instead — same `TailcatPath` arguments,
+same `TailcatResult`, no platform check needed in your own code.
+`ListFilesAsync` and `TailcatSshSession` never depended on a system binary
+anywhere to begin with. `Files`/`ForcedCommand` on `MeowshellServer` also
+work the same on Android as anywhere else.
 
 ## Packages
 

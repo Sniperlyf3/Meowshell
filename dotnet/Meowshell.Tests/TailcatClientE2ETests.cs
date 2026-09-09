@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.RegularExpressions;
 using Meowshell;
 
@@ -136,6 +137,26 @@ public sealed class TailcatClientE2ETests : IDisposable
     }
 
     /// <summary>
+    /// A malformed address fails address parsing before any network call,
+    /// so unlike most tests here this needs no live server or DERP access
+    /// -- and it's the case ConnectAsync's fail-fast timeout race exists
+    /// for: the failure has to surface as a thrown exception from
+    /// ConnectAsync itself, not just an eventually-faulted Completed the
+    /// caller happened to never await.
+    /// </summary>
+    [Fact]
+    public async Task SshSessionConnectAsyncThrowsOnAGenuinelyInvalidAddress()
+    {
+        var real = FindRealBinaries();
+        if (real is null) return; // see FindRealBinaries()
+        var (bin, _) = real.Value;
+
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => TailcatSshSession.ConnectAsync(ClientOptions(bin), "tcnotarealaddress"));
+        Assert.NotEqual(0, ex.ExitCode);
+    }
+
+    /// <summary>
     /// Starts a real server (real binaries, real network -- the default
     /// tailcat.dev DERP map) and exercises resolve/ping/ls against it
     /// through TailcatClient, the client-side counterpart to
@@ -244,5 +265,60 @@ public sealed class TailcatClientE2ETests : IDisposable
         Assert.Equal(content, await File.ReadAllTextAsync(localDest));
 
         await server.StopAsync();
+    }
+
+    /// <summary>
+    /// Opens an interactive pseudo-terminal session against a real server
+    /// and drives it entirely through TailcatSshSession's Output/WriteAsync
+    /// -- the same shape an Android app with no real console would use --
+    /// confirming a real shell prompt appears, a command's output comes
+    /// back, and exiting ends the session cleanly. Needs real network the
+    /// same way <see cref="ResolvePingAndLsAgainstARealRunningServer"/> does.
+    /// </summary>
+    [Fact]
+    public async Task SshSessionRunsAnInteractiveShellAgainstARealServer()
+    {
+        var real = FindRealBinaries();
+        if (real is null) return; // see FindRealBinaries()
+        var (bin, _) = real.Value;
+
+        var serverOptions = new MeowshellOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "ssh-server-home"),
+            WorkDirectory = Path.Combine(_dir, "ssh-server-work"),
+            InsecureNoAuth = true,
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        };
+        await using var server = await MeowshellServer.StartAsync(serverOptions);
+        Mask(server.Address);
+        var clientOptions = ClientOptions(bin);
+
+        await using var session = await TailcatSshSession.ConnectAsync(clientOptions, server.Address);
+
+        var marker = $"sshsession-e2e-{Guid.NewGuid():N}";
+        await session.WriteAsync(Encoding.UTF8.GetBytes($"echo {marker}\n"));
+        await session.WriteAsync(Encoding.UTF8.GetBytes("exit\n"));
+
+        var output = await ReadUntilAsync(session.Output, marker, TimeSpan.FromSeconds(30));
+        Assert.Contains(marker, output);
+
+        await session.Completed;
+    }
+
+    /// <summary>Reads from stream until <paramref name="marker"/> has appeared or <paramref name="timeout"/> elapses, returning everything read so far either way.</summary>
+    private static async Task<string> ReadUntilAsync(Stream stream, string marker, TimeSpan timeout)
+    {
+        var buffer = new byte[4096];
+        var text = new StringBuilder();
+        using var cts = new CancellationTokenSource(timeout);
+        while (!text.ToString().Contains(marker))
+        {
+            var read = await stream.ReadAsync(buffer, cts.Token);
+            if (read == 0) break;
+            text.Append(Encoding.UTF8.GetString(buffer, 0, read));
+        }
+        return text.ToString();
     }
 }

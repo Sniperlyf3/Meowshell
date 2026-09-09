@@ -1,3 +1,4 @@
+using System.Text;
 using Android.App;
 using Android.OS;
 using Android.Util;
@@ -65,11 +66,13 @@ public sealed class MainActivity : Activity
                 throw new InvalidOperationException("StartAsync returned an empty address");
             }
 
-            // Runs (and logs its own PROBE_CP_PASS/PROBE_CP_FAIL) before
+            // Run (and log their own PROBE_*_PASS/PROBE_*_FAIL) before
             // PROBE_PASS below: android-probe-e2e.sh's polling loop exits as
-            // soon as it sees PROBE_PASS, so that marker has to already be
-            // in logcat by then, not still pending on a fire-and-forget task.
+            // soon as it sees PROBE_PASS, so those markers have to already
+            // be in logcat by then, not still pending on a fire-and-forget
+            // task.
             await RunCpProbeAsync(options);
+            await RunSshSessionProbeAsync(options, server.Address);
 
             Log.Info(Tag, $"PROBE_PASS address_len={server.Address.Length}");
             status.Text = "PROBE_PASS";
@@ -138,6 +141,52 @@ public sealed class MainActivity : Activity
         catch (Exception ex)
         {
             Log.Error(Tag, $"PROBE_CP_FAIL {ex}");
+        }
+    }
+
+    /// <summary>
+    /// A third, independent round trip: opens an interactive pseudo-terminal
+    /// session against the shell server already running above and drives it
+    /// entirely through TailcatSshSession's Output/WriteAsync, exactly as an
+    /// app with no real console of its own would (Android has none). This is
+    /// the only way to prove TailcatSshSession's Android branch (meowshell's
+    /// own "connect", speaking SSH directly, never the system ssh this
+    /// sandbox has no room for) actually works under a real installed app's
+    /// exec constraints. Non-fatal, like RunCpProbeAsync above.
+    /// </summary>
+    private async Task RunSshSessionProbeAsync(MeowshellOptions shellOptions, string address)
+    {
+        try
+        {
+            var clientOptions = new TailcatClientOptions
+            {
+                BinaryDirectory = shellOptions.BinaryDirectory,
+                HomeDirectory = shellOptions.HomeDirectory,
+            };
+            await using var session = await TailcatSshSession.ConnectAsync(clientOptions, address);
+
+            var marker = $"ssh-probe-{Guid.NewGuid():N}";
+            await session.WriteAsync(Encoding.UTF8.GetBytes($"echo {marker}\n"));
+            await session.WriteAsync(Encoding.UTF8.GetBytes("exit\n"));
+
+            var buffer = new byte[4096];
+            var seen = new StringBuilder();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            while (!seen.ToString().Contains(marker))
+            {
+                var read = await session.Output.ReadAsync(buffer, timeout.Token);
+                if (read == 0) break;
+                seen.Append(Encoding.UTF8.GetString(buffer, 0, read));
+            }
+            if (!seen.ToString().Contains(marker))
+                throw new InvalidOperationException($"marker never appeared in the session's output ({seen.Length} chars read)");
+
+            await session.Completed;
+            Log.Info(Tag, "PROBE_SSH_PASS");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(Tag, $"PROBE_SSH_FAIL {ex}");
         }
     }
 }
