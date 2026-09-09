@@ -125,7 +125,13 @@ func connect(args []string) error {
 	session.Stderr = os.Stderr
 
 	if len(command) > 0 {
-		err = session.Run(shellQuoteJoin(command))
+		// Plain space-join, no quoting: the SSH exec request is one string
+		// regardless, and this is exactly what a real ssh client sends too
+		// (try "ssh host echo 'a b'" against any real sshd -- it receives
+		// "echo a b", not "echo 'a b'"). Quoting is the caller's own job
+		// when a single argument needs to survive as one word remotely,
+		// same as it always was.
+		err = session.Run(strings.Join(command, " "))
 	} else if err = session.Shell(); err == nil {
 		err = session.Wait()
 	}
@@ -134,16 +140,4 @@ func connect(args []string) error {
 		os.Exit(exitErr.ExitStatus())
 	}
 	return err
-}
-
-// shellQuoteJoin joins args into one string for the remote shell to
-// re-split, POSIX-single-quoting each one so spaces and shell metacharacters
-// survive the trip. Matches the exact escaping cmd/tailcat's own
-// proxyCommandJoinUnix uses for the same reason.
-func shellQuoteJoin(args []string) string {
-	quoted := make([]string, len(args))
-	for i, a := range args {
-		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'"'"'`) + "'"
-	}
-	return strings.Join(quoted, " ")
 }

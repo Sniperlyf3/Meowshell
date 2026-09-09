@@ -165,11 +165,10 @@ func TestServeArgv(t *testing.T) {
 }
 
 // connect's argv building (tailcatClientArgv) is covered by
-// TestTailcatClientArgv in cp_test.go, shared with cp; shell-quoting a
-// remote command by TestShellQuoteJoin in connect_test.go. The session
-// itself (dialing, pty allocation, exit status) has no local server to
-// dial in this package, so it's covered end-to-end against a real one by
-// dotnet/Meowshell.Tests' TailcatSshSession tests instead.
+// TestTailcatClientArgv in cp_test.go, shared with cp. The session itself
+// (dialing, pty allocation, a remote command, exit status) has no local
+// server to dial in this package, so it's covered end-to-end against a
+// real one by dotnet/Meowshell.Tests' TailcatSshSession tests instead.
 
 func TestConnectRequiresAnAddress(t *testing.T) {
 	// Fails at flag/argument validation, before findTailcat or any dial --

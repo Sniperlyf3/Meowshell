@@ -64,7 +64,7 @@ public sealed class TailcatSshSession : IAsyncDisposable
     /// </summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="destination">A tailcat address, or a DNS name carrying a "tailcat=" TXT record.</param>
-    /// <param name="command">Run this instead of an interactive shell, e.g. <c>["ls", "-la"]</c>. Each element is sent to the remote shell as one shell-quoted token.</param>
+    /// <param name="command">Run this instead of an interactive shell, e.g. <c>["ls", "-la"]</c>. Elements are joined with plain spaces, the same as a real ssh client sends a trailing command line -- no quoting is added, so an element that must survive as one word remotely (e.g. <c>["sh", "-c", "exit 42"]</c>'s last element) needs its own quotes if it contains spaces.</param>
     /// <param name="columns">Pseudo-terminal width.</param>
     /// <param name="rows">Pseudo-terminal height.</param>
     /// <param name="requestPty">Whether to allocate a pseudo-terminal. Defaults to true for an interactive shell (no <paramref name="command"/>); pass true explicitly to also get one for a command.</param>
