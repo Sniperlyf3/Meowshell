@@ -1,8 +1,10 @@
 # Meowshell (.NET library)
 
-Runs a tailcat shell server for a bounded period and shuts it down
-afterwards, so you can open a real remote shell — Android, Linux, or
-Windows — over Tailscale's data plane, without its control plane.
+A complete C# wrapper around [tailcat](https://github.com/tailscale/tailcat):
+a real remote shell, a SOCKS5 proxy, port forwarding, and one-shot key/file
+operations — Android, Linux, or Windows — over Tailscale's data plane,
+without its control plane. Start with the shell server below; the
+[full surface](#the-full-surface) covers the rest.
 
 Targets `net8.0` (plus a Android-specific build for the `net10.0-android36.0`
 target framework), with no dependencies beyond the packaged binaries below.
@@ -75,11 +77,124 @@ Set `AllowClientKeys` to your own client public key (`tailcat printpub`), so
 a leaked device key alone doesn't grant a shell — a caller needs your client
 key too.
 
+## The full surface
+
+`Meowshell` is a complete C# wrapper around tailcat's CLI, not just the
+shell server above:
+
+| Type | Wraps | Use it for |
+| --- | --- | --- |
+| `MeowshellServer` | `meowshell serve` | An interactive shell, an SFTP file service, or a forced command for one session — combinable (a shell plus file access), or standalone. |
+| `MeowshellSocksProxy` | `meowshell socks` | A local SOCKS5 proxy that dials out through a tailcat server. |
+| `MeowshellPortForward` | `meowshell forward` | One or more local TCP ports forwarded to a tailcat server. |
+| `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing, and (not on Android) `ssh`/`scp`. |
+
+### Why the long-lived ones go through meowshell
+
+`MeowshellServer`, `MeowshellSocksProxy`, and `MeowshellPortForward` all
+launch `meowshell` rather than `tailcat` directly — even a SOCKS proxy or a
+port forward, which don't need meowshell's shell-environment fix at all.
+The reason is orphan protection: before it execs `tailcat`, meowshell arms a
+parent-death signal (Linux and Android) or assigns itself to a kill-on-close
+job object (Windows), so if the host process dies without stopping the
+listener first — a crash, an OOM kill, a force-stop — the OS tears it down
+too, instead of leaving it running as an orphan. That risk exists on any
+platform, but it's most worth guarding against on Android, where the OS
+kills app processes far more readily — backgrounding, memory pressure — than
+it does on a desktop or a server. `TailcatClient`'s operations skip all of
+this and call `tailcat` directly: they're one-shot, so there's nothing left
+running afterward to orphan.
+
+### Every option
+
+**`MeowshellOptions`** (for `MeowshellServer`) — `HomeDirectory` and
+`WorkDirectory` are required; everything else has a default.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `Lifetime` | 5 minutes | How long the server may live before it shuts itself down. |
+| `AuthorizedKeys` | — | SSH key sources allowed to log in (paths, literal keys, or `user@github`). Mutually exclusive with `InsecureNoAuth`. |
+| `InsecureNoAuth` | `false` | Serve a shell to anyone holding the address, with no SSH auth — pair with `AllowClientKeys`. |
+| `AllowClientKeys` | — | Comma-separated tailcat client keys allowed to connect. |
+| `EphemeralKey` | `true` | Generate a throwaway key so the address dies with the process, instead of reusing a saved one. Ignored when `PrivateKeyJson` is set. |
+| `PrivateKeyJson` | — | A `*.private.json`'s contents, piped in on stdin rather than stored on disk. |
+| `StartTimeout` | 30s | How long to wait for the server to publish its address. |
+| `GracePeriod` | 3s | How long SIGTERM gets before SIGKILL. |
+| `DerpMapUrl` | tailcat's own default | A self-hosted, JSON-encoded DERP map to use instead. |
+| `Verbose` | `false` | tailcat's own `--verbose`. |
+| `FullAddress` | `false` | Embed the DERP server's info in the address, so a client can connect without fetching a DERP map. |
+| `Psk` | `true` | Include a WireGuard pre-shared key in the address. Only disable it for tailcat clients v0.5.0 and earlier. |
+| `Files` | — | A directory to serve over SFTP, with an optional `:ro`/`:rw`/`:wo`/`:wo+` suffix. Combinable with `AuthorizedKeys`/`InsecureNoAuth` to also serve a shell — but not together with `ForcedCommand`, which would leave the ssh service serving nothing but that one command. |
+| `ForcedCommand` | none (login shell) | Run this command for every session instead of a shell, OpenSSH-`ForceCommand`-style. The command sees `TAILCAT_PEER_KEY`, `TAILCAT_REMOTE_ADDR`, `TAILCAT_LOCAL_ADDR`. |
+
+`AuthorizedKeys`/`InsecureNoAuth`, `Files`, and `ForcedCommand` combine
+freely except for that one case above — set none of the three and
+`StartAsync` throws, since there'd be nothing to serve.
+
+**`MeowshellSocksOptions`** (for `MeowshellSocksProxy`) — `HomeDirectory` required.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `Listen` | tailcat's own default | `[address]:port` to listen on; a bare port means localhost, a bare address an OS-assigned port. |
+| `ClientKey` | tailcat's saved default | tailcat client key name or path. |
+| `DerpMapUrl` | tailcat's own default | Same as `MeowshellOptions.DerpMapUrl`. |
+| `Verbose` | `false` | Same as `MeowshellOptions.Verbose`. |
+| `GracePeriod` | 3s | Same as `MeowshellOptions.GracePeriod`. |
+
+**`MeowshellPortForwardOptions`** (for `MeowshellPortForward`) —
+`HomeDirectory`, `Address`, and `Mappings` (at least one) required.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `Mappings` | — | A bare port, `local:remote`, or `local:remote-ip:remote-port` (the server must be an exit node). Local port `0` asks the OS for a free port. |
+| `Bind` | `127.0.0.1` | Local address for a mapping that only names a port. |
+| `ClientKey` | tailcat's saved default | Same as `MeowshellSocksOptions.ClientKey`. |
+| `DerpMapUrl` | tailcat's own default | Same as `MeowshellOptions.DerpMapUrl`. |
+| `Verbose` | `false` | Same as `MeowshellOptions.Verbose`. |
+| `GracePeriod` | 3s | Same as `MeowshellOptions.GracePeriod`. |
+
+**`TailcatClientOptions`** (shared by every `TailcatClient` call) — `HomeDirectory` required.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `DerpMapUrl` | tailcat's own default | Same as `MeowshellOptions.DerpMapUrl`. |
+| `Verbose` | `false` | Same as `MeowshellOptions.Verbose`. |
+| `Timeout` | 30s | How long to wait for the command to finish before killing it. |
+
+`TailcatClient` methods: `GenerateKeyAsync`, `DeleteKeyAsync`, `ListKeysAsync`
+(`tailcat genkey`'s three modes), `ParseAsync`, `ResolveAsync`,
+`PrintPubAsync`, `PingAsync` (returns a `TailcatResult` rather than
+throwing, since e.g. `--until-direct` timing out is meaningful information,
+not an error), `ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp`
+binary involved), and `SshAsync`/`CpAsync`. `GenerateKeyAsync` takes a
+**`TailcatKeyOptions`** — `Name` required:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `Client` | `false` | Generate a client identity key (no DERP region) for an `--allow` list, instead of a server key. |
+| `Force` | `false` | Overwrite an existing key of the same name. |
+| `Region` | `auto` (nearest by latency, chosen fresh each server start) | A DERP region ID/code/substring, or comma-separated custom hostnames. |
+| `FixedRegion` | `false` | Discover the nearest region once, now, and bake it into the key. |
+| `EmbedDerpMap` | `false` | Embed the DERP map nodes in the address (implies `FixedRegion` unless `Region` names one). |
+| `Psk` | `true` | Same as `MeowshellOptions.Psk`. |
+
+### What's not available on Android
+
+`TailcatClient.SshAsync` and `CpAsync` shell out to a system `ssh`/`scp`
+client, which a typical Android app sandbox doesn't provide. Both methods
+exist in the API on every platform — same class, same signatures, full
+IntelliSense — but throw `PlatformNotSupportedException` specifically when
+running on Android, naming the alternative: `MeowshellServer` for shell
+access, `TailcatClient.ListFilesAsync` for listing files over SFTP (no
+system binary needed there). Everything else in this library, including
+`Files`/`ForcedCommand` on `MeowshellServer`, works the same on Android as
+anywhere else.
+
 ## Packages
 
 | Package | Contents |
 | --- | --- |
-| `Meowshell` | The library above: `MeowshellServer`, `MeowshellOptions`, `BinaryLocator`. |
+| `Meowshell` | Everything above: `MeowshellServer`, `MeowshellSocksProxy`, `MeowshellPortForward`, `TailcatClient`, `BinaryLocator`. |
 | `Meowshell.Runtime.linux` | `tailcat`/`meowshell` for `linux-x64`, `linux-arm64`, `linux-arm`, `linux-x86`. |
 | `Meowshell.Runtime.windows` | `tailcat.exe`/`meowshell.exe` for `win-x64`, `win-arm64`. |
 | `Meowshell.Runtime.android` | `libtailcat.so`/`libmeowshell.so` for `android-arm64`, `android-arm`, `android-x64`, `android-x86`. |
@@ -104,7 +219,5 @@ exists, silently turning a throwaway address into a permanent one.
 The deadline itself is enforced in-process, so it only fires while your app
 is alive and running its own code. If the host process is killed outright
 instead — a crash, an OOM kill, a force-stop — the OS closes the gap for
-you: on Linux and Android, tailcat is armed with `PR_SET_PDEATHSIG` and the
-kernel kills it the moment its parent disappears; on Windows, tailcat is
-assigned to a job object that the OS tears down as soon as your process's
-handles are released, which happens automatically on a crash.
+you; see [why the long-lived ones go through meowshell](#why-the-long-lived-ones-go-through-meowshell)
+above for how.
