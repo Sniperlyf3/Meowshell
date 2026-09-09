@@ -1,4 +1,5 @@
 #nullable enable
+using System.ComponentModel;
 using System.Diagnostics;
 
 namespace Meowshell;
@@ -11,6 +12,31 @@ namespace Meowshell;
 /// </summary>
 internal static class MeowshellProcessControl
 {
+    // errno ETXTBSY: Linux briefly refuses to exec a file that was just
+    // written, until the kernel (or a filesystem scanner that reopened it)
+    // finishes releasing its own handle. Only ever observed against a
+    // binary copied into place moments earlier -- an already-installed
+    // executable never hits this -- so a short bounded retry clears it
+    // without masking a real failure to start.
+    private const int ETXTBSY = 26;
+
+    /// <summary>Starts <paramref name="process"/>, retrying briefly on ETXTBSY.</summary>
+    public static void Start(Process process)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                process.Start();
+                return;
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == ETXTBSY && attempt < 5)
+            {
+                Thread.Sleep(50 * attempt);
+            }
+        }
+    }
+
     /// <summary>
     /// Asks the process to stop. Unix gets SIGTERM so tailcat can close the
     /// tunnel; Windows has no equivalent signal, so there the process is
