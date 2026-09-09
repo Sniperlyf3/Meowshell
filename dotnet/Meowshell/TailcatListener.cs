@@ -58,7 +58,7 @@ internal sealed class TailcatListener : IAsyncDisposable
     {
         process.EnableRaisingEvents = true;
         var listener = new TailcatListener(process, gracePeriod);
-        process.Start();
+        MeowshellProcessControl.Start(process);
         if (OperatingSystem.IsWindows())
         {
             listener._job = JobObject.Wrap(process);

@@ -88,7 +88,8 @@ public static class TailcatClient
         var psi = Prepare(options);
         foreach (var a in args) psi.ArgumentList.Add(a);
 
-        using var process = Process.Start(psi)!;
+        using var process = new Process { StartInfo = psi };
+        MeowshellProcessControl.Start(process);
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(options.Timeout);
