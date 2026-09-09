@@ -216,6 +216,7 @@ public sealed class MeowshellServer : IAsyncDisposable
     private readonly TaskCompletionSource _exited =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _stopLock = new(1, 1);
+    private readonly TailcatDiagnostics _diagnostics = new();
     private bool _stopped;
     // Windows-only crash backstop: if the host process dies without running
     // StopAsync, closing this handle is what stops tailcat surviving as an
@@ -233,7 +234,13 @@ public sealed class MeowshellServer : IAsyncDisposable
     public TimeSpan Remaining =>
         ExpiresAt - DateTimeOffset.UtcNow is { Ticks: > 0 } t ? t : TimeSpan.Zero;
 
-    /// <summary>Completes when the server process has exited, however it ended.</summary>
+    /// <summary>
+    /// Completes when the server process has exited. Succeeds after a
+    /// <see cref="StopAsync"/> call or the deadline; faults with a
+    /// <see cref="TailcatException"/> if the process dies on its own first
+    /// (a crash, an OOM kill), so awaiting this is enough to notice and
+    /// diagnose that without polling.
+    /// </summary>
     public Task Completed => _exited.Task;
 
     /// <summary>Diagnostic output from tailcat. Raised on a background thread.</summary>
@@ -267,6 +274,7 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// command on the ssh/no-auth-ssh service.
     /// </exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
+    /// <exception cref="TailcatException">tailcat exited before publishing an address.</exception>
     /// <exception cref="TimeoutException">No address appeared within <see cref="MeowshellOptions.StartTimeout"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
@@ -366,9 +374,26 @@ public sealed class MeowshellServer : IAsyncDisposable
                 process.StandardInput.Close();
             }
 
-            process.Exited += (_, _) => server._exited.TrySetResult();
+            process.Exited += async (_, _) =>
+            {
+                // Exited can fire before the async reads behind
+                // BeginErrorReadLine finish delivering the last lines;
+                // WaitForExitAsync (unlike the Exited event itself) is
+                // documented to synchronize with that, so _diagnostics is
+                // complete by the time this reads it.
+                await process.WaitForExitAsync().ConfigureAwait(false);
+                if (server._stopped) server._exited.TrySetResult();
+                else server._exited.TrySetException(new TailcatException(
+                    "tailcat exited unexpectedly", process.ExitCode, server._diagnostics.Tail()));
+            };
             process.OutputDataReceived += (_, e) => { if (e.Data is not null) { server.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
-            process.ErrorDataReceived += (_, e) => { if (e.Data is not null) { server.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                server._diagnostics.Add(e.Data);
+                server.Log?.Invoke(e.Data);
+                onLog?.Invoke(e.Data);
+            };
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -404,8 +429,11 @@ public sealed class MeowshellServer : IAsyncDisposable
             }
             if (_process.HasExited)
             {
-                throw new InvalidOperationException(
-                    $"tailcat exited with code {_process.ExitCode} before publishing an address");
+                // See the Exited handler in StartAsync for why this is
+                // needed before _diagnostics can be trusted as complete.
+                await _process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                throw new TailcatException(
+                    "tailcat exited before publishing an address", _process.ExitCode, _diagnostics.Tail());
             }
             try
             {

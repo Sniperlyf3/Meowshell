@@ -12,14 +12,14 @@ public sealed class MeowshellPortForwardTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Writes stand-in binaries whose "meowshell" records its own argv, one element per line, then stays up.</summary>
-    private (MeowshellPortForwardOptions options, string argsFile) Fake()
+    /// <summary>Writes stand-in binaries whose "meowshell" records its own argv, one element per line, then runs <paramref name="script"/> (default: stay up).</summary>
+    private (MeowshellPortForwardOptions options, string argsFile) Fake(string script = "exec sleep 300\n")
     {
         var bin = Path.Combine(_dir, "bin");
         Directory.CreateDirectory(bin);
         var argsFile = Path.Combine(_dir, "args-" + Guid.NewGuid().ToString("N"));
         var shell = Path.Combine(bin, "libmeowshell.so");
-        File.WriteAllText(shell, $"#!/bin/bash\nprintf '%s\\n' \"$@\" > {argsFile}\nexec sleep 300\n");
+        File.WriteAllText(shell, $"#!/bin/bash\nprintf '%s\\n' \"$@\" > {argsFile}\n" + script);
         File.SetUnixFileMode(shell, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
         var cat = Path.Combine(bin, "libtailcat.so");
         File.WriteAllText(cat, "#!/bin/bash\ntrue\n");
@@ -91,5 +91,16 @@ public sealed class MeowshellPortForwardTests : IDisposable
         var (options, _) = Fake();
         var missing = options with { BinaryDirectory = Path.Combine(_dir, "nope") };
         await Assert.ThrowsAsync<FileNotFoundException>(() => MeowshellPortForward.StartAsync(missing));
+    }
+
+    [Fact]
+    public async Task CompletedFaultsWhenForwardingCrashesOnItsOwn()
+    {
+        var (options, _) = Fake("sleep 0.2\necho 'listen: address already in use' >&2\nexit 1\n");
+        await using var forward = await MeowshellPortForward.StartAsync(options);
+
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => forward.Completed);
+        Assert.Equal(1, ex.ExitCode);
+        Assert.Contains("address already in use", ex.Diagnostics);
     }
 }

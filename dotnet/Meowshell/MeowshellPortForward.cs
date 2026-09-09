@@ -67,10 +67,15 @@ public sealed class MeowshellPortForward : IAsyncDisposable
     private readonly TaskCompletionSource _exited =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _stopLock = new(1, 1);
+    private readonly TailcatDiagnostics _diagnostics = new();
     private JobObject? _job;
     private bool _stopped;
 
-    /// <summary>Completes when the process has exited, however it ended.</summary>
+    /// <summary>
+    /// Completes when the process has exited. Succeeds after a
+    /// <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/>
+    /// if the process dies on its own first.
+    /// </summary>
     public Task Completed => _exited.Task;
 
     /// <summary>
@@ -130,9 +135,25 @@ public sealed class MeowshellPortForward : IAsyncDisposable
             if (OperatingSystem.IsWindows())
                 forward._job = JobObject.Wrap(process);
 
-            process.Exited += (_, _) => forward._exited.TrySetResult();
+            process.Exited += async (_, _) =>
+            {
+                // See MeowshellServer's own Exited handler for why
+                // WaitForExitAsync has to run before _diagnostics is safe
+                // to read: Exited can fire before BeginErrorReadLine's
+                // async reads finish delivering the last lines.
+                await process.WaitForExitAsync().ConfigureAwait(false);
+                if (forward._stopped) forward._exited.TrySetResult();
+                else forward._exited.TrySetException(new TailcatException(
+                    "tailcat exited unexpectedly", process.ExitCode, forward._diagnostics.Tail()));
+            };
             process.OutputDataReceived += (_, e) => { if (e.Data is not null) { forward.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
-            process.ErrorDataReceived += (_, e) => { if (e.Data is not null) { forward.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                forward._diagnostics.Add(e.Data);
+                forward.Log?.Invoke(e.Data);
+                onLog?.Invoke(e.Data);
+            };
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             return forward;

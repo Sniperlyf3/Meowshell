@@ -1,6 +1,7 @@
 #nullable enable
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 
 namespace Meowshell;
 
@@ -121,10 +122,19 @@ public static class TailcatClient
             (await stderrTask.ConfigureAwait(false)).Trim());
     }
 
+    /// <summary>Builds the exception for a non-zero exit, carrying tailcat's own stderr.</summary>
+    private static TailcatException Failure(string command, TailcatResult result) =>
+        new($"tailcat {command} failed", result.ExitCode, result.Stderr);
+
+    /// <summary>Builds the exception for output that doesn't match the shape this method expects, despite a zero exit.</summary>
+    private static TailcatException UnexpectedOutput(string command, string detail) =>
+        new($"unexpected output from tailcat {command}", exitCode: 0, detail);
+
     /// <summary>
-    /// Generates a key and returns its tailcat address.
+    /// Generates a key and returns its tailcat address (or, for a
+    /// <see cref="TailcatKeyOptions.Client"/> key, its public key).
     /// </summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
+    /// <exception cref="TailcatException">tailcat exited non-zero, or printed something other than the expected address/public key.</exception>
     public static async Task<string> GenerateKeyAsync(TailcatClientOptions options, TailcatKeyOptions key)
     {
         var args = new List<string> { "genkey", $"--key={key.Name}" };
@@ -136,75 +146,90 @@ public static class TailcatClient
         if (!key.Psk) args.Add("--psk=false");
 
         var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat genkey failed (exit {result.ExitCode}): {result.Stderr}");
+        if (!result.Success) throw Failure("genkey", result);
         // genkey's last line of stdout is the address (earlier lines can
         // include a "# wrote file to ..." notice); client keys print only
         // the public key, on their own single line.
         var lines = result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (lines.Length == 0)
-            throw new InvalidOperationException("tailcat genkey printed nothing");
-        return lines[^1];
+            throw UnexpectedOutput("genkey", "printed nothing");
+        var last = lines[^1];
+        var wantPrefix = key.Client ? "nodekey:" : "tc";
+        if (!last.StartsWith(wantPrefix, StringComparison.Ordinal))
+            throw UnexpectedOutput("genkey", $"expected {(key.Client ? "a public key (\"nodekey:...\")" : "a tailcat address (\"tc...\")")}, got: {last}");
+        return last;
     }
 
     /// <summary>Deletes a saved key.</summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
+    /// <exception cref="TailcatException">tailcat exited non-zero.</exception>
     public static async Task DeleteKeyAsync(TailcatClientOptions options, string name)
     {
         var result = await RunAsync(options, "genkey", $"--key={name}", "--delete").ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat genkey --delete failed (exit {result.ExitCode}): {result.Stderr}");
+        if (!result.Success) throw Failure("genkey --delete", result);
     }
 
     /// <summary>Lists saved key names.</summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
+    /// <exception cref="TailcatException">tailcat exited non-zero.</exception>
     public static async Task<IReadOnlyList<string>> ListKeysAsync(TailcatClientOptions options)
     {
         var result = await RunAsync(options, "genkey", "--list").ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat genkey --list failed (exit {result.ExitCode}): {result.Stderr}");
+        if (!result.Success) throw Failure("genkey --list", result);
         return result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
-    /// <summary>Decodes a tailcat address, returning its fields as JSON. Parse and interpret with <c>System.Text.Json</c> as needed.</summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero (e.g. an invalid address).</exception>
-    public static async Task<string> ParseAsync(TailcatClientOptions options, string address)
+    /// <summary>Decodes a tailcat address into the fields it actually carries.</summary>
+    /// <exception cref="TailcatException">tailcat exited non-zero (e.g. an invalid address), or its JSON didn't match the expected shape.</exception>
+    public static async Task<TailcatParsedAddress> ParseAsync(TailcatClientOptions options, TailcatAddress address)
     {
         var result = await RunAsync(options, "parse", address).ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat parse failed (exit {result.ExitCode}): {result.Stderr}");
-        return result.Stdout;
+        if (!result.Success) throw Failure("parse", result);
+        try
+        {
+            return JsonSerializer.Deserialize<TailcatParsedAddress>(result.Stdout)
+                ?? throw UnexpectedOutput("parse", "printed \"null\"");
+        }
+        catch (JsonException ex)
+        {
+            throw UnexpectedOutput("parse", $"couldn't parse its JSON ({ex.Message}): {result.Stdout}");
+        }
     }
 
     /// <summary>Expands a short tailcat address to embed its DERP server info, so a client can connect without fetching a DERP map.</summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
-    public static async Task<string> ResolveAsync(TailcatClientOptions options, string address)
+    /// <param name="options">Where the binaries live and how to reach the server.</param>
+    /// <param name="address">A tailcat address, or a DNS name carrying a "tailcat=" TXT record.</param>
+    /// <exception cref="TailcatException">tailcat exited non-zero, or didn't print a tailcat address.</exception>
+    public static async Task<TailcatAddress> ResolveAsync(TailcatClientOptions options, string address)
     {
         var result = await RunAsync(options, "resolve", address).ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat resolve failed (exit {result.ExitCode}): {result.Stderr}");
-        return result.Stdout;
+        if (!result.Success) throw Failure("resolve", result);
+        if (!result.Stdout.StartsWith("tc", StringComparison.Ordinal))
+            throw UnexpectedOutput("resolve", $"expected a tailcat address, got: {result.Stdout}");
+        return new TailcatAddress(result.Stdout);
     }
 
     /// <summary>Prints the public key of the client key that would be used (the saved "client-default" key, or one named by <paramref name="clientKey"/>).</summary>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
+    /// <exception cref="TailcatException">tailcat exited non-zero, or didn't print a public key.</exception>
     public static async Task<string> PrintPubAsync(TailcatClientOptions options, string? clientKey = null)
     {
         var args = new List<string> { "printpub" };
         if (!string.IsNullOrEmpty(clientKey)) args.Insert(0, $"--key={clientKey}");
         var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat printpub failed (exit {result.ExitCode}): {result.Stderr}");
+        if (!result.Success) throw Failure("printpub", result);
+        if (!result.Stdout.StartsWith("nodekey:", StringComparison.Ordinal))
+            throw UnexpectedOutput("printpub", $"expected a public key (\"nodekey:...\"), got: {result.Stdout}");
         return result.Stdout;
     }
 
     /// <summary>
-    /// Pings a server, reporting whether each pong arrived via DERP or a
+    /// Pings a server, reporting whether the pong arrived via DERP or a
     /// direct path. Does not throw on a non-zero exit (e.g.
     /// <paramref name="untilDirect"/> timing out without going direct) --
-    /// check <see cref="TailcatResult.Success"/>.
+    /// check <see cref="TailcatPingResult.Success"/>. <see cref="TailcatPingResult.Pong"/>
+    /// carries the most recent parsed pong either way, since a timed-out
+    /// <paramref name="untilDirect"/> attempt can still have printed
+    /// several relayed pongs before giving up.
     /// </summary>
-    public static Task<TailcatResult> PingAsync(
+    public static async Task<TailcatPingResult> PingAsync(
         TailcatClientOptions options, string address, bool untilDirect = false, TimeSpan? timeout = null)
     {
         var args = new List<string> { "ping" };
@@ -214,23 +239,24 @@ public static class TailcatClient
         // always valid for it, fractional or not.
         if (timeout is { } t) args.Add($"--timeout={t.TotalSeconds.ToString(CultureInfo.InvariantCulture)}s");
         args.Add(address);
-        return RunAsync(options, [.. args]);
+        var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
+        return TailcatPingResult.From(result);
     }
 
     /// <summary>Lists files on a tailcat server (a "files" service, or the home directory of an ssh/no-auth-ssh one), over SFTP directly -- no ssh or sftp binary is involved.</summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="target">A tailcat address, optionally suffixed <c>:path</c>.</param>
     /// <param name="longListing">Include permissions, size, and modification time.</param>
-    /// <exception cref="InvalidOperationException">tailcat exited non-zero.</exception>
-    public static async Task<string> ListFilesAsync(TailcatClientOptions options, string target, bool longListing = false)
+    /// <exception cref="TailcatException">tailcat exited non-zero, or a line didn't match the expected shape.</exception>
+    public static async Task<IReadOnlyList<TailcatFileEntry>> ListFilesAsync(
+        TailcatClientOptions options, string target, bool longListing = false)
     {
         var args = new List<string> { "ls" };
         if (longListing) args.Add("-l");
         args.Add(target);
         var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
-        if (!result.Success)
-            throw new InvalidOperationException($"tailcat ls failed (exit {result.ExitCode}): {result.Stderr}");
-        return result.Stdout;
+        if (!result.Success) throw Failure("ls", result);
+        return TailcatFileEntry.ParseAll(result.Stdout, longListing);
     }
 
     /// <summary>

@@ -162,12 +162,16 @@ freely except for that one case above — set none of the three and
 | `Timeout` | 30s | How long to wait for the command to finish before killing it. |
 
 `TailcatClient` methods: `GenerateKeyAsync`, `DeleteKeyAsync`, `ListKeysAsync`
-(`tailcat genkey`'s three modes), `ParseAsync`, `ResolveAsync`,
-`PrintPubAsync`, `PingAsync` (returns a `TailcatResult` rather than
-throwing, since e.g. `--until-direct` timing out is meaningful information,
-not an error), `ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp`
-binary involved), and `SshAsync`/`CpAsync`. `GenerateKeyAsync` takes a
-**`TailcatKeyOptions`** — `Name` required:
+(`tailcat genkey`'s three modes), `ParseAsync` (returns a typed
+`TailcatParsedAddress`, not raw JSON), `ResolveAsync` (returns a
+`TailcatAddress`), `PrintPubAsync`, `PingAsync` (returns a
+`TailcatPingResult` — its `Pong` is the parsed "pong in ... via ..." line
+when tailcat printed one, and `Success` doesn't throw on its own, since
+e.g. `--until-direct` timing out is meaningful information, not an error),
+`ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp` binary
+involved — returns typed `TailcatFileEntry` records, not raw text), and
+`SshAsync`/`CpAsync`. `GenerateKeyAsync` takes a **`TailcatKeyOptions`** —
+`Name` required:
 
 | Option | Default | What it does |
 | --- | --- | --- |
@@ -177,6 +181,36 @@ binary involved), and `SshAsync`/`CpAsync`. `GenerateKeyAsync` takes a
 | `FixedRegion` | `false` | Discover the nearest region once, now, and bake it into the key. |
 | `EmbedDerpMap` | `false` | Embed the DERP map nodes in the address (implies `FixedRegion` unless `Region` names one). |
 | `Psk` | `true` | Same as `MeowshellOptions.Psk`. |
+
+### Errors
+
+Everything that can go wrong at the process level -- a non-zero exit, or a
+zero exit with output that doesn't match the shape this library parses --
+comes back as one type, `TailcatException`, carrying `ExitCode` and
+`Diagnostics` (tailcat's own captured stderr, or a description of the
+unexpected output). Its `Message` already includes `Diagnostics`, so
+catching it is normally enough to know what went wrong, with no need to
+subscribe to a `Log` event or inspect a process yourself:
+
+```csharp
+try
+{
+    await using var server = await MeowshellServer.StartAsync(options);
+    await server.Completed;
+}
+catch (TailcatException ex)
+{
+    Console.WriteLine($"tailcat failed ({ex.ExitCode}): {ex.Diagnostics}");
+}
+```
+
+`MeowshellServer`, `MeowshellSocksProxy`, and `MeowshellPortForward` all
+capture their process's stderr internally for this, whether or not
+anything is subscribed to `Log`. Their `Completed` task reflects it too:
+it completes successfully after a `StopAsync` call or the deadline, but
+faults with a `TailcatException` if the process dies on its own first --
+a crash, an OOM kill -- so awaiting `Completed` is enough to notice and
+diagnose that without polling.
 
 ### What's not available on Android
 
