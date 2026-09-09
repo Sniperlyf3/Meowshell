@@ -125,6 +125,17 @@ public sealed record MeowshellOptions
     public bool Psk { get; init; } = true;
 
     /// <summary>
+    /// Directory to serve to SFTP clients (scp, sftp), with an optional
+    /// <c>:ro</c> (read-only, the default), <c>:rw</c>, <c>:wo</c> (flat
+    /// write-only drop box), or <c>:wo+</c> (recursive write-only drop box)
+    /// suffix. Combinable with <see cref="AuthorizedKeys"/> or
+    /// <see cref="InsecureNoAuth"/> to also serve a shell, but not with
+    /// <see cref="ForcedCommand"/> on either of those, which would allow
+    /// nothing but that command. Passed to tailcat's own <c>--files</c>.
+    /// </summary>
+    public string? Files { get; init; }
+
+    /// <summary>
     /// Run this command for every session instead of a login shell, like
     /// OpenSSH's ForceCommand: the client gets no shell, no client-chosen
     /// command, and no SFTP subsystem. The command sees the peer's node key
@@ -250,16 +261,32 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// the caller on that path, so without this there is nothing to attach
     /// a subscriber to.
     /// </param>
-    /// <exception cref="ArgumentException">Neither or both authentication modes were set.</exception>
+    /// <exception cref="ArgumentException">
+    /// Both authentication modes were set, nothing was chosen to serve, or
+    /// <see cref="MeowshellOptions.Files"/> was combined with a forced
+    /// command on the ssh/no-auth-ssh service.
+    /// </exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
     /// <exception cref="TimeoutException">No address appeared within <see cref="MeowshellOptions.StartTimeout"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
-        if (string.IsNullOrEmpty(options.AuthorizedKeys) == !options.InsecureNoAuth)
+        var hasSSH = !string.IsNullOrEmpty(options.AuthorizedKeys) || options.InsecureNoAuth;
+        if (!string.IsNullOrEmpty(options.AuthorizedKeys) && options.InsecureNoAuth)
         {
             throw new ArgumentException(
-                "Set exactly one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
+                "Set at most one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
+        }
+        if (!hasSSH && string.IsNullOrEmpty(options.Files) && options.ForcedCommand.Count == 0)
+        {
+            throw new ArgumentException(
+                "Set at least one of AuthorizedKeys, InsecureNoAuth, Files, or ForcedCommand.", nameof(options));
+        }
+        if (!string.IsNullOrEmpty(options.Files) && hasSSH && options.ForcedCommand.Count > 0)
+        {
+            throw new ArgumentException(
+                "Files cannot be combined with a ForcedCommand on the ssh/no-auth-ssh service, which would allow nothing but that command.",
+                nameof(options));
         }
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
@@ -280,7 +307,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         psi.ArgumentList.Add("serve");
         if (options.InsecureNoAuth)
             psi.ArgumentList.Add("--insecure-no-auth");
-        else
+        else if (!string.IsNullOrEmpty(options.AuthorizedKeys))
             psi.ArgumentList.Add($"--authorized-keys={options.AuthorizedKeys}");
         if (!string.IsNullOrEmpty(options.AllowClientKeys))
             psi.ArgumentList.Add($"--allow={options.AllowClientKeys}");
@@ -301,6 +328,8 @@ public sealed class MeowshellServer : IAsyncDisposable
             psi.ArgumentList.Add("--full-address");
         if (!options.Psk)
             psi.ArgumentList.Add("--psk=false");
+        if (!string.IsNullOrEmpty(options.Files))
+            psi.ArgumentList.Add($"--files={options.Files}");
         if (options.ForcedCommand.Count > 0)
         {
             psi.ArgumentList.Add("--");

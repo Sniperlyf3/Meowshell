@@ -129,18 +129,20 @@ func serve(args []string) error {
 	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	fullAddress := fs.Bool("full-address", false, "print a longer tailcat address with embedded DERP server info, so clients can connect without a DERP map fetch. Passed to tailcat's own --full-address")
 	psk := fs.Bool("psk", true, "include a WireGuard pre-shared key in the tailcat address (recommended; disabling weakens security). Passed to tailcat's own --psk")
+	files := fs.String("files", "", "directory to serve to SFTP clients (scp, sftp), with an optional :ro (read-only, the default), :rw, :wo (flat write-only drop box), or :wo+ (recursive write-only drop box) suffix. Can be combined with --authorized-keys/--insecure-no-auth to also serve a shell. Passed to tailcat's own --files")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 
-	// Refuse to hand out a shell by accident: one of the two auth
-	// choices has to be made explicitly.
+	hasSSH := *authKeys != "" || *noAuth
 	switch {
-	case *authKeys == "" && !*noAuth:
-		return fmt.Errorf("choose an authentication mode: --authorized-keys=<sources>, or --insecure-no-auth to rely on the address alone")
 	case *authKeys != "" && *noAuth:
 		return fmt.Errorf("--authorized-keys and --insecure-no-auth are mutually exclusive")
+	case !hasSSH && *files == "" && len(command) == 0:
+		return fmt.Errorf("choose what to serve: --authorized-keys=<sources>, --insecure-no-auth, --files=<dir>, or a command after --")
+	case *files != "" && hasSSH && len(command) > 0:
+		return fmt.Errorf("--files cannot be combined with a forced command on the ssh/no-auth-ssh service, which would allow nothing but that command")
 	}
 
 	if *keyStdin && *key != "" {
@@ -170,11 +172,10 @@ func serve(args []string) error {
 	if *noAuth && *allow == "" {
 		fmt.Fprintln(os.Stderr, "# warning: --insecure-no-auth without --allow gives a shell to anyone who learns this address")
 	}
-
-	service := "ssh"
-	if *noAuth {
-		service = "no-auth-ssh"
+	if *files != "" && *allow == "" {
+		fmt.Fprintln(os.Stderr, "# warning: --files without --allow serves files to anyone who learns this address")
 	}
+
 	argv := []string{bin, "serve"}
 	if *allow != "" {
 		argv = append(argv, "--allow="+*allow)
@@ -197,7 +198,16 @@ func serve(args []string) error {
 	if !*psk {
 		argv = append(argv, "--psk=false")
 	}
-	argv = append(argv, service)
+	if *files != "" {
+		argv = append(argv, "--files="+*files)
+	}
+	if hasSSH {
+		service := "ssh"
+		if *noAuth {
+			service = "no-auth-ssh"
+		}
+		argv = append(argv, service)
+	}
 	if len(command) > 0 {
 		argv = append(argv, "--")
 		argv = append(argv, command...)
