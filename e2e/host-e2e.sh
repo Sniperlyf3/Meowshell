@@ -63,7 +63,7 @@ assert_grep "meowshell found tailcat via TAILCAT_BIN" "^tailcat /" "$env_out"
 
 # The explicit flag must work without the environment variable.
 flag_out=$(env -u TAILCAT_BIN "$MEOWSHELL" serve --tailcat="$TAILCAT" 2>&1 || true)
-assert_grep "--tailcat is accepted" "authentication mode" "$flag_out"
+assert_grep "--tailcat is accepted" "choose what to serve" "$flag_out"
 bad_out=$(env -u TAILCAT_BIN "$MEOWSHELL" serve --insecure-no-auth --tailcat=/nope 2>&1 || true)
 assert_grep "--tailcat rejects a missing binary" "not an executable" "$bad_out"
 

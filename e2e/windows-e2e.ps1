@@ -53,9 +53,9 @@ try {
     $envOut -split "`n" | ForEach-Object { if ($_.Trim()) { Write-Host "      $($_.TrimEnd())" } }
     Assert-Match 'meowshell found tailcat' 'tailcat\s+\w:' $envOut
 
-    Write-Host '== 2. authentication is not optional =='
+    Write-Host '== 2. serve requires something to serve =='
     $noAuth = (& $meowshell serve 2>&1 | Out-String)
-    Assert-Match 'serve refuses to run without an auth mode' 'authentication mode' $noAuth
+    Assert-Match 'serve refuses to run with nothing selected' 'choose what to serve' $noAuth
     $both = (& $meowshell serve --insecure-no-auth --authorized-keys=x 2>&1 | Out-String)
     Assert-Match 'the two auth modes are exclusive' 'mutually exclusive' $both
 
