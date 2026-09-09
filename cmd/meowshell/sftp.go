@@ -77,11 +77,14 @@ func (pipeAddr) String() string  { return "tailcat" }
 // from tailcatClientArgv) and speaks SSH directly over its stdin/stdout --
 // no system ssh binary involved, which is what makes this work in an
 // Android app sandbox (and piped into from anywhere else with no real
-// terminal attached at all). The server accepts the SSH "none" auth method
-// unconditionally: tailcat's own WireGuard peer handshake, keyed by the
-// address, already established who is connecting, the same trust tailcat's
-// own native "ls" subcommand relies on. Closing the returned client also
-// tears down the subprocess.
+// terminal attached at all). A "no-auth-ssh" or "files" service accepts
+// SSH's "none" auth method (always tried first) on tailcat's own
+// WireGuard-peer trust alone, the same trust tailcat's own native "ls"
+// subcommand relies on -- but a plain "ssh" service configured with
+// --ssh-authorized-keys requires real SSH public-key auth on top of that,
+// which sshAgentAuthMethods offers from the local ssh-agent when one is
+// running (matching what a real ssh client does automatically). Closing
+// the returned client also tears down the subprocess.
 func dialSSHClient(tailcatBin string, argv []string) (*ssh.Client, error) {
 	cmd := exec.Command(tailcatBin, argv...)
 	cmd.Stderr = os.Stderr
@@ -100,6 +103,7 @@ func dialSSHClient(tailcatBin string, argv []string) (*ssh.Client, error) {
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, "tailcat", &ssh.ClientConfig{
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth:            sshAgentAuthMethods(),
 	})
 	if err != nil {
 		conn.Close()
