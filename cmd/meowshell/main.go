@@ -14,6 +14,11 @@
 // itself as $SHELL, so tailcat launches meowshell rather than the real
 // shell; invoked that way (with -l or -c) meowshell repairs PATH, TERM and
 // LANG in the session's own environment and execs the real shell.
+//
+// Every subcommand runs tailcat through runTailcat, which also arms a
+// parent-death watchdog (exec_unix.go, exec_windows.go). That matters most
+// for serve, socks and forward: each is a long-lived listener that would
+// otherwise survive an orphaning host process indefinitely.
 package main
 
 import (
@@ -26,17 +31,28 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
 var runtimeGOOS = runtime.GOOS
 
+// runTailcatFn is the seam tests replace to capture the argv a subcommand
+// built instead of actually launching a process.
+var runTailcatFn = runTailcat
+
 const usage = `meowshell -- an interactive shell over a tailcat address
 
 USAGE
-  meowshell serve [flags] [-- <extra tailcat args>...]
-  meowshell connect [flags] <tc-addr> [-- <extra tailcat args>...]
+  meowshell serve [flags] [-- <command> [args...]]
+  meowshell connect [flags] <tc-addr>
+  meowshell socks [flags]
+  meowshell forward [flags] <tc-addr> <mapping> [<mapping> ...]
   meowshell env
+
+A command after "--" replaces the login shell for every session (like
+OpenSSH's ForceCommand), passed straight through to tailcat's own "serve
+... -- <command>".
 
 Serve a shell, trusting SSH public keys fetched from GitHub:
 
@@ -80,6 +96,10 @@ func main() {
 		err = serve(os.Args[2:])
 	case "connect":
 		err = connect(os.Args[2:])
+	case "socks":
+		err = socks(os.Args[2:])
+	case "forward":
+		err = forward(os.Args[2:])
 	case "env":
 		err = printEnv()
 	case "-h", "--help", "help":
@@ -96,6 +116,8 @@ func main() {
 }
 
 func serve(args []string) error {
+	rest, command := splitForcedCommand(args)
+
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	authKeys := fs.String("authorized-keys", "", "SSH public key sources permitted to log in: authorized_keys paths, literal key lines, or names like 'alice@github'. Passed to tailcat's --ssh-authorized-keys")
 	noAuth := fs.Bool("insecure-no-auth", false, "serve a shell to anyone holding the tailcat address, with no SSH authentication. Pair it with --allow")
@@ -103,8 +125,12 @@ func serve(args []string) error {
 	key := fs.String("key", "", "tailcat server key name or path (see 'tailcat genkey')")
 	keyStdin := fs.Bool("key-stdin", false, "read the server key (the contents of a *.private.json) from stdin, and hand it to tailcat without it ever existing as a named file")
 	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
+	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve or auto-select a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
+	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
+	fullAddress := fs.Bool("full-address", false, "print a longer tailcat address with embedded DERP server info, so clients can connect without a DERP map fetch. Passed to tailcat's own --full-address")
+	psk := fs.Bool("psk", true, "include a WireGuard pre-shared key in the tailcat address (recommended; disabling weakens security). Passed to tailcat's own --psk")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 
@@ -159,8 +185,23 @@ func serve(args []string) error {
 	if *authKeys != "" {
 		argv = append(argv, "--ssh-authorized-keys="+*authKeys)
 	}
+	if *derpMapURL != "" {
+		argv = append(argv, "--derpmap-url="+*derpMapURL)
+	}
+	if *verbose {
+		argv = append(argv, "--verbose")
+	}
+	if *fullAddress {
+		argv = append(argv, "--full-address")
+	}
+	if !*psk {
+		argv = append(argv, "--psk=false")
+	}
 	argv = append(argv, service)
-	argv = append(argv, fs.Args()...)
+	if len(command) > 0 {
+		argv = append(argv, "--")
+		argv = append(argv, command...)
+	}
 
 	// tailcat reads SHELL for the login shell, and HOME/USER through
 	// user.Current. Setting SHELL to this binary is what gets the shim
@@ -174,7 +215,22 @@ func serve(args []string) error {
 			[2]string{"MEOWSHELL_SHELL", env.Shell},
 		)
 	}
-	return runTailcat(bin, argv, setEnv(os.Environ(), vars))
+	return runTailcatFn(bin, argv, setEnv(os.Environ(), vars))
+}
+
+// splitForcedCommand splits args on the first literal "--", returning the
+// flags before it and the command after it. tailcat's own serve subcommand
+// takes this to mean "run this command instead of a shell, for every
+// session" (or, without ssh/no-auth-ssh, a standalone exec service); passed
+// through unexamined. Go's flag package would otherwise consume a leading
+// "--" itself while still parsing flags, dropping the marker tailcat needs
+// to see.
+func splitForcedCommand(args []string) (rest, command []string) {
+	i := slices.Index(args, "--")
+	if i < 0 {
+		return args, nil
+	}
+	return args[:i], args[i+1:]
 }
 
 // validateKey rejects input that is not a tailcat private key, so a bad
@@ -247,6 +303,8 @@ func connect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	key := fs.String("key", "", "tailcat client key name or path")
 	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
+	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
+	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -263,9 +321,92 @@ func connect(args []string) error {
 	if *key != "" {
 		argv = append(argv, "--key="+*key)
 	}
+	if *derpMapURL != "" {
+		argv = append(argv, "--derpmap-url="+*derpMapURL)
+	}
+	if *verbose {
+		argv = append(argv, "--verbose")
+	}
 	argv = append(argv, "ssh")
 	argv = append(argv, fs.Args()...)
-	return runTailcat(bin, argv, os.Environ())
+	return runTailcatFn(bin, argv, os.Environ())
+}
+
+// socks runs "tailcat socks" through runTailcat rather than execing it
+// directly, so its parent-death watchdog (see exec_unix.go/exec_windows.go)
+// covers this long-lived proxy the same way it covers serve.
+func socks(args []string) error {
+	fs := flag.NewFlagSet("socks", flag.ExitOnError)
+	key := fs.String("key", "", "tailcat client key name or path")
+	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
+	listen := fs.String("listen", "", "SOCKS5 proxy listen [address]:port; a bare port means localhost, a bare address means an OS-assigned port. Passed to tailcat's own --listen")
+	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
+	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	bin, err := findTailcat(*tailcatBin)
+	if err != nil {
+		return err
+	}
+	argv := []string{bin}
+	if *key != "" {
+		argv = append(argv, "--key="+*key)
+	}
+	if *derpMapURL != "" {
+		argv = append(argv, "--derpmap-url="+*derpMapURL)
+	}
+	if *verbose {
+		argv = append(argv, "--verbose")
+	}
+	argv = append(argv, "socks")
+	if *listen != "" {
+		argv = append(argv, "--listen="+*listen)
+	}
+	argv = append(argv, fs.Args()...)
+	return runTailcatFn(bin, argv, os.Environ())
+}
+
+// forward runs "tailcat forward" through runTailcat for the same reason
+// socks does: it is a long-lived local listener, so it gets the same
+// parent-death watchdog serve does.
+func forward(args []string) error {
+	fs := flag.NewFlagSet("forward", flag.ExitOnError)
+	key := fs.String("key", "", "tailcat client key name or path")
+	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
+	bind := fs.String("bind", "", "listen address; used as the local address when a mapping only specifies a port. Passed to tailcat's own --bind")
+	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
+	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("forward needs a tailcat address and at least one port mapping")
+	}
+
+	bin, err := findTailcat(*tailcatBin)
+	if err != nil {
+		return err
+	}
+	argv := []string{bin}
+	if *key != "" {
+		argv = append(argv, "--key="+*key)
+	}
+	if *derpMapURL != "" {
+		argv = append(argv, "--derpmap-url="+*derpMapURL)
+	}
+	if *verbose {
+		argv = append(argv, "--verbose")
+	}
+	argv = append(argv, "forward")
+	if *bind != "" {
+		argv = append(argv, "--bind="+*bind)
+	}
+	argv = append(argv, fs.Args()...)
+	return runTailcatFn(bin, argv, os.Environ())
 }
 
 func printEnv() error {
