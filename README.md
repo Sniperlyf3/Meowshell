@@ -26,13 +26,22 @@ Console.WriteLine(server.Address); // tailcat ssh <address>, from anywhere
 
 `AuthorizedKeys` is the mode to reach for by default. `InsecureNoAuth` exists
 for when the address itself is the only credential you want — pair it with
-`AllowClientKeys` so a leaked address alone isn't enough to get a shell; see
-[`dotnet/README.md`](dotnet/README.md).
+`AllowClientKeys` so a leaked address alone isn't enough to get a shell.
+
+That one call is the common case, but the same package is a complete C#
+wrapper around tailcat: an SFTP file service and forced-command sessions
+alongside the shell, a SOCKS5 proxy, TCP port forwarding, and one-shot
+operations for key management, address inspection, connectivity checks, and
+file transfer. See [`dotnet/README.md`](dotnet/README.md) for the full
+surface, every option, and the one or two things (`ssh`/`scp`) an Android
+app sandbox can't run.
 
 ## What's in this repo
 
-- **`Meowshell`** — the .NET library above (`dotnet add package Meowshell`).
-  See [`dotnet/README.md`](dotnet/README.md) for the full API.
+- **`Meowshell`** — the .NET library above (`dotnet add package Meowshell`):
+  shell/SFTP/forced-command sessions, a SOCKS5 proxy, port forwarding, and
+  one-shot key/address/file operations. See
+  [`dotnet/README.md`](dotnet/README.md) for the full API.
 - **`Meowshell.Runtime.{linux,windows,android}`** — the native `tailcat` and
   `meowshell` binaries for each platform, pulled in automatically as a
   dependency of `Meowshell`.
