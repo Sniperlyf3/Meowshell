@@ -398,6 +398,125 @@ public sealed class TailcatClientTests : IDisposable
     }
 
     [Fact]
+    public async Task ListFilesAcceptsATypedRemotePath()
+    {
+        var (options, argsFile) = Fake("printf 'hello.txt\\n'\n");
+        var address = new TailcatAddress("tcADDR");
+        await TailcatClient.ListFilesAsync(options, TailcatPath.Remote(address, "subdir"));
+        Assert.Equal(["ls", "tcADDR:subdir"], File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task ListFilesRejectsALocalTypedPath()
+    {
+        var (options, _) = Fake("");
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => TailcatClient.ListFilesAsync(options, TailcatPath.Local("not-remote")));
+    }
+
+    [Fact]
+    public void TailcatPathFormatsALocalPathAsIs()
+    {
+        TailcatPath path = "local/file.txt";
+        Assert.False(path.IsRemote);
+        Assert.Equal("local/file.txt", path.ToString());
+    }
+
+    [Fact]
+    public void TailcatPathFormatsARemoteAddressWithAPath()
+    {
+        var path = TailcatPath.Remote(new TailcatAddress("tcADDR"), "sub/dir.txt");
+        Assert.True(path.IsRemote);
+        Assert.Equal("tcADDR:sub/dir.txt", path.ToString());
+    }
+
+    [Fact]
+    public void TailcatPathFormatsARemoteAddressWithNoPathAsATrailingColon()
+    {
+        var path = TailcatPath.Remote(new TailcatAddress("tcADDR"));
+        Assert.Equal("tcADDR:", path.ToString());
+    }
+
+    [Fact]
+    public void TailcatPathFormatsARemoteHost()
+    {
+        var path = TailcatPath.RemoteHost("device.example.com", "file.txt");
+        Assert.True(path.IsRemote);
+        Assert.Equal("device.example.com:file.txt", path.ToString());
+    }
+
+    [Fact]
+    public async Task CpUploadsALocalSourceToARemoteTarget()
+    {
+        var (options, argsFile) = Fake("");
+        var address = new TailcatAddress("tcADDR");
+        await TailcatClient.CpAsync(options, TailcatPath.Local("photo.jpg"), TailcatPath.Remote(address, "photos/photo.jpg"));
+        Assert.Equal(["cp", "photo.jpg", "tcADDR:photos/photo.jpg"], File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task CpDownloadsARemoteSourceToALocalTarget()
+    {
+        var (options, argsFile) = Fake("");
+        var address = new TailcatAddress("tcADDR");
+        await TailcatClient.CpAsync(
+            options, TailcatPath.Remote(address, "report.txt"), "local-copy.txt",
+            recursive: true, preserve: true, port: "2222");
+        Assert.Equal(["cp", "-r", "-p", "-P", "2222", "tcADDR:report.txt", "local-copy.txt"], File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task CpCopiesMultipleSourcesToOneRemoteTarget()
+    {
+        var (options, argsFile) = Fake("");
+        var address = new TailcatAddress("tcADDR");
+        await TailcatClient.CpAsync(
+            options, [TailcatPath.Local("a.txt"), TailcatPath.Local("b.txt")], TailcatPath.Remote(address, "dir/"));
+        Assert.Equal(["cp", "a.txt", "b.txt", "tcADDR:dir/"], File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task CpThrowsWithNoRemotePath()
+    {
+        var (options, _) = Fake("");
+        var ex = await Assert.ThrowsAsync<ArgumentException>(
+            () => TailcatClient.CpAsync(options, TailcatPath.Local("a.txt"), TailcatPath.Local("b.txt")));
+        Assert.Contains("must be remote", ex.Message);
+    }
+
+    [Fact]
+    public async Task CpThrowsWhenRemotePathsNameDifferentServers()
+    {
+        var (options, _) = Fake("");
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => TailcatClient.CpAsync(
+            options,
+            [TailcatPath.Remote(new TailcatAddress("tcAAA"), "a.txt")],
+            TailcatPath.Remote(new TailcatAddress("tcBBB"), "b.txt")));
+        Assert.Contains("must name the same server", ex.Message);
+    }
+
+    [Fact]
+    public async Task CpThrowsWithNoSources()
+    {
+        var (options, _) = Fake("");
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => TailcatClient.CpAsync(options, [], TailcatPath.Remote(new TailcatAddress("tcADDR"))));
+    }
+
+    [Fact]
+    public async Task CpDoesNotThrowOnANonZeroExit()
+    {
+        // Like SshAsync, an arbitrary scp/remote-command exit code isn't
+        // "tailcat itself failed" -- it's returned, not thrown.
+        var (options, _) = Fake("echo 'scp: no such file or directory' >&2\nexit 1\n");
+        var result = await TailcatClient.CpAsync(
+            options, TailcatPath.Local("missing.txt"), TailcatPath.Remote(new TailcatAddress("tcADDR")));
+        Assert.False(result.Success);
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("no such file", result.Stderr);
+    }
+
+    [Fact]
     public async Task TimesOutAndKillsAHungCommand()
     {
         var (options, _) = Fake("exec sleep 300\n");

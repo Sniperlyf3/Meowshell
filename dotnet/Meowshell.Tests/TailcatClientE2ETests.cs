@@ -193,4 +193,56 @@ public sealed class TailcatClientE2ETests : IDisposable
 
         await server.StopAsync();
     }
+
+    /// <summary>
+    /// Uploads a file to a real server's writable "files" share, confirms
+    /// it landed via ListFilesAsync, then downloads it back to a different
+    /// local path and checks the bytes round-tripped exactly -- CpAsync and
+    /// TailcatPath exercised against the real system scp, not a stand-in.
+    /// Needs real network the same way <see cref="ResolvePingAndLsAgainstARealRunningServer"/> does.
+    /// </summary>
+    [Fact]
+    public async Task CpUploadsAndDownloadsAFileAgainstARealServer()
+    {
+        var real = FindRealBinaries();
+        if (real is null) return; // see FindRealBinaries()
+        var (bin, _) = real.Value;
+
+        var served = Path.Combine(_dir, "served-rw");
+        Directory.CreateDirectory(served);
+
+        var serverOptions = new MeowshellOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "cp-server-home"),
+            WorkDirectory = Path.Combine(_dir, "cp-server-work"),
+            Files = served + ":rw",
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        };
+        await using var server = await MeowshellServer.StartAsync(serverOptions);
+        Mask(server.Address);
+        var clientOptions = ClientOptions(bin);
+        var address = new TailcatAddress(server.Address);
+
+        var localSource = Path.Combine(_dir, "upload-source.txt");
+        var content = $"hello from a real scp round trip {Guid.NewGuid():N}\n";
+        await File.WriteAllTextAsync(localSource, content);
+
+        var uploadResult = await TailcatClient.CpAsync(
+            clientOptions, TailcatPath.Local(localSource), TailcatPath.Remote(address, "uploaded.txt"));
+        Assert.True(uploadResult.Success, Redact(uploadResult.Stderr));
+
+        var entries = await TailcatClient.ListFilesAsync(clientOptions, TailcatPath.Remote(address));
+        Assert.Contains(entries, e => e.Name == "uploaded.txt" && !e.IsDirectory);
+
+        var localDest = Path.Combine(_dir, "downloaded.txt");
+        var downloadResult = await TailcatClient.CpAsync(
+            clientOptions, TailcatPath.Remote(address, "uploaded.txt"), TailcatPath.Local(localDest));
+        Assert.True(downloadResult.Success, Redact(downloadResult.Stderr));
+
+        Assert.Equal(content, await File.ReadAllTextAsync(localDest));
+
+        await server.StopAsync();
+    }
 }
