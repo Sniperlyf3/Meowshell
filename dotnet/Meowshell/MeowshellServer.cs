@@ -211,6 +211,11 @@ public sealed class MeowshellServer : IAsyncDisposable
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _stopLock = new(1, 1);
     private bool _stopped;
+    // Windows-only crash backstop: if the host process dies without running
+    // StopAsync, closing this handle is what stops tailcat surviving as an
+    // orphan. See JobObject's own doc comment for why Unix needs no
+    // equivalent (there, PR_SET_PDEATHSIG in exec_unix.go does the same job).
+    private JobObject? _job;
 
     /// <summary>The tailcat address clients connect to: <c>tailcat ssh &lt;address&gt;</c>.</summary>
     public string Address { get; private set; } = "";
@@ -326,6 +331,10 @@ public sealed class MeowshellServer : IAsyncDisposable
         {
             process.Start();
             server = new MeowshellServer(options, process, addressFile);
+            if (OperatingSystem.IsWindows())
+            {
+                server._job = JobObject.Wrap(process);
+            }
 
             if (options.PrivateKeyJson is not null)
             {
@@ -450,6 +459,10 @@ public sealed class MeowshellServer : IAsyncDisposable
         _deadline.Dispose();
         _stopLock.Dispose();
         _process.Dispose();
+        if (OperatingSystem.IsWindows())
+        {
+            _job?.Dispose();
+        }
     }
 
 }
