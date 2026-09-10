@@ -58,6 +58,7 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 
 	out := bufio.NewReader(stdout)
+	expectConnected(t, out)
 
 	t.Run("exec channel runs a command and reports exit status", func(t *testing.T) {
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"echo", "hello-from-agent-e2e"}})
@@ -170,6 +171,30 @@ func mustWriteFrame(t *testing.T, w io.Writer, f frame) {
 	t.Helper()
 	if err := writeFrame(w, f); err != nil {
 		t.Fatalf("writeFrame: %v", err)
+	}
+}
+
+// expectConnected reads the connection-level handshake message the agent
+// sends once it has finished dialing (and any host-key/auth prompting
+// along the way): "connected" on success, or an "error" that fails the
+// test outright, since nothing after this point can succeed either.
+func expectConnected(t *testing.T, r *bufio.Reader) {
+	t.Helper()
+	f, err := readFrameWithDeadline(t, r)
+	if err != nil {
+		t.Fatalf("reading the connection handshake: %v", err)
+	}
+	var msg controlMessage
+	if err := json.Unmarshal(f.Payload, &msg); err != nil {
+		t.Fatalf("decoding the connection handshake: %v", err)
+	}
+	switch msg.Msg {
+	case "connected":
+		return
+	case "error":
+		t.Fatalf("agent failed to connect: %s: %s", msg.Code, msg.Message)
+	default:
+		t.Fatalf("unexpected first message %q, want \"connected\"", msg.Msg)
 	}
 }
 

@@ -131,4 +131,28 @@ type controlMessage struct {
 	// connection-level failure, or the channel the error belongs to
 	Code    errorCode `json:"code,omitempty"`
 	Message string    `json:"message,omitempty"`
+
+	// prompt_request (agent -> client) / prompt_response (client -> agent),
+	// always on channel 0: a round trip the agent needs answered before it
+	// can go on, mid-dial (host-key TOFU) or mid-auth (password,
+	// keyboard-interactive, a passphrase). RequestID pairs a response to
+	// its request, since more than one can be outstanding in principle
+	// (a jump chain prompting for each hop) even though today's callers
+	// only ever have one in flight at a time.
+	RequestID string `json:"request_id,omitempty"`
+	// PromptKind: "host_key", "password", "keyboard_interactive", or
+	// "passphrase".
+	PromptKind  string   `json:"prompt_kind,omitempty"`
+	Remote      string   `json:"remote,omitempty"`      // host:port (or "tailcat") the prompt is about
+	Fingerprint string   `json:"fingerprint,omitempty"` // host_key: SHA256:... of the offered key
+	Prompt      string   `json:"prompt,omitempty"`      // password/passphrase: label to show
+	Instruction string   `json:"instruction,omitempty"` // keyboard_interactive
+	Questions   []string `json:"questions,omitempty"`   // keyboard_interactive
+	Echos       []bool   `json:"echos,omitempty"`       // keyboard_interactive: whether each answer may be shown as typed
+
+	// prompt_response fields
+	Accept    bool     `json:"accept,omitempty"`    // host_key
+	Answer    string   `json:"answer,omitempty"`    // password/passphrase
+	Answers   []string `json:"answers,omitempty"`   // keyboard_interactive
+	Cancelled bool     `json:"cancelled,omitempty"` // the user declined to answer at all
 }
