@@ -3,11 +3,6 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Exercises the lifecycle against a stand-in for meowshell, so the process
-/// handling, address handoff and shutdown are covered without an Android
-/// device in the loop.
-/// </summary>
 public sealed class MeowshellServerTests : IDisposable
 {
     private const string FakeAddress = "tcTESTADDRESS000000000000";
@@ -15,7 +10,6 @@ public sealed class MeowshellServerTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Writes stand-in binaries; the script body decides what "meowshell" does.</summary>
     private MeowshellOptions Fake(string script, TimeSpan? lifetime = null)
     {
         var bin = Path.Combine(_dir, "bin");
@@ -33,7 +27,7 @@ public sealed class MeowshellServerTests : IDisposable
             HomeDirectory = Path.Combine(_dir, "home"),
             WorkDirectory = Path.Combine(_dir, "work"),
             InsecureNoAuth = true,
-            Naming = BinaryNaming.Android,   // the stand-ins are named lib*.so
+            Naming = BinaryNaming.Android,
             Lifetime = lifetime ?? TimeSpan.FromMinutes(5),
             StartTimeout = TimeSpan.FromSeconds(10),
             GracePeriod = TimeSpan.FromSeconds(2),
@@ -43,7 +37,6 @@ public sealed class MeowshellServerTests : IDisposable
     private const string PublishesAddress =
         $"printf '%s' '{FakeAddress}' > \"$TAILCAT_ADDR_FILE\"\nexec sleep 300\n";
 
-    /// <summary>A fake that records its own argv, one element per line, before publishing an address.</summary>
     private (MeowshellOptions options, string argsFile) FakeCapturingArgv()
     {
         var argsFile = Path.Combine(_dir, "args-" + Guid.NewGuid().ToString("N"));
@@ -104,7 +97,7 @@ public sealed class MeowshellServerTests : IDisposable
     {
         var server = await MeowshellServer.StartAsync(Fake(PublishesAddress));
         await server.StopAsync();
-        await server.StopAsync();          // must not throw
+        await server.StopAsync();
         Assert.True(server.Completed.IsCompleted);
         await server.DisposeAsync();
     }
@@ -129,7 +122,7 @@ public sealed class MeowshellServerTests : IDisposable
     {
         var server = await MeowshellServer.StartAsync(Fake(PublishesAddress));
         await server.StopAsync();
-        await server.Completed; // must not throw
+        await server.Completed;
         await server.DisposeAsync();
     }
 
@@ -146,8 +139,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task AGracefulStopIsAttemptedBeforeKilling()
     {
-        // The stand-in traps SIGTERM and records it, so a SIGKILL-only stop
-        // would leave the marker absent.
         var marker = Path.Combine(_dir, "sigterm");
         var script =
             $"trap 'printf caught > {marker}; exit 0' TERM\n" +
@@ -162,7 +153,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task APrivateKeyIsPipedInOnStdin()
     {
-        // The key must reach the process without being written anywhere.
         var seen = Path.Combine(_dir, "stdin-key");
         var script =
             $"cat > {seen}\n" +
@@ -179,9 +169,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task TheServerIsToldWhereTailcatIs()
     {
-        // meowshell looks for a sibling named "tailcat"; under an Android
-        // native library directory everything is lib*.so, so the path has to
-        // be passed explicitly.
         var seen = Path.Combine(_dir, "env");
         var script =
             $"printf '%s\\n' \"$TAILCAT_BIN\" \"$HOME\" > {seen}\n" +
@@ -297,8 +284,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void BinaryNamingFollowsThePlatformConvention()
     {
-        // Android only unpacks lib*.so into the native library directory,
-        // which is the one place an app may execute from.
         Assert.Equal("libtailcat.so", BinaryNaming.Android.FileName("tailcat"));
         Assert.Equal("tailcat.exe", BinaryNaming.Windows.FileName("tailcat"));
         Assert.Equal("tailcat", BinaryNaming.Plain.FileName("tailcat"));
@@ -307,13 +292,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void CreateLeavesBinaryDiscoveryToBinaryLocatorOnNonAndroidPlatforms()
     {
-        // Create's Android branch is compiled into Meowshell only for
-        // the android target framework (see the #if ANDROID in
-        // MeowshellServer.cs), which this plain net8.0 test assembly does
-        // not build; that branch is exercised only by the on-device probe
-        // in Meowshell.AndroidProbe. This covers the other one: no
-        // BinaryDirectory set, so StartAsync falls back to BinaryLocator,
-        // exactly as a real desktop or server consumer gets for free.
         var host = MeowshellOptions.Create(TimeSpan.FromMinutes(1));
         Assert.Null(host.BinaryDirectory);
         Assert.Equal(BinaryNaming.ForCurrentPlatform(), host.Naming);
@@ -344,8 +322,7 @@ public sealed class MeowshellServerTests : IDisposable
     public void TheSearchPathCoversBothPublishLayouts()
     {
         var path = BinaryLocator.SearchPath("/app").ToList();
-        // A RID-specific publish flattens native assets beside the assembly;
-        // a RID-agnostic build keeps the package's runtimes/ layout.
+
         Assert.Contains("/app", path);
         Assert.Contains(Path.Combine("/app", "runtimes", BinaryLocator.RuntimeIdentifier, "native"), path);
     }
@@ -366,8 +343,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void LocateIgnoresAnIncompleteDirectory()
     {
-        // Only one of the pair present must not count: the failure would
-        // otherwise surface much later, as a missing-file error at start.
         var app = Path.Combine(_dir, "half");
         Directory.CreateDirectory(app);
         var naming = BinaryNaming.ForCurrentPlatform();
@@ -379,8 +354,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task ABinaryWithoutTheExecutableBitIsMadeRunnable()
     {
-        // NuGet restore does not reliably carry the executable bit, so a
-        // package-delivered binary can arrive unrunnable.
         if (OperatingSystem.IsWindows()) return;
         var opts = Fake(PublishesAddress);
         var shell = Path.Combine(opts.BinaryDirectory!, opts.Naming.FileName("meowshell"));

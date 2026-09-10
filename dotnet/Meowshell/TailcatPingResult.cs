@@ -9,13 +9,7 @@ namespace Meowshell;
 /// <param name="Via">The direct endpoint (e.g. "1.2.3.4:5678") when <see cref="Direct"/>, else the DERP region code or ID.</param>
 public sealed record TailcatPong(TimeSpan Latency, bool Direct, string Via);
 
-/// <summary>
-/// The result of <see cref="TailcatClient.PingAsync"/>. <see cref="Pong"/>
-/// is populated from the last "pong in ... via ..." line tailcat printed,
-/// if any -- present even when <see cref="Success"/> is false, since
-/// <c>--until-direct</c> can print several relayed pongs before giving up
-/// on ever going direct.
-/// </summary>
+/// <summary>The result of <see cref="TailcatClient.PingAsync"/>. <see cref="Pong"/> is populated from the last "pong in ... via ..." line tailcat printed, if any.</summary>
 /// <param name="Result">The raw process result: exit code and full stdout/stderr.</param>
 /// <param name="Pong">The most recent parsed pong, or null if tailcat printed none.</param>
 public sealed record TailcatPingResult(TailcatResult Result, TailcatPong? Pong)

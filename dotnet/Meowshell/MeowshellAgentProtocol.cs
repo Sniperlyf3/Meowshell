@@ -4,13 +4,6 @@ using System.Text.Json.Serialization;
 
 namespace Meowshell;
 
-/// <summary>
-/// The framed control protocol "meowshell agent" speaks on its
-/// stdin/stdout, mirroring <c>cmd/meowshell/protocol.go</c> exactly (frame
-/// layout, message field names, and JSON casing all have to match its Go
-/// counterpart byte for byte). Internal: <see cref="MeowshellAgentConnection"/>
-/// is the public surface built on top of it.
-/// </summary>
 internal static class MeowshellAgentProtocol
 {
     public const byte FrameTypeControl = 0;
@@ -19,7 +12,7 @@ internal static class MeowshellAgentProtocol
     public const byte StreamStdout = 0;
     public const byte StreamStderr = 1;
 
-    private const int FrameHeaderLength = 5; // type (1) + channel id (4), counted in the length prefix
+    private const int FrameHeaderLength = 5;
     private const int MaxFrameLength = 64 << 20;
 
     public static readonly JsonSerializerOptions JsonOptions = new()
@@ -28,7 +21,6 @@ internal static class MeowshellAgentProtocol
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault,
     };
 
-    /// <summary>One frame: a control message (JSON payload) or a data chunk (raw bytes, tagged with a stream byte for stdout/stderr).</summary>
     public readonly record struct AgentFrame(byte Type, uint ChannelId, byte[] Payload);
 
     public static async Task WriteFrameAsync(Stream stream, AgentFrame frame, CancellationToken cancellationToken)
@@ -47,21 +39,9 @@ internal static class MeowshellAgentProtocol
         return WriteFrameAsync(stream, new AgentFrame(FrameTypeControl, channelId, body), cancellationToken);
     }
 
-    /// <summary>
-    /// Writes a client-to-agent data frame: raw bytes, no stream-tag byte.
-    /// The tag only exists on the agent-to-client direction (stdout vs
-    /// stderr for a shell/exec channel; see <see cref="StreamStdout"/>/
-    /// <see cref="StreamStderr"/>) -- everything the client sends is
-    /// keystrokes/command input or upload bytes, never something split
-    /// across two streams, matching Go's own agent.go handleData exactly.
-    /// </summary>
     public static Task WriteDataAsync(Stream stream, uint channelId, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
         WriteFrameAsync(stream, new AgentFrame(FrameTypeData, channelId, data.ToArray()), cancellationToken);
 
-    /// <summary>
-    /// Reads one frame, or returns null at a clean EOF (the agent process
-    /// closed its stdout, e.g. after the connection ended).
-    /// </summary>
     public static async Task<AgentFrame?> ReadFrameAsync(Stream stream, CancellationToken cancellationToken)
     {
         var lenBuf = new byte[4];
@@ -82,7 +62,6 @@ internal static class MeowshellAgentProtocol
         return new AgentFrame(body[0], ReadUInt32BigEndian(body.AsSpan(1, 4)), payload);
     }
 
-    /// <summary>Reads exactly buf.Length bytes, or returns false if the stream ends before the first byte of this read (a clean EOF between frames).</summary>
     private static async Task<bool> ReadFullAsync(Stream stream, byte[] buf, CancellationToken cancellationToken)
     {
         var total = 0;
@@ -111,18 +90,10 @@ internal static class MeowshellAgentProtocol
         ((uint)src[0] << 24) | ((uint)src[1] << 16) | ((uint)src[2] << 8) | src[3];
 }
 
-/// <summary>
-/// The JSON payload of a control frame -- one flat class mirroring Go's
-/// <c>controlMessage</c> field for field (see protocol.go's own doc comment
-/// for why it's one flat shape rather than a type per message). Internal:
-/// <see cref="MeowshellAgentConnection"/> and its channel/prompt types are
-/// the public API built on top of this.
-/// </summary>
 internal sealed class AgentMessage
 {
     public string Msg { get; set; } = "";
 
-    // open_channel
     public string? Kind { get; set; }
     public string[]? Command { get; set; }
     public bool? Pty { get; set; }
@@ -130,14 +101,11 @@ internal sealed class AgentMessage
     public int Rows { get; set; }
     public string? Term { get; set; }
 
-    // exit_status
     public int ExitCode { get; set; }
 
-    // error
     public string? Code { get; set; }
     public string? Message { get; set; }
 
-    // prompt_request / prompt_response
     public string? RequestId { get; set; }
     public string? PromptKind { get; set; }
     public string? Remote { get; set; }
@@ -151,13 +119,11 @@ internal sealed class AgentMessage
     public string[]? Answers { get; set; }
     public bool Cancelled { get; set; }
 
-    // sign prompt
     public string? KeyId { get; set; }
     public string? Algorithm { get; set; }
     public byte[]? SignData { get; set; }
     public byte[]? Signature { get; set; }
 
-    // configure
     public bool DisableAgent { get; set; }
     public byte[][]? Keys { get; set; }
     public byte[][]? Certificates { get; set; }
@@ -165,10 +131,8 @@ internal sealed class AgentMessage
     public byte[][]? KeystorePublicKeys { get; set; }
     public bool AgentForwarding { get; set; }
 
-    /// <summary>SOCKS5/HTTP CONNECT proxy for the first TCP hop, part of configure so it never lands on the agent process's own argv.</summary>
     public string? ProxyUrl { get; set; }
 
-    // sftp_op / sftp_result
     public string? Op { get; set; }
     public string? Path { get; set; }
     public string? NewPath { get; set; }
@@ -182,23 +146,18 @@ internal sealed class AgentMessage
     public long BytesDone { get; set; }
     public AgentSftpEntry[]? Entries { get; set; }
 
-    // forwarding
     public string? ListenAddr { get; set; }
     public string? RemoteAddr { get; set; }
     public string? BoundAddr { get; set; }
 
-    /// <summary>"tcp" (default, when null/empty) or "unix" -- selects what ListenAddr means for forward_local/forward_socks.</summary>
     public string? ListenNetwork { get; set; }
 
-    /// <summary>Must be set true to bind a "tcp" listener to anything other than loopback; ignored for ListenNetwork "unix".</summary>
     public bool AllowNonLoopbackBind { get; set; }
 
-    /// <summary>forward_socks only: RFC 1929 username/password SOCKS5 auth. Both empty means no auth.</summary>
     public string? SocksUsername { get; set; }
     public string? SocksPassword { get; set; }
 }
 
-/// <summary>One directory entry or a single file's metadata -- an sftp_op "ls"/"stat"/"lstat" result, mirroring Go's <c>sftpEntry</c>.</summary>
 internal sealed class AgentSftpEntry
 {
     public string Name { get; set; } = "";

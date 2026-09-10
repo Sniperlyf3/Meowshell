@@ -2,14 +2,7 @@
 
 namespace Meowshell;
 
-/// <summary>
-/// A tailcat address: opaque, base64-encoded, and always starting with
-/// "tc". Wrapping it catches a stray empty string or a copy-paste mistake
-/// at the API boundary, and reads better than a bare <c>string</c> at
-/// every call site that specifically needs an address rather than any
-/// text. Implicitly convertible to and from <c>string</c>, so existing
-/// code passing a plain address string keeps working.
-/// </summary>
+/// <summary>A tailcat address: opaque, base64-encoded, and always starting with "tc". Implicitly convertible to and from <c>string</c>.</summary>
 public readonly record struct TailcatAddress
 {
     private readonly string _value;

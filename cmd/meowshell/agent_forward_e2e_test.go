@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// TestAgentLocalForwardEndToEnd drives "-L"-style forwarding: the agent
-// listens locally and forwards each accepted connection through the SSH
-// client to a target the test's own fake SSH server dials back out to.
 func TestAgentLocalForwardEndToEnd(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -34,7 +31,7 @@ func TestAgentLocalForwardEndToEnd(t *testing.T) {
 		}
 	}()
 
-	addr, _, _ := startTestSSHServer(t, echoCommandHandler) // the SSH server whose Dial reaches backendLn
+	addr, _, _ := startTestSSHServer(t, echoCommandHandler)
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
 
 	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
@@ -67,10 +64,6 @@ func TestAgentLocalForwardEndToEnd(t *testing.T) {
 	}
 }
 
-// TestAgentSOCKSForwardEndToEnd drives "-D": a SOCKS5 client (net.Dialer
-// speaking the protocol by hand, since the standard library has no SOCKS5
-// client of its own either) connects through the agent's SOCKS listener
-// to a backend the SSH server's own Dial reaches.
 func TestAgentSOCKSForwardEndToEnd(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -122,8 +115,6 @@ func TestAgentSOCKSForwardEndToEnd(t *testing.T) {
 	}
 }
 
-// socks5Connect speaks just enough SOCKS5 client-side to CONNECT to
-// target through conn and read back whatever the far end sends.
 func socks5Connect(conn net.Conn, target string) (string, error) {
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 		return "", err

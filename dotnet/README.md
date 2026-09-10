@@ -268,11 +268,15 @@ process dies unexpectedly, the same as the three listener types; call
 
 ### A persistent, multiplexed connection
 
-`TailcatSshSession`, `CpAsync`, and `ListFilesAsync` each spawn their own
-process and their own full handshake — fine for one thing at a time, but
-opening a shell *and* browsing files against the same host means two
-logins. **`MeowshellAgentConnection`** dials once and keeps the connection
-open, multiplexing every operation over it as its own channel:
+`CpAsync` and `ListFilesAsync` each spawn their own bare-`tailcat` process
+and their own full handshake — fine for one thing at a time, but opening a
+shell *and* browsing files against the same host means two logins.
+`TailcatSshSession` is already built on the daemon underneath (see
+[above](#interactive-sessions-without-a-console)), but still opens its own
+dedicated connection per session rather than sharing one with anything
+else. **`MeowshellAgentConnection`** is what actually shares one: dial
+once and keep the connection open, multiplexing every operation over it
+as its own channel:
 
 ```csharp
 await using var connection = await MeowshellAgentConnection.ConnectAsync(options, address);

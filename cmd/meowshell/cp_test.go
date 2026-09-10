@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// Same cases as tailcat's own cmd/tailcat/cp_test.go TestSplitRemoteArg:
-// splitRemoteArg is a verbatim copy of tailcat's, so the same address
-// syntax must be accepted or rejected identically by both.
 func TestSplitRemoteArg(t *testing.T) {
 	for _, tt := range []struct {
 		arg        string
@@ -88,8 +85,6 @@ func TestFilepathRelFromSlash(t *testing.T) {
 	}
 }
 
-// TestCPUsageErrors verifies cp's argument validation, which happens
-// before any subprocess or SFTP connection.
 func TestCPUsageErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name string

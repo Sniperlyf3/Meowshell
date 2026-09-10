@@ -2,38 +2,16 @@
 
 namespace Meowshell;
 
-/// <summary>
-/// tailcat (or meowshell) did not behave as expected: it exited with a
-/// non-zero code, exited unexpectedly while something was supposed to keep
-/// running, or produced output that doesn't match the shape this library
-/// parses. <see cref="Diagnostics"/> carries tailcat's own explanation --
-/// its captured stderr, or a description of the unexpected output -- so
-/// catching this one exception is normally enough to know what went wrong,
-/// with no need to subscribe to a <c>Log</c> event or inspect a process
-/// directly.
-/// </summary>
+/// <summary>tailcat (or meowshell) did not behave as expected -- a non-zero exit, an unexpected exit, or output that doesn't parse. <see cref="Diagnostics"/> carries tailcat's own explanation.</summary>
 public sealed class TailcatException : Exception
 {
-    /// <summary>
-    /// The process's exit code, or 0 if it exited successfully but its
-    /// output didn't parse as expected.
-    /// </summary>
+    /// <summary>The process's exit code, or 0 if it exited successfully but its output didn't parse as expected.</summary>
     public int ExitCode { get; }
 
-    /// <summary>
-    /// tailcat's own explanation: captured stderr (possibly just the tail
-    /// of it, for a long-lived process), or a description of the
-    /// unexpected output when <see cref="ExitCode"/> is 0.
-    /// </summary>
+    /// <summary>tailcat's own explanation: captured stderr, or a description of the unexpected output when <see cref="ExitCode"/> is 0.</summary>
     public string Diagnostics { get; }
 
-    /// <summary>
-    /// The typed reason this failed, when one is known -- always set for a
-    /// failure that came back over <see cref="MeowshellAgentConnection"/>'s
-    /// control protocol, <see cref="MeowshellErrorCode.None"/> for one that
-    /// didn't (a plain nonzero process exit, for one of this library's
-    /// other, non-agent APIs).
-    /// </summary>
+    /// <summary>The typed reason this failed, when one is known -- always set for a <see cref="MeowshellAgentConnection"/> failure, <see cref="MeowshellErrorCode.None"/> otherwise.</summary>
     public MeowshellErrorCode Code { get; }
 
     /// <summary>Builds a message combining a short summary with the captured diagnostics.</summary>

@@ -5,15 +5,6 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Runs <see cref="MeowshellSocksProxy"/> and <see cref="MeowshellPortForward"/>
-/// against the real tailcat and meowshell binaries built by build.sh -- the
-/// .NET counterpart to <see cref="MeowshellServerE2ETests"/> for the two
-/// other long-lived listeners meowshell wraps.
-///
-/// Skipped (each test returns immediately) when the real binaries are not
-/// available, e.g. a local "dotnet test" run without a "dist" build.
-/// </summary>
 public sealed class MeowshellListenersE2ETests : IDisposable
 {
     private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";
@@ -23,9 +14,6 @@ public sealed class MeowshellListenersE2ETests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Same layout as MeowshellServerE2ETests.RealBinaries(): copies the
-    /// real binaries into a directory named per the current platform's
-    /// convention, executable. Returns null (skip) if either is unavailable.</summary>
     private (string binDir, string tailcatPath)? RealBinaries()
     {
         var tailcatSrc = Environment.GetEnvironmentVariable(TailcatEnvVar);
@@ -57,7 +45,7 @@ public sealed class MeowshellListenersE2ETests : IDisposable
     public async Task ASocksProxyStaysUpUntilStopped()
     {
         var real = RealBinaries();
-        if (real is null) return; // see RealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var proxy = await MeowshellSocksProxy.StartAsync(new MeowshellSocksOptions
@@ -77,12 +65,9 @@ public sealed class MeowshellListenersE2ETests : IDisposable
     public async Task APortForwardStartsItsLocalListenerAndStopsCleanly()
     {
         var real = RealBinaries();
-        if (real is null) return; // see RealBinaries()
+        if (real is null) return;
         var (bin, tailcatPath) = real.Value;
 
-        // forward validates its <tc-addr> argument up front, so it needs a
-        // syntactically real address -- nothing has to be listening at the
-        // target for the local listener itself to come up.
         var configDir = Path.Combine(_dir, "keyconfig");
         Directory.CreateDirectory(configDir);
         var genkeyPsi = new ProcessStartInfo(tailcatPath)
@@ -114,21 +99,11 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         Assert.True(forward.Completed.IsCompletedSuccessfully);
     }
 
-    /// <summary>
-    /// The actual fix, not just "the listener comes up": without
-    /// <see cref="MeowshellOptions.AllowExitNode"/>, a server refuses to
-    /// forward to any port it isn't already otherwise serving (tailcat's
-    /// own OnTCP gate sends a RST) -- true of "tailcat forward" today, and
-    /// would stay true regardless of which client API asks. With it set,
-    /// <see cref="MeowshellPortForward"/> against a real
-    /// <see cref="MeowshellServer"/> should actually move bytes to an
-    /// arbitrary local backend, not just open its own listener.
-    /// </summary>
     [Fact]
     public async Task APortForwardWithAllowExitNodeReachesAnArbitraryBackend()
     {
         var real = RealBinaries();
-        if (real is null) return; // see RealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         using var backend = new TcpListener(IPAddress.Loopback, 0);
@@ -172,10 +147,6 @@ public sealed class MeowshellListenersE2ETests : IDisposable
             Mappings = [$"0:{backendPort}"],
         });
 
-        // MeowshellPortForward's own Log event is the only way to learn the
-        // OS-assigned local port (see forwarding.go's own doc comment on
-        // the mapping syntax) -- it logs "forwarding <addr> -> ..." once
-        // the listener is up.
         var boundAddressFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         forward.Log += line =>
         {

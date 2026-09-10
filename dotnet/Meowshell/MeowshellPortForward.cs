@@ -9,49 +9,25 @@ public sealed record MeowshellPortForwardOptions : TailcatListenerOptions
     /// <summary>The tailcat address to forward to.</summary>
     public required string Address { get; init; }
 
-    /// <summary>
-    /// At least one port mapping: a bare port (same local and remote port),
-    /// <c>local:remote</c>, or <c>local:remote-ip:remote-port</c> (the
-    /// server must be running as an exit node). A local port of 0 asks the
-    /// OS for a free port; each listener prints its address once it is
-    /// listening.
-    /// </summary>
+    /// <summary>At least one port mapping: a bare port, <c>local:remote</c>, or <c>local:remote-ip:remote-port</c> (the server must be an exit node). A local port of 0 asks the OS for a free port.</summary>
     public required IReadOnlyList<string> Mappings { get; init; }
 
-    /// <summary>
-    /// Listen address, used as the local address for a mapping that only
-    /// specifies a port. Empty means tailcat's own default (127.0.0.1).
-    /// Passed to tailcat's own <c>--bind</c>.
-    /// </summary>
+    /// <summary>Listen address, used as the local address for a mapping that only specifies a port. Empty means tailcat's own default (127.0.0.1). Passed to tailcat's own <c>--bind</c>.</summary>
     public string? Bind { get; init; }
 
     /// <summary>tailcat client key name or path (see 'tailcat genkey').</summary>
     public string? ClientKey { get; init; }
 }
 
-/// <summary>
-/// Forwards local TCP ports to a tailcat server, until stopped. A
-/// long-lived local listener, so -- like <see cref="MeowshellServer"/> --
-/// it goes through meowshell rather than a bare tailcat, to inherit the
-/// same crash backstop (Windows job object here; PR_SET_PDEATHSIG is armed
-/// inside meowshell on Unix, before it execs tailcat).
-/// </summary>
+/// <summary>Forwards local TCP ports to a tailcat server, until stopped.</summary>
 public sealed class MeowshellPortForward : IAsyncDisposable
 {
     private readonly TailcatListener _listener;
 
-    /// <summary>
-    /// Completes when the process has exited. Succeeds after a
-    /// <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/>
-    /// if the process dies on its own first.
-    /// </summary>
+    /// <summary>Completes when the process has exited. Succeeds after a <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/> if the process dies on its own first.</summary>
     public Task Completed => _listener.Completed;
 
-    /// <summary>
-    /// Diagnostic output from tailcat, including each listener's bound
-    /// address once it is listening (most useful for a mapping that asked
-    /// for an OS-assigned port). Raised on a background thread.
-    /// </summary>
+    /// <summary>Diagnostic output from tailcat, including each listener's bound address once it is listening. Raised on a background thread.</summary>
     public event Action<string>? Log
     {
         add => _listener.Log += value;

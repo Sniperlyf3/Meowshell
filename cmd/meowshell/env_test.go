@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// fakeFS builds a resolver backed by a fixed set of paths, so these tests
-// describe Android layouts this machine does not have.
 func fakeFS(goos string, env map[string]string, files, dirs []string) *resolver {
 	set := func(ss []string) map[string]bool {
 		m := make(map[string]bool, len(ss))
@@ -26,7 +24,7 @@ func fakeFS(goos string, env map[string]string, files, dirs []string) *resolver 
 		mkdirAll: func(p string) error { d[p] = true; return nil },
 		realpath: func(p string) string {
 			if p == "/bin" && d["/system/bin"] {
-				return "/system/bin" // as on Android
+				return "/system/bin"
 			}
 			return p
 		},
@@ -47,7 +45,6 @@ func TestShellPrefersTermuxBash(t *testing.T) {
 }
 
 func TestShellFallsBackToAndroidSh(t *testing.T) {
-	// A bare Android device: no Termux, no /bin/sh.
 	r := fakeFS("android", nil, []string{"/system/bin/sh"}, nil)
 	got, _ := r.shell()
 	if want := "/system/bin/sh"; got != want {
@@ -68,8 +65,6 @@ func TestShellRejectsBadOverride(t *testing.T) {
 }
 
 func TestPathOmitsDirsThatDoNotExist(t *testing.T) {
-	// The bug this whole shim exists for: tailcat would hand the session
-	// /usr/local/bin:/usr/bin:/bin, none of which are on Android.
 	r := fakeFS("android", map[string]string{"PREFIX": termuxUsr}, nil,
 		[]string{termuxUsr + "/bin", "/system/bin", "/system/xbin"})
 	got := r.path()
@@ -95,8 +90,6 @@ func TestPathPutsTermuxFirst(t *testing.T) {
 }
 
 func TestHomeCreatedWhenUnset(t *testing.T) {
-	// $HOME unset is the case that makes tailcat's user.Current fail and
-	// kills the session, so meowshell must always produce one.
 	r := fakeFS("android", nil, nil, nil)
 	got, _ := r.home()
 	if got == "" {
@@ -139,8 +132,6 @@ func TestResolveFillsTermAndLang(t *testing.T) {
 }
 
 func TestResolveKeepsClientTerm(t *testing.T) {
-	// TERM is one of the few things tailcat forwards from the client;
-	// the shim must not stomp it.
 	r := fakeFS("android", map[string]string{"TERM": "screen-256color"},
 		[]string{"/system/bin/sh"}, nil)
 	if got := r.Resolve().Term; got != "screen-256color" {
@@ -149,8 +140,6 @@ func TestResolveKeepsClientTerm(t *testing.T) {
 }
 
 func TestPathDropsSymlinkedDuplicates(t *testing.T) {
-	// /bin is a symlink to /system/bin on Android, so PATH must not name
-	// the same directory twice.
 	r := fakeFS("android", nil, nil, []string{"/system/bin", "/bin"})
 	got := r.path()
 	if got != "/system/bin" {
@@ -159,9 +148,6 @@ func TestPathDropsSymlinkedDuplicates(t *testing.T) {
 }
 
 func TestSetEnvReplacesRatherThanShadowing(t *testing.T) {
-	// adb shell already exports SHELL=/bin/sh. Appending an override is
-	// silently ignored, because Go keeps the first mention of a key -- so
-	// tailcat would start /bin/sh and never run the shim.
 	got := setEnv(
 		[]string{"SHELL=/bin/sh", "PATH=/keep/me", "HOME=/old"},
 		[][2]string{{"SHELL", "/path/to/meowshell"}, {"HOME", "/new"}},
@@ -198,8 +184,6 @@ func TestValidateKeyAcceptsARealKey(t *testing.T) {
 }
 
 func TestValidateKeyRejectsJunk(t *testing.T) {
-	// A bad pipe should fail here, with a clear message, rather than as an
-	// opaque error out of tailcat after the exec.
 	for name, in := range map[string]string{
 		"not json":    "hello",
 		"empty":       "",
@@ -213,9 +197,6 @@ func TestValidateKeyRejectsJunk(t *testing.T) {
 }
 
 func TestShimDetectionAcceptsAnyFlag(t *testing.T) {
-	// tailcat runs "$SHELL -l" or "$SHELL -c <cmd>" today. Were it to use
-	// another flag, treating that as a subcommand would hand the session
-	// usage text instead of a shell.
 	for _, args := range [][]string{{"-l"}, {"-c", "echo hi"}, {"--login"}, {"-lc", "x"}} {
 		if !isShimInvocation(args) {
 			t.Errorf("isShimInvocation(%q) = false, want true", args)
@@ -229,8 +210,6 @@ func TestShimDetectionAcceptsAnyFlag(t *testing.T) {
 }
 
 func TestFindTailcatDoesNotRequireAnExecuteBitOnWindows(t *testing.T) {
-	// Windows files carry no execute bit. Requiring one rejected every
-	// candidate, so meowshell could not find tailcat there at all.
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "tailcat.exe")
 	if err := os.WriteFile(bin, []byte("stub"), 0o644); err != nil {
@@ -253,9 +232,6 @@ func TestFindTailcatDoesNotRequireAnExecuteBitOnWindows(t *testing.T) {
 }
 
 func TestResolveOnWindowsUsesWindowsNotions(t *testing.T) {
-	// Without a Windows branch the resolver reported "found no usable
-	// shell; falling back to /system/bin/sh" and handed back an Android
-	// home, which is where the staged key was ending up.
 	r := fakeFS("windows", map[string]string{
 		"USERPROFILE": `C:\Users\someone`,
 		"PATH":        `C:\Windows\system32;C:\Windows`,

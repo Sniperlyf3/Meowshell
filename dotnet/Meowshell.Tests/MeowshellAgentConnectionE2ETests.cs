@@ -6,20 +6,6 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Runs <see cref="MeowshellAgentConnection"/> against a real "meowshell
-/// agent" subprocess and a real tailcat server -- the check that the C#
-/// wire client actually speaks the same framed protocol the Go side
-/// (cmd/meowshell/agent.go, proven independently by its own Go-level E2E
-/// tests) implements, not just that both sides individually parse their
-/// own fixtures correctly.
-///
-/// Skipped (each test returns immediately) when the real binaries are not
-/// available, e.g. a local "dotnet test" run without a "dist" build. Needs
-/// real network unless TS_DEBUG_TAILCAT_LOCAL_DERP=1 is set in the test
-/// process's own environment (inherited by every child process this
-/// spawns) for the hermetic local-DERP mode tailcat itself provides.
-/// </summary>
 public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 {
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
@@ -36,7 +22,6 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Same layout as TailcatClientE2ETests.FindRealBinaries(). Returns null (skip) if either binary is unavailable.</summary>
     private (string binDir, string tailcatPath)? FindRealBinaries()
     {
         var tailcatSrc = Environment.GetEnvironmentVariable(TailcatEnvVar);
@@ -75,7 +60,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
     public async Task ExecChannelRunsACommandAndReportsARealExitCode()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -107,7 +92,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
     public async Task ShellChannelAcceptsInputAndResizesLive()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -139,7 +124,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
     public async Task SftpVerbsAndTransfersRoundTrip()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var served = Path.Combine(_dir, "served");
@@ -184,25 +169,11 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(served, "uploads")));
     }
 
-    /// <summary>
-    /// -L/-D forwarding against a tailcat destination: forwardClient
-    /// (tailcatdial.go) dials through a native tailcat.Client instead of
-    /// an SSH direct-tcpip channel there, since tailcat's own embedded SSH
-    /// service never implements the latter (see forwarding.go's doc
-    /// comment) -- the same mechanism tailcat's own "forward"/"socks"
-    /// subcommands use. That dial is still gated by the destination
-    /// server's own tailcat.Server.OnTCP: without <see cref="MeowshellOptions.AllowExitNode"/>
-    /// it refuses anything but the server's own already-served ports, so
-    /// this starts the server with it set and checks actual bytes cross
-    /// the forward to an arbitrary backend -- not just that the listener
-    /// opens (a real Go-level daemon test already proves the underlying
-    /// feature: cmd/meowshell/agent_tailcat_forward_e2e_test.go).
-    /// </summary>
     [Fact]
     public async Task LocalForwardReachesAnArbitraryBackendOnAnExitNodeServer()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -253,19 +224,11 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         Assert.Equal(backendReply, Encoding.UTF8.GetString(buffer, 0, total));
     }
 
-    /// <summary>
-    /// The Go-side loopback-default restriction (resolveLocalListener in
-    /// forwarding.go): binding anything other than loopback fails outright
-    /// unless explicitly opted into. Checked here at the C# call site --
-    /// listenAddress reaches the agent process and is rejected before any
-    /// SSH channel is even attempted, so this doesn't depend on tailcat's
-    /// own (nonexistent) forwarding support.
-    /// </summary>
     [Fact]
     public async Task LocalForwardRejectsNonLoopbackBindUnlessAllowed()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -285,24 +248,16 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
             connection.OpenLocalForwardAsync("0.0.0.0:0", "127.0.0.1:1"));
         Assert.Contains("loopback", ex.Message, StringComparison.OrdinalIgnoreCase);
 
-        // The opt-in makes the identical bind succeed (the listener opens;
-        // whether tailcat itself would ever accept a forwarded connection
-        // is the separate, already-covered concern above).
         await using var forward = await connection.OpenLocalForwardAsync("0.0.0.0:0", "127.0.0.1:1", allowNonLoopbackBind: true);
         Assert.NotEmpty(forward.BoundAddress);
     }
 
-    /// <summary>
-    /// A Unix-domain-socket forward: the recommended local endpoint over a
-    /// TCP loopback socket, since filesystem permissions on the socket
-    /// path -- not merely "which port" -- are what restrict access.
-    /// </summary>
     [Fact]
     public async Task LocalForwardOnUnixSocketCreatesA0600Socket()
     {
-        if (OperatingSystem.IsWindows()) return; // no AF_UNIX story to check here
+        if (OperatingSystem.IsWindows()) return;
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -326,18 +281,11 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode & (UnixFileMode)0b111_111_111);
     }
 
-    /// <summary>
-    /// forward_socks with auth: by default OpenSocksForwardAsync generates
-    /// a random SOCKS5 username/password and the proxy enforces it via
-    /// RFC 1929 subnegotiation -- proven here entirely at the SOCKS
-    /// handshake layer (no CONNECT is ever attempted), so it doesn't
-    /// depend on tailcat's own forwarding support either.
-    /// </summary>
     [Fact]
     public async Task SocksForwardEnforcesAutoGeneratedToken()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -363,8 +311,8 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         using (var noAuthClient = new Socket(SocketType.Stream, ProtocolType.Tcp))
         {
             await noAuthClient.ConnectAsync(boundEndpoint, cts.Token);
-            var method = await Socks5GreetAsync(noAuthClient, [0x00], cts.Token); // only offers "no auth"
-            Assert.Equal(0xFF, method); // server requires auth: no acceptable method
+            var method = await Socks5GreetAsync(noAuthClient, [0x00], cts.Token);
+            Assert.Equal(0xFF, method);
         }
 
         using (var wrongCreds = new Socket(SocketType.Stream, ProtocolType.Tcp))
@@ -384,23 +332,11 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         }
     }
 
-    /// <summary>
-    /// Fix 4's real target: HandleData used to fire-and-forget into each
-    /// channel's sink (`_ = sink.OnDataAsync(...)`), which under
-    /// backpressure could leave two overlapping WriteAsync calls in
-    /// flight on the same Pipe -- undefined behavior. A remote command
-    /// producing several times the Pipe's default 64KiB threshold in one
-    /// channel is exactly the condition that used to be able to trigger
-    /// it; this checks the bytes come through complete and byte-for-byte
-    /// correct rather than merely "didn't throw" (the exception, when it
-    /// happened at all, was itself an intermittent Pipe invariant
-    /// violation, not a reliable repro on its own).
-    /// </summary>
     [Fact]
     public async Task ExecChannelDeliversLargeOutputIntactUnderBackpressure()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
@@ -416,14 +352,8 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
         await using var connection = await MeowshellAgentConnection.ConnectAsync(ClientOptions(bin), server.Address);
 
-        const int totalBytes = 512 * 1024; // several multiples of the Pipe's 64KiB PauseWriterThreshold
-        // One array element, not ["sh", "-c", ...]: OpenExecAsync joins
-        // elements with spaces and the exec request already runs through
-        // the remote's own shell (see agent.go's session.Start), so an
-        // explicit "sh -c" prefix here double-wraps it -- the inner "sh -c"
-        // then only takes "head" as its script and the rest as positional
-        // params, leaving a bare `head` blocked forever reading this
-        // channel's own (never-written, never-closed) stdin.
+        const int totalBytes = 512 * 1024;
+
         await using var exec = await connection.OpenExecAsync([$"head -c {totalBytes} /dev/zero | tr '\\0' 'A'"]);
 
         using var ms = new MemoryStream();
@@ -475,7 +405,6 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         }
     }
 
-    /// <summary>Reads from stream until <paramref name="marker"/> has appeared or <paramref name="timeout"/> elapses, returning everything read so far either way.</summary>
     private static async Task<string> ReadUntilAsync(Stream stream, string marker, TimeSpan timeout)
     {
         var buffer = new byte[4096];

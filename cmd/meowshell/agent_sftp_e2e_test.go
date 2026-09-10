@@ -11,9 +11,6 @@ import (
 	"time"
 )
 
-// TestAgentSFTPEndToEnd drives meowshell agent's SFTP surface (verbs
-// beyond meowshell cp's plain upload/download/ls) against a real tailcat
-// server, over the local-DERP hermetic setup agent_e2e_test.go uses.
 func TestAgentSFTPEndToEnd(t *testing.T) {
 	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat_linux_amd64")
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
@@ -22,14 +19,9 @@ func TestAgentSFTPEndToEnd(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("TS_DEBUG_TAILCAT_LOCAL_DERP", "1")
 
-	served := t.TempDir() // meowshell serve --files serves this directory
+	served := t.TempDir()
 	addr := startE2EFilesServer(t, tailcatBin, meowshellBin, home, served)
 
-	// startAgent (agent_tcp_e2e_test.go) doesn't set an explicit Env for
-	// the subprocess, so it inherits the test process's own -- this is
-	// what gets TAILCAT_BIN to it for a tailcat-address destination
-	// (--known-hosts is harmless but unused on this path: tailcat
-	// transport never builds a TCP host-key callback).
 	t.Setenv("TAILCAT_BIN", tailcatBin)
 	_, stdin, out := startAgent(t, meowshellBin, filepath.Join(t.TempDir(), "known_hosts"), addr)
 	t.Cleanup(func() { stdin.Close() })
@@ -118,7 +110,7 @@ func TestAgentSFTPEndToEnd(t *testing.T) {
 	})
 
 	t.Run("download reports progress and a real total size", func(t *testing.T) {
-		payload := bytes.Repeat([]byte("0123456789"), 10_000) // 100KB, big enough to cross the progress interval at least once
+		payload := bytes.Repeat([]byte("0123456789"), 10_000)
 		uploadViaAgent(t, stdin, out, "big.bin", payload, false, 0, 0)
 
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "sftp_download", Path: "big.bin"})
@@ -194,8 +186,6 @@ func startE2EFilesServer(t *testing.T, tailcatBin, meowshellBin, home, served st
 	return ""
 }
 
-// sftpOp sends one sftp_op request and returns its sftp_result, failing
-// the test on an error response.
 func sftpOp(t *testing.T, stdin interface {
 	Write([]byte) (int, error)
 }, out *bufio.Reader, req controlMessage) controlMessage {
@@ -214,8 +204,6 @@ func sftpOp(t *testing.T, stdin interface {
 	return msg
 }
 
-// trySFTPOp is sftpOp for a call the test expects might fail: it returns
-// the error code (or "" on success) instead of failing the test itself.
 func trySFTPOp(t *testing.T, stdin interface {
 	Write([]byte) (int, error)
 }, out *bufio.Reader, req controlMessage) errorCode {

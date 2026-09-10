@@ -38,119 +38,45 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     /// <summary>How long the server may live before it is shut down.</summary>
     public TimeSpan Lifetime { get; init; } = TimeSpan.FromMinutes(5);
 
-    /// <summary>
-    /// SSH public key sources permitted to log in: authorized_keys paths,
-    /// literal key lines, or names like "alice@github". Mutually exclusive
-    /// with <see cref="InsecureNoAuth"/>.
-    /// </summary>
+    /// <summary>SSH public key sources permitted to log in: authorized_keys paths, literal key lines, or names like "alice@github". Mutually exclusive with <see cref="InsecureNoAuth"/>.</summary>
     public string? AuthorizedKeys { get; init; }
 
-    /// <summary>
-    /// Serve a shell to anyone holding the address, with no SSH auth. The
-    /// address is then the only credential, so pair it with
-    /// <see cref="AllowClientKeys"/>.
-    /// </summary>
+    /// <summary>Serve a shell to anyone holding the address, with no SSH auth. The address is then the only credential, so pair it with <see cref="AllowClientKeys"/>.</summary>
     public bool InsecureNoAuth { get; init; }
 
     /// <summary>Comma-separated tailcat client node keys allowed to connect.</summary>
     public string? AllowClientKeys { get; init; }
 
-    /// <summary>
-    /// Generate a throwaway key so the address dies with the process. Leave
-    /// true: with a saved "default" key present, tailcat would silently reuse
-    /// a stable address instead. Ignored when <see cref="PrivateKeyJson"/> is
-    /// set.
-    /// </summary>
+    /// <summary>Generate a throwaway key so the address dies with the process. Leave true. Ignored when <see cref="PrivateKeyJson"/> is set.</summary>
     public bool EphemeralKey { get; init; } = true;
 
-    /// <summary>
-    /// Contents of a tailcat *.private.json, supplied at runtime rather than
-    /// stored on the device. It is piped to meowshell on stdin and staged on
-    /// an unlinked descriptor, so it never exists as a named file. Use this
-    /// when your backend hands out a per-session key whose address you
-    /// already hold.
-    /// </summary>
+    /// <summary>Contents of a tailcat *.private.json, supplied at runtime rather than stored on the device. Piped to meowshell on stdin, never exists as a named file.</summary>
     public string? PrivateKeyJson { get; init; }
 
     /// <summary>How long to wait for the server to publish its address.</summary>
     public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Embed the DERP server's own info in the published address instead of
-    /// a region reference, so a client can connect without first fetching a
-    /// DERP map. Passed to tailcat's own <c>--full-address</c>.
-    /// </summary>
+    /// <summary>Embed the DERP server's own info in the published address instead of a region reference. Passed to tailcat's own <c>--full-address</c>.</summary>
     public bool FullAddress { get; init; }
 
-    /// <summary>
-    /// Include a WireGuard pre-shared key in the address (recommended).
-    /// Disabling it only shortens the address and trades away security, for
-    /// compatibility with tailcat clients v0.5.0 and earlier. Passed to
-    /// tailcat's own <c>--psk</c>.
-    /// </summary>
+    /// <summary>Include a WireGuard pre-shared key in the address (recommended). Passed to tailcat's own <c>--psk</c>.</summary>
     public bool Psk { get; init; } = true;
 
-    /// <summary>
-    /// Directory to serve to SFTP clients (scp, sftp), with an optional
-    /// <c>:ro</c> (read-only, the default), <c>:rw</c>, <c>:wo</c> (flat
-    /// write-only drop box), or <c>:wo+</c> (recursive write-only drop box)
-    /// suffix. Combinable with <see cref="AuthorizedKeys"/> or
-    /// <see cref="InsecureNoAuth"/> to also serve a shell, but not with
-    /// <see cref="ForcedCommand"/> on either of those, which would allow
-    /// nothing but that command. Passed to tailcat's own <c>--files</c>.
-    /// </summary>
+    /// <summary>Directory to serve to SFTP clients, with an optional <c>:ro</c>/<c>:rw</c>/<c>:wo</c>/<c>:wo+</c> suffix. Passed to tailcat's own <c>--files</c>.</summary>
     public string? Files { get; init; }
 
-    /// <summary>
-    /// Let a client's <see cref="MeowshellPortForward"/>/<see cref="MeowshellSocksProxy"/>
-    /// (or a <see cref="MeowshellAgentConnection"/>'s own forward_local/forward_socks
-    /// channels) reach any port this machine can dial, not just the SSH/files
-    /// ports above -- tailcat's own "exit-node" service. Without it, tailcat's
-    /// protocol-level access gate refuses a forward to any port this server
-    /// wasn't already otherwise serving, no matter which client API asks.
-    /// Pair with <see cref="AllowClientKeys"/> to restrict who gets that
-    /// reach. Passed to meowshell's own <c>--exit-node</c>.
-    /// </summary>
+    /// <summary>Let a client's forward/SOCKS channels reach any port this machine can dial, not just the SSH/files ports above -- tailcat's own "exit-node" service. Passed to meowshell's own <c>--exit-node</c>.</summary>
     public bool AllowExitNode { get; init; }
 
-    /// <summary>
-    /// Run this command for every session instead of a login shell, like
-    /// OpenSSH's ForceCommand: the client gets no shell, no client-chosen
-    /// command, and no SFTP subsystem. The command sees the peer's node key
-    /// in <c>TAILCAT_PEER_KEY</c> (in <see cref="AllowClientKeys"/>'s
-    /// format), plus <c>TAILCAT_REMOTE_ADDR</c> and
-    /// <c>TAILCAT_LOCAL_ADDR</c>. Passed to tailcat's own <c>serve ... --
-    /// &lt;command&gt;</c>. Empty runs a normal login shell.
-    /// </summary>
+    /// <summary>Run this command for every session instead of a login shell, like OpenSSH's ForceCommand. Empty runs a normal login shell.</summary>
     public IReadOnlyList<string> ForcedCommand { get; init; } = [];
 
-    /// <summary>
-    /// The one entry point: works unchanged on Android, Windows, and Linux,
-    /// with no platform code, and no paths, of your own. Add just this
-    /// package -- it carries the right native binaries for wherever you're
-    /// building, see <see cref="BinaryLocator"/> -- and:
-    /// <code>
-    /// var options = MeowshellOptions.Create(TimeSpan.FromMinutes(5)) with
-    /// {
-    ///     InsecureNoAuth = true, // or AuthorizedKeys = "...";
-    /// };
-    /// await using var server = await MeowshellServer.StartAsync(options);
-    /// </code>
-    /// Which platform's directories and binary layout apply is resolved at
-    /// build time, from which target framework compiled this method into
-    /// your app -- an Android build and a desktop build of the same call
-    /// never carry both, so there is nothing to detect at runtime and
-    /// nothing to get wrong by picking the wrong overload.
-    /// </summary>
+    /// <summary>The one entry point: works unchanged on Android, Windows, and Linux, with no platform code of your own.</summary>
     /// <remarks>
-    /// The one thing this cannot reach into your app to set for you: an
-    /// Android app targeting API 29+ may only execute a file from
-    /// ApplicationInfo.NativeLibraryDir, and only has one there if the OS
-    /// extracted it at install time, which requires your own app to set
-    /// <c>&lt;AndroidExtractNativeLibraries&gt;true&lt;/AndroidExtractNativeLibraries&gt;</c>
-    /// (or the equivalent <c>android:extractNativeLibs="true"</c> manifest
-    /// attribute) -- a referenced library cannot set that on your manifest
-    /// for you.
+    /// An Android app targeting API 29+ may only execute a file from ApplicationInfo.NativeLibraryDir, and only has
+    /// one there if the OS extracted it at install time, which requires your own app to set
+    /// <c>&lt;AndroidExtractNativeLibraries&gt;true&lt;/AndroidExtractNativeLibraries&gt;</c> -- a referenced
+    /// library cannot set that on your manifest for you.
     /// </remarks>
     /// <param name="lifetime">How long the server may live before it shuts itself down.</param>
     public static MeowshellOptions Create(TimeSpan lifetime)
@@ -175,11 +101,7 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     }
 }
 
-/// <summary>
-/// Runs a tailcat shell server for a bounded period and shuts it down
-/// afterwards. Start it, hand <see cref="Address"/> to whoever is connecting,
-/// and dispose when done; the deadline fires on its own if you do not.
-/// </summary>
+/// <summary>Runs a tailcat shell server for a bounded period and shuts it down afterwards.</summary>
 public sealed class MeowshellServer : IAsyncDisposable
 {
     private readonly MeowshellOptions _options;
@@ -197,13 +119,7 @@ public sealed class MeowshellServer : IAsyncDisposable
     public TimeSpan Remaining =>
         ExpiresAt - DateTimeOffset.UtcNow is { Ticks: > 0 } t ? t : TimeSpan.Zero;
 
-    /// <summary>
-    /// Completes when the server process has exited. Succeeds after a
-    /// <see cref="StopAsync"/> call or the deadline; faults with a
-    /// <see cref="TailcatException"/> if the process dies on its own first
-    /// (a crash, an OOM kill), so awaiting this is enough to notice and
-    /// diagnose that without polling.
-    /// </summary>
+    /// <summary>Completes when the server process has exited. Succeeds after a <see cref="StopAsync"/> call or the deadline; faults with a <see cref="TailcatException"/> if the process dies on its own first.</summary>
     public Task Completed => _listener.Completed;
 
     /// <summary>Diagnostic output from tailcat. Raised on a background thread.</summary>
@@ -221,25 +137,11 @@ public sealed class MeowshellServer : IAsyncDisposable
         ExpiresAt = DateTimeOffset.UtcNow + options.Lifetime;
     }
 
-    /// <summary>
-    /// Starts the server and returns once it has published an address.
-    /// </summary>
+    /// <summary>Starts the server and returns once it has published an address.</summary>
     /// <param name="options">Where the binaries live and how the session is configured.</param>
     /// <param name="cancellationToken">Abandons the start; the process is cleaned up.</param>
-    /// <param name="onLog">
-    /// Diagnostic output from tailcat, called as it arrives. Unlike the
-    /// <see cref="Log"/> event on the instance this method returns, this
-    /// also fires when StartAsync itself throws: tailcat's own stderr is
-    /// usually the actual reason it exited before publishing an address,
-    /// and the instance carrying <see cref="Log"/> is never handed back to
-    /// the caller on that path, so without this there is nothing to attach
-    /// a subscriber to.
-    /// </param>
-    /// <exception cref="ArgumentException">
-    /// Both authentication modes were set, nothing was chosen to serve, or
-    /// <see cref="MeowshellOptions.Files"/> was combined with a forced
-    /// command on the ssh/no-auth-ssh service.
-    /// </exception>
+    /// <param name="onLog">Diagnostic output from tailcat, called as it arrives -- also fires when StartAsync itself throws, unlike the <see cref="Log"/> event.</param>
+    /// <exception cref="ArgumentException">Both authentication modes were set, nothing was chosen to serve, or <see cref="MeowshellOptions.Files"/> was combined with a forced command on the ssh/no-auth-ssh service.</exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
     /// <exception cref="TailcatException">tailcat exited before publishing an address.</exception>
     /// <exception cref="TimeoutException">No address appeared within <see cref="MeowshellOptions.StartTimeout"/>.</exception>
@@ -314,11 +216,7 @@ public sealed class MeowshellServer : IAsyncDisposable
                 psi.ArgumentList.Add(token);
         }
 
-        // meowshell looks for a sibling file literally named "tailcat"; under
-        // NativeLibraryDir everything is lib*.so, so point it at the binary.
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        // tailcat aborts a session when user.Current fails, which on Android
-        // happens whenever HOME is unset.
         psi.Environment["HOME"] = options.HomeDirectory;
         psi.Environment["TMPDIR"] = options.WorkDirectory;
         psi.Environment["TAILCAT_ADDR_FILE"] = addressFile;
@@ -333,8 +231,6 @@ public sealed class MeowshellServer : IAsyncDisposable
 
             if (options.PrivateKeyJson is not null)
             {
-                // meowshell reads the whole key before exec'ing tailcat, so
-                // the pipe has to be closed for it to proceed.
                 await process.StandardInput.WriteAsync(options.PrivateKeyJson)
                     .ConfigureAwait(false);
                 process.StandardInput.Close();
@@ -354,10 +250,6 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// tailcat writes its address to TAILCAT_ADDR_FILE once it is listening,
-    /// which is more robust than parsing stdout.
-    /// </summary>
     private async Task<string> WaitForAddressAsync(CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -392,13 +284,10 @@ public sealed class MeowshellServer : IAsyncDisposable
             await Task.Delay(_options.Lifetime, _deadline.Token).ConfigureAwait(false);
             await StopAsync().ConfigureAwait(false);
         }
-        catch (OperationCanceledException) { /* stopped early */ }
+        catch (OperationCanceledException) { }
     });
 
-    /// <summary>
-    /// Shuts the server down: SIGTERM, then SIGKILL if it does not go quietly.
-    /// Safe to call repeatedly.
-    /// </summary>
+    /// <summary>Shuts the server down: SIGTERM, then SIGKILL if it does not go quietly. Safe to call repeatedly.</summary>
     public async Task StopAsync()
     {
         try
@@ -408,7 +297,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
         finally
         {
-            try { if (File.Exists(_addressFile)) File.Delete(_addressFile); } catch { /* best effort */ }
+            try { if (File.Exists(_addressFile)) File.Delete(_addressFile); } catch { }
         }
     }
 

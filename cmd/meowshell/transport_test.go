@@ -25,17 +25,13 @@ func TestLooksLikeTailcatAddress(t *testing.T) {
 		dest string
 		want bool
 	}{
-		// A real address as tailcat itself would publish one (captured
-		// from a local test server run), not a hand-truncated fake --
-		// base64.RawURLEncoding is picky about length, so this needs to
-		// be a genuine, complete encoding to prove the happy path.
 		{"tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1", true},
-		{"tc", false},                     // no payload at all
-		{"tcp://example.com", false},      // "://" is not valid base64url
-		{"example.com:2222", false},       // a plain TCP host:port
-		{"user@example.com", false},       // a plain TCP user@host
-		{"10.0.0.1:22", false},            // a bare IPv4:port
-		{"tailscale-node.example", false}, // a bare hostname, no "tc" prefix
+		{"tc", false},
+		{"tcp://example.com", false},
+		{"example.com:2222", false},
+		{"user@example.com", false},
+		{"10.0.0.1:22", false},
+		{"tailscale-node.example", false},
 	}
 	for _, c := range cases {
 		if got := looksLikeTailcatAddress(c.dest); got != c.want {
@@ -65,9 +61,6 @@ func TestSplitUserHost(t *testing.T) {
 	}
 }
 
-// TestDialHTTPConnectProxy drives dialHTTPConnectProxy against a minimal
-// fake HTTP CONNECT proxy, proving --proxy=http://... actually tunnels
-// bytes rather than just parsing a URL.
 func TestDialHTTPConnectProxy(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -87,9 +80,7 @@ func TestDialHTTPConnectProxy(t *testing.T) {
 			return
 		}
 		fmt.Fprintf(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		// From here on, the proxy is just a pipe: write something only the
-		// far end of the tunnel could have -- the test can't easily stand
-		// up a real second hop, so this stands in for it directly.
+
 		conn.Write([]byte(backendReply))
 	}()
 

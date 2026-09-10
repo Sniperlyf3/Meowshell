@@ -4,32 +4,11 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Runs MeowshellServer against the real tailcat and meowshell binaries
-/// built by build.sh, with a real tailcat client on the other end -- the one
-/// thing the fake-binary tests in <see cref="MeowshellServerTests"/> cannot
-/// cover, and the .NET counterpart to e2e/host-e2e.sh.
-///
-/// Skipped (each test returns immediately) when the real binaries are not
-/// available, e.g. a local "dotnet test" run without a "dist" build. The CI
-/// "dotnet" job always sets <see cref="TailcatEnvVar"/> and
-/// <see cref="MeowshellEnvVar"/>, so there these tests actually run.
-/// </summary>
 public sealed class MeowshellServerE2ETests : IDisposable
 {
-    // tailcat's own diagnostics include the address it just published; with
-    // InsecureNoAuth that address alone is a live credential, so it must
-    // never reach a CI log verbatim (public repo; a failing assertion's
-    // message here becomes part of the "dotnet test" job's captured output).
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 
-    // Best-effort second layer alongside Redact() above: "::add-mask::" is a
-    // GitHub Actions runner command, not a .NET/xunit feature, so there is no
-    // guarantee dotnet test's captured console output is scanned for it the
-    // way a shell step's stdout is. Redact() is what actually keeps the
-    // address out of a failure message; this just registers it too, in case
-    // it helps.
     private static void Mask(string value)
     {
         if (!string.IsNullOrEmpty(value)) Console.WriteLine("::add-mask::" + value);
@@ -42,13 +21,6 @@ public sealed class MeowshellServerE2ETests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>
-    /// Copies the real binaries named by <see cref="TailcatEnvVar"/> and
-    /// <see cref="MeowshellEnvVar"/> into a directory laid out the way
-    /// MeowshellServer expects: named per the current platform's convention,
-    /// executable. Returns null if either variable is unset or names a
-    /// missing file, which the caller treats as "nothing to test against".
-    /// </summary>
     private (string binDir, string tailcatPath)? RealBinaries()
     {
         var tailcatSrc = Environment.GetEnvironmentVariable(TailcatEnvVar);
@@ -99,20 +71,12 @@ public sealed class MeowshellServerE2ETests : IDisposable
         return (p.ExitCode, (await stdoutTask).Trim(), (await stderrTask).Trim());
     }
 
-    /// <summary>
-    /// The node key an address carries, the same way e2e/host-e2e.sh
-    /// compares identities: a server picks a DERP region at startup and
-    /// embeds it, so the address it publishes is not byte-identical to the
-    /// one genkey printed.
-    /// </summary>
     private static async Task<string> IdentityAsync(string tailcatPath, string address)
     {
         var (exitCode, stdout, _) = await RunAsync(tailcatPath, "parse", address);
         Assert.Equal(0, exitCode);
         var match = Regex.Match(stdout, "\"ServerPublic\":\\s*\"([^\"]+)\"");
-        // "parse"'s own JSON echoes the address back, which may still be a
-        // live, connectable server at this point in the test -- redact it
-        // the same as everywhere else, not just the ServerPublic identity.
+
         Assert.True(match.Success, $"no ServerPublic in: {Redact(stdout)}");
         return match.Groups[1].Value;
     }
@@ -121,12 +85,9 @@ public sealed class MeowshellServerE2ETests : IDisposable
     public async Task ARealClientCanRunACommandOverTheAddress()
     {
         var real = RealBinaries();
-        if (real is null) return; // see RealBinaries()
+        if (real is null) return;
         var (bin, tailcatPath) = real.Value;
 
-        // Construct MeowshellOptions directly rather than through Create():
-        // this test needs a specific directory of real downloaded binaries,
-        // not the auto-discovery a real consumer gets for free.
         var options = new MeowshellOptions
         {
             BinaryDirectory = bin,
@@ -159,12 +120,9 @@ public sealed class MeowshellServerE2ETests : IDisposable
     public async Task APrivateKeyDeliveredAtRuntimeCarriesTheProvisionedIdentity()
     {
         var real = RealBinaries();
-        if (real is null) return; // see RealBinaries()
+        if (real is null) return;
         var (bin, tailcatPath) = real.Value;
 
-        // Provision a key on the host, exactly as a backend handing out a
-        // per-session key would -- with its own config directory, entirely
-        // separate from wherever MeowshellServer runs the session.
         var configDir = Path.Combine(_dir, "keyconfig");
         Directory.CreateDirectory(configDir);
         var genkeyPsi = new ProcessStartInfo(tailcatPath)
