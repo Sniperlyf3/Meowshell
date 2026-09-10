@@ -230,6 +230,10 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig, handleExec func(s
 	defer sc.Close()
 	go ssh.DiscardRequests(reqs)
 	for newCh := range chans {
+		if newCh.ChannelType() == "direct-tcpip" {
+			go serveTestSSHDirectTCPIP(newCh)
+			continue
+		}
 		if newCh.ChannelType() != "session" {
 			newCh.Reject(ssh.UnknownChannelType, "unsupported")
 			continue
@@ -260,4 +264,37 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig, handleExec func(s
 			}
 		}()
 	}
+}
+
+// serveTestSSHDirectTCPIP answers a "direct-tcpip" channel request --
+// what ssh.Client.Dial sends server-side -- by dialing the requested
+// address locally and piping bytes both ways, the same shape a real
+// sshd's own forwarding support has. Without this, meowshell agent's own
+// forward_local/forward_socks channels (which both go through
+// client.Dial) have nothing on the server end to actually reach a
+// backend through.
+func serveTestSSHDirectTCPIP(newCh ssh.NewChannel) {
+	var payload struct {
+		DestAddr   string
+		DestPort   uint32
+		OriginAddr string
+		OriginPort uint32
+	}
+	if err := ssh.Unmarshal(newCh.ExtraData(), &payload); err != nil {
+		newCh.Reject(ssh.ConnectionFailed, "malformed direct-tcpip request")
+		return
+	}
+	target := net.JoinHostPort(payload.DestAddr, fmt.Sprint(payload.DestPort))
+	remote, err := net.Dial("tcp", target)
+	if err != nil {
+		newCh.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, requests, err := newCh.Accept()
+	if err != nil {
+		remote.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+	proxyForwardedConn(ch, func() (net.Conn, error) { return remote, nil })
 }

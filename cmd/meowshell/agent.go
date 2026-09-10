@@ -13,7 +13,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -130,6 +132,7 @@ func agentCmd(args []string) error {
 		return err
 	}
 	defer session.closeHops()
+	session.startKeepalive()
 
 	if cfg.AgentForwarding && session.agentForwardSock != "" {
 		if err := agent.ForwardToRemote(session.client(), session.agentForwardSock); err != nil {
@@ -186,11 +189,29 @@ type connectOptions struct {
 	auth           []ssh.AuthMethod // from buildAuthMethods; every hop dials with the same auth list
 }
 
-// agentChannel is one multiplexed shell or exec session, live on the
-// shared *ssh.Client for as long as the remote command/shell runs.
+// agentChannel is one multiplexed shell/exec session, SFTP transfer, or
+// port-forward listener, live for as long as its own operation runs.
+// Exactly one of session, sftpFile, or listener is set, identifying which
+// kind this is; the others are that kind's own extra state.
 type agentChannel struct {
+	// shell/exec
 	session *ssh.Session
 	stdin   io.WriteCloser
+
+	// sftp_upload/sftp_download (agentsftp.go)
+	sftpFile       *sftp.File
+	ctx            context.Context
+	cancel         context.CancelFunc
+	isUpload       bool
+	uploadPath     string
+	uploadPreserve bool
+	uploadMode     uint32
+	uploadModTime  int64
+
+	// forward_local/forward_remote/forward_socks (forwarding.go): closing
+	// the listener stops accepting new forwarded connections; connections
+	// already in flight finish or fail on their own.
+	listener net.Listener
 }
 
 // agentSession serves the control protocol for one agent connection: reads
@@ -216,6 +237,9 @@ type agentSession struct {
 	chansMu sync.Mutex
 	chans   map[uint32]*agentChannel
 	nextID  atomic.Uint32
+
+	sftpMu     sync.Mutex
+	sftpClient *sftp.Client // lazily opened by sftpClientFor (agentsftp.go), shared across every ls/stat/.../upload/download
 
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
@@ -329,7 +353,62 @@ func closeClients(clients []*ssh.Client) {
 	}
 }
 
-func (a *agentSession) closeHops() { closeClients(a.hops) }
+func (a *agentSession) closeHops() {
+	if a.sftpClient != nil {
+		a.sftpClient.Close()
+	}
+	closeClients(a.hops)
+}
+
+const (
+	keepaliveInterval = 30 * time.Second
+	keepaliveTimeout  = 15 * time.Second
+)
+
+// startKeepalive sends an OpenSSH-style keepalive request on an interval
+// for as long as the connection lives, so a mobile carrier's NAT binding
+// (or any other idle-connection timeout along the path) doesn't silently
+// drop a connection nothing has sent traffic on in a while. A request that
+// doesn't get answered within keepaliveTimeout is treated as a dead peer:
+// reported to the client and the connection torn down, rather than left to
+// hang indefinitely.
+func (a *agentSession) startKeepalive() {
+	go func() {
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			client := a.client()
+			if client == nil {
+				return
+			}
+			result := make(chan error, 1)
+			go func() {
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				result <- err
+			}()
+			select {
+			case err := <-result:
+				if err != nil {
+					a.reportConnectionLost(fmt.Errorf("keepalive: %w", err))
+					return
+				}
+			case <-time.After(keepaliveTimeout):
+				a.reportConnectionLost(fmt.Errorf("keepalive: no response within %s", keepaliveTimeout))
+				return
+			}
+		}
+	}()
+}
+
+// reportConnectionLost tells the client the connection is dead and closes
+// it, so anything still blocked on it (a channel read, a pending SFTP
+// request) unblocks instead of hanging on a peer that will never answer.
+func (a *agentSession) reportConnectionLost(err error) {
+	a.writeError(0, errConnectionLost, err)
+	if client := a.client(); client != nil {
+		client.Close()
+	}
+}
 
 // promptHostKey is the hostKeyPrompter connect passes to tcpHostKeyCallback:
 // a TOFU decision round-tripped to the client over the control channel.
@@ -446,6 +525,8 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 		a.resize(channelID, msg)
 	case "close_channel":
 		a.closeChannel(channelID)
+	case "sftp_op":
+		a.sftpOp(msg)
 	default:
 		a.writeError(channelID, errProtocolError, fmt.Errorf("unknown message %q", msg.Msg))
 	}
@@ -460,15 +541,24 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 	}
 }
 
-// handleData writes an incoming data frame to the target channel's remote
-// stdin. There is no stream tag to interpret here (unlike an outgoing data
-// frame): everything the client sends is keystrokes/command input.
+// handleData writes an incoming data frame to the target channel: a
+// shell/exec channel's remote stdin, or an sftp_upload channel's remote
+// file. There is no stream tag to interpret here (unlike an outgoing data
+// frame): everything the client sends is keystrokes/command input or
+// upload bytes, never something split across two streams.
 func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	ch := a.channel(channelID)
 	if ch == nil {
 		return // channel already closed; nothing left to write to
 	}
-	ch.stdin.Write(payload)
+	switch {
+	case ch.stdin != nil:
+		ch.stdin.Write(payload)
+	case ch.sftpFile != nil:
+		if _, err := ch.sftpFile.Write(payload); err != nil {
+			a.writeError(channelID, classifySFTPError(err), err)
+		}
+	}
 }
 
 func (a *agentSession) channel(id uint32) *agentChannel {
@@ -477,12 +567,27 @@ func (a *agentSession) channel(id uint32) *agentChannel {
 	return a.chans[id]
 }
 
-// openChannel opens a new SSH session on the shared client for a shell (no
-// command) or exec (a command) request, wires its stdin/stdout/stderr into
-// the framed protocol, and starts it running. wantPty mirrors connect.go's
-// own default (a pseudo-terminal unless the request is a command that
-// explicitly declined one).
+// openChannel dispatches an open_channel request by kind: "shell"/"exec"
+// here (an SSH session), "sftp_upload"/"sftp_download" to agentsftp.go,
+// and "forward_local"/"forward_remote"/"forward_socks" to forwarding.go.
 func (a *agentSession) openChannel(msg controlMessage) {
+	switch msg.Kind {
+	case "sftp_upload", "sftp_download":
+		a.openSFTPChannel(msg)
+		return
+	case "forward_local", "forward_remote", "forward_socks":
+		a.openForwardChannel(msg)
+		return
+	}
+	a.openShellChannel(msg)
+}
+
+// openShellChannel opens a new SSH session on the shared client for a
+// shell (no command) or exec (a command) request, wires its
+// stdin/stdout/stderr into the framed protocol, and starts it running.
+// wantPty mirrors connect.go's own default (a pseudo-terminal unless the
+// request is a command that explicitly declined one).
+func (a *agentSession) openShellChannel(msg controlMessage) {
 	session, err := a.client().NewSession()
 	if err != nil {
 		a.writeError(0, errUnknown, fmt.Errorf("opening session: %w", err))
@@ -572,9 +677,22 @@ func (a *agentSession) openChannel(msg controlMessage) {
 		return
 	}
 
-	go a.pumpToClient(id, streamStdout, stdout)
-	go a.pumpToClient(id, streamStderr, stderr)
-	go a.waitChannel(id, ch)
+	// session.Wait (in waitChannel) is not synchronized with StdoutPipe/
+	// StderrPipe's own internal buffering -- golang.org/x/crypto/ssh can
+	// report the exit-status request before a pumpToClient goroutine has
+	// been scheduled to drain the last of what's sitting in a pipe ahead
+	// of it, which reordered exit_status before its own channel's last
+	// data frame in practice (caught by a fake SSH server fast enough to
+	// expose it: pumpSFTPDownload has no such race, since it IS the
+	// reader driving its own completion signal). wg makes waitChannel
+	// block until both pumps have reached EOF -- which, for a well-behaved
+	// remote, only happens once the channel itself is done sending data --
+	// before it ever calls Wait, so every data frame is written first.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); a.pumpToClient(id, streamStdout, stdout) }()
+	go func() { defer wg.Done(); a.pumpToClient(id, streamStderr, stderr) }()
+	go a.waitChannel(id, ch, &wg)
 }
 
 // pumpToClient relays one of a channel's remote output streams to the
@@ -599,8 +717,10 @@ func (a *agentSession) pumpToClient(id uint32, stream byte, r io.Reader) {
 // remote session ends, replacing connect.go's os.Exit(status) (fine for a
 // one-shot process, but this one serves many channels and must never exit
 // the whole agent over one of them) with a structured field the client can
-// inspect.
-func (a *agentSession) waitChannel(id uint32, ch *agentChannel) {
+// inspect. Waits for wg (both output pumps having reached EOF) first -- see
+// the ordering comment at this function's one call site.
+func (a *agentSession) waitChannel(id uint32, ch *agentChannel, wg *sync.WaitGroup) {
+	wg.Wait()
 	err := ch.session.Wait()
 	exitCode := 0
 	var exitErr *ssh.ExitError
@@ -620,8 +740,8 @@ func (a *agentSession) waitChannel(id uint32, ch *agentChannel) {
 
 func (a *agentSession) resize(channelID uint32, msg controlMessage) {
 	ch := a.channel(channelID)
-	if ch == nil {
-		return
+	if ch == nil || ch.session == nil {
+		return // not a shell/exec channel (or already closed); resize is meaningless for the others
 	}
 	if msg.Cols <= 0 || msg.Rows <= 0 {
 		a.writeError(channelID, errProtocolError, fmt.Errorf("resize needs positive cols/rows, got %dx%d", msg.Cols, msg.Rows))
@@ -632,9 +752,29 @@ func (a *agentSession) resize(channelID uint32, msg controlMessage) {
 	}
 }
 
+// closeChannel ends channelID's operation, however that channel kind ends
+// one: a shell/exec session simply closes; an sftp_upload finalizes (see
+// finalizeUpload -- close_channel is its "no more bytes coming" signal,
+// not just cleanup); an in-progress sftp_download's context is cancelled,
+// letting pumpSFTPDownload report and clean up on its own; a forward's
+// listener closes, ending new connections (ones already in flight finish
+// or fail on their own).
 func (a *agentSession) closeChannel(channelID uint32) {
-	if ch := a.removeChannel(channelID); ch != nil {
+	ch := a.removeChannel(channelID)
+	if ch == nil {
+		return
+	}
+	switch {
+	case ch.session != nil:
 		ch.session.Close()
+	case ch.sftpFile != nil && ch.isUpload:
+		a.finalizeUpload(channelID, ch)
+	case ch.sftpFile != nil:
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+	case ch.listener != nil:
+		ch.listener.Close()
 	}
 }
 
@@ -652,7 +792,17 @@ func (a *agentSession) closeAllChannels() {
 	a.chans = make(map[uint32]*agentChannel)
 	a.chansMu.Unlock()
 	for _, ch := range chans {
-		ch.session.Close()
+		switch {
+		case ch.session != nil:
+			ch.session.Close()
+		case ch.sftpFile != nil:
+			if ch.cancel != nil {
+				ch.cancel()
+			}
+			ch.sftpFile.Close()
+		case ch.listener != nil:
+			ch.listener.Close()
+		}
 	}
 }
 

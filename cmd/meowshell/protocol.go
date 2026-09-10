@@ -191,4 +191,45 @@ type controlMessage struct {
 	KeystorePublicKeys [][]byte `json:"keystore_public_keys,omitempty"`
 
 	AgentForwarding bool `json:"agent_forwarding,omitempty"` // forward the local ssh-agent (if any) to the remote, once connected
+
+	// sftp_op (client -> agent, request/response, no channel -- paired by
+	// RequestID above, reused here for the same "which reply is this"
+	// purpose it serves for prompts) / sftp_result (agent -> client).
+	// Op selects the operation: ls, stat, lstat, mkdir, mkdir_all, rmdir,
+	// remove, rename, chmod, chown, symlink, readlink, truncate, realpath.
+	// Which of the fields below apply depends on Op; see agentsftp.go.
+	Op      string `json:"op,omitempty"`
+	Path    string `json:"path,omitempty"`
+	NewPath string `json:"new_path,omitempty"` // rename's destination
+	Mode    uint32 `json:"mode,omitempty"`     // chmod, or an upload's local mode to preserve remotely
+	UID     int    `json:"uid,omitempty"`
+	GID     int    `json:"gid,omitempty"`
+	Target  string `json:"target,omitempty"`   // symlink's target, or readlink's result
+	Size    int64  `json:"size,omitempty"`     // truncate's target size, or (on channel_opened) a download's total size
+	ModTime int64  `json:"mod_time,omitempty"` // unix seconds; an upload's mtime to preserve remotely
+
+	// open_channel (sftp_upload/sftp_download) reuses Path above for the
+	// remote file and Preserve for whether to carry mode+mtime across;
+	// progress (agent -> client, sftp_download) reuses the channel's own
+	// frame ChannelID, so BytesDone/BytesTotal are its only fields.
+	Preserve  bool  `json:"preserve,omitempty"`
+	BytesDone int64 `json:"bytes_done,omitempty"`
+
+	Entries []sftpEntry `json:"entries,omitempty"` // sftp_result for ls/stat/lstat
+
+	// open_channel (forward_local/forward_remote/forward_socks) / its
+	// channel_opened reply; see forwarding.go.
+	ListenAddr string `json:"listen_addr,omitempty"` // forward_local/forward_socks: where the agent listens; forward_remote: where the *remote* server listens
+	RemoteAddr string `json:"remote_addr,omitempty"` // forward_local/forward_remote: the far end each accepted connection is forwarded to
+	BoundAddr  string `json:"bound_addr,omitempty"`  // channel_opened: the actual bound listen address (useful when a port of 0 asked for an OS-assigned one)
+}
+
+// sftpEntry is one directory entry or a single file's metadata, the
+// sftp_result payload for the "ls"/"stat"/"lstat" ops.
+type sftpEntry struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Mode    uint32 `json:"mode"`
+	ModTime int64  `json:"mod_time"` // unix seconds
+	IsDir   bool   `json:"is_dir"`
 }
