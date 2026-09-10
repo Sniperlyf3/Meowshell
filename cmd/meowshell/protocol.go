@@ -192,6 +192,14 @@ type controlMessage struct {
 
 	AgentForwarding bool `json:"agent_forwarding,omitempty"` // forward the local ssh-agent (if any) to the remote, once connected
 
+	// ProxyURL is a SOCKS5 or HTTP CONNECT proxy ("scheme://[user:pass@]host:port")
+	// for the first TCP hop of connect -- part of configure rather than a
+	// CLI flag specifically so proxy credentials never end up on this
+	// process's own command line (readable via /proc/<pid>/cmdline by
+	// anything sharing enough local privilege), the same reasoning Keys
+	// above already gets right.
+	ProxyURL string `json:"proxy_url,omitempty"`
+
 	// sftp_op (client -> agent, request/response, no channel -- paired by
 	// RequestID above, reused here for the same "which reply is this"
 	// purpose it serves for prompts) / sftp_result (agent -> client).
@@ -222,6 +230,32 @@ type controlMessage struct {
 	ListenAddr string `json:"listen_addr,omitempty"` // forward_local/forward_socks: where the agent listens; forward_remote: where the *remote* server listens
 	RemoteAddr string `json:"remote_addr,omitempty"` // forward_local/forward_remote: the far end each accepted connection is forwarded to
 	BoundAddr  string `json:"bound_addr,omitempty"`  // channel_opened: the actual bound listen address (useful when a port of 0 asked for an OS-assigned one)
+
+	// ListenNetwork selects what ListenAddr means for forward_local/
+	// forward_socks: "tcp" (the default when empty) or "unix", in which
+	// case ListenAddr is a filesystem path -- the recommended local
+	// endpoint, since a Unix socket under the caller's own private
+	// directory is enforced by filesystem permissions, unlike a TCP
+	// socket on 127.0.0.1, which most platforms (Android very much
+	// included) let any other local process connect to regardless of
+	// which app owns it.
+	ListenNetwork string `json:"listen_network,omitempty"`
+
+	// AllowNonLoopbackBind must be set true to bind a "tcp" listener to
+	// anything other than loopback (127.0.0.0/8, ::1, or "localhost") --
+	// otherwise open_channel fails outright rather than silently exposing
+	// a forward or SOCKS proxy to the LAN. Meaningless (ignored) for
+	// ListenNetwork "unix".
+	AllowNonLoopbackBind bool `json:"allow_non_loopback_bind,omitempty"`
+
+	// SocksUsername/SocksPassword (forward_socks only) turn on RFC 1929
+	// username/password SOCKS5 auth: a client of the proxy must present
+	// this exact pair before anything gets relayed. Leaving both empty
+	// serves the proxy with no authentication at all (SOCKS5's classic
+	// behavior, and still fine on a "unix" listener, since filesystem
+	// permissions are already doing the access control there).
+	SocksUsername string `json:"socks_username,omitempty"`
+	SocksPassword string `json:"socks_password,omitempty"`
 }
 
 // sftpEntry is one directory entry or a single file's metadata, the

@@ -61,7 +61,6 @@ func agentCmd(args []string) error {
 	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	port := fs.String("p", "22", "port number of the destination's SSH service")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts)")
-	proxyURL := fs.String("proxy", "", "SOCKS5 or HTTP CONNECT proxy to reach the first TCP hop through, e.g. socks5://user:pass@proxy:1080")
 	var jumps stringList
 	fs.Var(&jumps, "jump", "an intermediate TCP SSH host to tunnel through first ([user@]host[:port]); repeatable, in order, closest-to-here first")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, agentUsage); fs.PrintDefaults() }
@@ -124,7 +123,7 @@ func agentCmd(args []string) error {
 		verbose:        *verbose,
 		port:           *port,
 		knownHostsPath: khPath,
-		proxyURL:       *proxyURL,
+		proxyURL:       cfg.ProxyURL,
 		auth:           auth,
 	})
 	if err != nil {
@@ -185,7 +184,7 @@ type connectOptions struct {
 	verbose        bool
 	port           string
 	knownHostsPath string
-	proxyURL       string           // SOCKS5 or HTTP CONNECT proxy for the first TCP hop only; see proxyDialer
+	proxyURL       string           // SOCKS5 or HTTP CONNECT proxy for the first TCP hop only; see proxyDialer. From the configure message, not a flag -- proxy credentials never belong on this process's own argv.
 	auth           []ssh.AuthMethod // from buildAuthMethods; every hop dials with the same auth list
 }
 

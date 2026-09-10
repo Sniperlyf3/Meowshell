@@ -271,13 +271,40 @@ await using var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", 
 Console.WriteLine($"forwarding through {forward.BoundAddress}");
 ```
 
+**Forward/SOCKS access control.** A loopback TCP listener is reachable by
+any other local process — on Android, by any other app on the device, not
+just this one. So `OpenLocalForwardAsync`/`OpenRemoteForwardAsync`/
+`OpenSocksForwardAsync` refuse to bind anything other than loopback
+(`127.0.0.0/8`, `::1`, `localhost`) unless you pass `allowNonLoopbackBind:
+true` deliberately, and `OpenSocksForwardAsync` requires SOCKS5
+username/password auth (RFC 1929) by default — a random token is generated
+for you and comes back on `MeowshellForward.SocksUsername`/`SocksPassword`;
+pass `requireAuth: false` for the classic unauthenticated behavior, or your
+own credentials instead of the generated pair. Where a caller (an Android
+app, say) can hand a filesystem path to whatever will connect to the
+forward, prefer a Unix domain socket over TCP loopback entirely —
+`OpenLocalForwardOnUnixSocketAsync`/`OpenSocksForwardOnUnixSocketAsync`
+bind a `0600` socket under a path you choose, so filesystem permissions
+(not "which port happened to be free") are what restrict access:
+
+```csharp
+await using var forward = await connection.OpenLocalForwardOnUnixSocketAsync(
+    Path.Combine(appPrivateDir, "pg.sock"), "10.0.0.5:5432");
+
+await using var socks = await connection.OpenSocksForwardAsync("127.0.0.1:0");
+Console.WriteLine($"SOCKS5 proxy at {socks.BoundAddress}, auth {socks.SocksUsername}:{socks.SocksPassword}");
+```
+
 It's also the only type here that can reach a **general SSH host**, not
 just a tailcat address — pass `"[user@]host[:port]"` instead of a tailcat
 address, and it dials over TCP with real host-key verification (a
 `known_hosts` file, trust-on-first-use for a host seen for the first
 time) instead of tailcat's own WireGuard-peer trust. `jumpHosts` chains
 through one or more bastions first, and `proxyUrl` reaches the first hop
-through a SOCKS5 or HTTP CONNECT proxy.
+through a SOCKS5 or HTTP CONNECT proxy — credentials embedded in it never
+land on the agent process's own command line (readable via `/proc/<pid>/cmdline`
+by anything sharing enough local privilege), the same reasoning the auth
+material below already gets right.
 
 Auth beyond a local ssh-agent — which Android has none of, so this is
 what actually makes an authenticated server reachable from an app —

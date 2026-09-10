@@ -134,7 +134,6 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         if (!string.IsNullOrEmpty(options.DerpMapUrl)) psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
         if (options.Verbose) psi.ArgumentList.Add("--verbose");
         if (!string.IsNullOrEmpty(knownHostsPath)) psi.ArgumentList.Add($"--known-hosts={knownHostsPath}");
-        if (!string.IsNullOrEmpty(proxyUrl)) psi.ArgumentList.Add($"--proxy={proxyUrl}");
         if (jumpHosts is not null)
             foreach (var hop in jumpHosts) psi.ArgumentList.Add($"--jump={hop}");
         psi.ArgumentList.Add(destination);
@@ -154,7 +153,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         };
         process.BeginErrorReadLine();
 
-        await connection.SendConfigureAsync(configure ?? new MeowshellAgentConfigureOptions(), cancellationToken).ConfigureAwait(false);
+        await connection.SendConfigureAsync(configure ?? new MeowshellAgentConfigureOptions(), proxyUrl, cancellationToken).ConfigureAwait(false);
 
         var settled = await Task.WhenAny(connection._connected.Task, Task.Delay(options.Timeout, cancellationToken)).ConfigureAwait(false);
         if (settled != connection._connected.Task)
@@ -166,7 +165,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         return connection;
     }
 
-    private Task SendConfigureAsync(MeowshellAgentConfigureOptions configure, CancellationToken cancellationToken) =>
+    private Task SendConfigureAsync(MeowshellAgentConfigureOptions configure, string? proxyUrl, CancellationToken cancellationToken) =>
         WriteControlAsync(0, new AgentMessage
         {
             Msg = "configure",
@@ -176,6 +175,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             KeystoreKeyIds = configure.KeystoreKeyIds?.ToArray(),
             KeystorePublicKeys = ToJagged(configure.KeystorePublicKeys),
             AgentForwarding = configure.ForwardLocalAgent,
+            // Part of configure rather than the process argv specifically so
+            // proxy credentials never end up readable via /proc/<pid>/cmdline
+            // by anything sharing enough local privilege -- matches Keys etc. above.
+            ProxyUrl = proxyUrl,
         }, cancellationToken);
 
     private static byte[][]? ToJagged(IReadOnlyList<byte[]>? list) => list is null ? null : list.ToArray();
@@ -364,24 +367,82 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     // ---- Port forwarding ----
 
-    /// <summary>"-L": listens locally, forwarding each connection to <paramref name="remoteAddress"/> through the SSH client. A ":0" port in <paramref name="listenAddress"/> gets an OS-assigned one -- read it back from <see cref="MeowshellForward.BoundAddress"/>.</summary>
-    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_local", listenAddress, remoteAddress, cancellationToken);
+    /// <summary>
+    /// "-L": listens locally, forwarding each connection to <paramref name="remoteAddress"/>
+    /// through the SSH client. A ":0" port in <paramref name="listenAddress"/> gets an
+    /// OS-assigned one -- read it back from <see cref="MeowshellForward.BoundAddress"/>.
+    /// Refuses to bind anything other than loopback unless <paramref name="allowNonLoopbackBind"/>
+    /// is true -- a loopback TCP socket is still reachable by any other local process/app
+    /// (very much including on Android), so widening the bind is an explicit, deliberate opt-in
+    /// rather than the default. Prefer <see cref="OpenLocalForwardOnUnixSocketAsync"/> where a
+    /// filesystem path is usable: only the caller's own process can reach a 0600 Unix socket.
+    /// </summary>
+    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, cancellationToken);
 
-    /// <summary>"-R": asks the remote to listen on <paramref name="listenAddress"/>, forwarding each connection it accepts to <paramref name="localAddress"/> on this machine.</summary>
+    /// <summary>
+    /// "-L" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port --
+    /// the recommended local endpoint whenever the caller (e.g. an Android app) can hand the path
+    /// to whatever will connect to it, since filesystem permissions (the agent creates it 0600)
+    /// restrict access to this process, unlike a TCP socket on 127.0.0.1.
+    /// </summary>
+    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
+
+    /// <summary>"-R": asks the remote to listen on <paramref name="listenAddress"/>, forwarding each connection it accepts to <paramref name="localAddress"/> on this machine. This is a virtual listener on the SSH wire, not a local socket, so no Unix-socket or bind-address concern applies here.</summary>
     public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_remote", listenAddress, localAddress, cancellationToken);
+        OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
 
-    /// <summary>"-D": runs a local SOCKS5 proxy on <paramref name="listenAddress"/>, routing outbound connections through the SSH client.</summary>
-    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, cancellationToken);
-
-    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, CancellationToken cancellationToken)
+    /// <summary>
+    /// "-D": runs a local SOCKS5 proxy on <paramref name="listenAddress"/>, routing outbound
+    /// connections through the SSH client. By default this requires RFC 1929 SOCKS5
+    /// username/password auth with a random token generated for you -- read it back from
+    /// <see cref="MeowshellForward.SocksUsername"/>/<see cref="MeowshellForward.SocksPassword"/>
+    /// and configure your SOCKS client with it, since a loopback SOCKS proxy with no auth is
+    /// reachable by any other local process/app. Pass <paramref name="requireAuth"/> false for
+    /// the classic unauthenticated behavior, or your own <paramref name="socksUsername"/>/
+    /// <paramref name="socksPassword"/> instead of an auto-generated pair.
+    /// </summary>
+    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default)
     {
-        var request = new AgentMessage { Msg = "open_channel", Kind = kind, ListenAddr = listenAddress, RemoteAddr = remoteAddress };
+        (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
+        return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, cancellationToken);
+    }
+
+    /// <summary>
+    /// "-D" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port.
+    /// Filesystem permissions on the socket already restrict who can reach it, so
+    /// <paramref name="requireAuth"/> defaults to false here (unlike the TCP overload) --
+    /// pass true (or supply your own credentials) to layer SOCKS5 auth on top anyway.
+    /// </summary>
+    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, CancellationToken cancellationToken = default)
+    {
+        (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
+        return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, cancellationToken);
+    }
+
+    private static (string? Username, string? Password) ResolveSocksAuth(bool requireAuth, string? username, string? password)
+    {
+        if (!requireAuth) return (null, null);
+        if (username is not null && password is not null) return (username, password);
+        return GenerateSocksToken();
+    }
+
+    private static (string Username, string Password) GenerateSocksToken() =>
+        (Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(9)),
+         Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(18)));
+
+    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, CancellationToken cancellationToken)
+    {
+        var request = new AgentMessage
+        {
+            Msg = "open_channel", Kind = kind, ListenAddr = listenAddress, RemoteAddr = remoteAddress,
+            ListenNetwork = listenNetwork, AllowNonLoopbackBind = allowNonLoopbackBind,
+            SocksUsername = socksUsername, SocksPassword = socksPassword,
+        };
         return OpenChannelAsync(request, (id, opened) =>
         {
-            var forward = new MeowshellForward(this, id, opened.BoundAddr ?? listenAddress);
+            var forward = new MeowshellForward(this, id, opened.BoundAddr ?? listenAddress, socksUsername, socksPassword);
             return (forward, (IAgentChannelSink)new AgentIgnoreSink());
         }, cancellationToken);
     }
@@ -421,7 +482,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             _pendingOpenSuccess = (id, opened) =>
             {
                 var (result, sink) = makeResult(id, opened);
-                if (sink is not null) _channels[id] = sink;
+                if (sink is not null) _channels[id] = new AgentChannelDataPump(sink);
                 tcs.TrySetResult(result);
             };
             _pendingOpenFailure = ex => tcs.TrySetException(ex);
@@ -488,6 +549,13 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Registered sinks are always an <see cref="AgentChannelDataPump"/>
+    /// (see <see cref="OpenChannelAsync{T}"/>), so this OnDataAsync call
+    /// always completes synchronously (it only enqueues) -- discarding
+    /// its result here is safe, not a reintroduction of the fire-and-
+    /// forget race the pump exists to fix.
+    /// </summary>
     private void HandleData(uint channelId, byte[] payload)
     {
         if (payload.Length == 0) return;
@@ -649,6 +717,79 @@ internal interface IAgentChannelSink
     void OnFault(Exception ex);
 }
 
+/// <summary>
+/// Wraps a channel's real sink so every frame reaches it strictly in
+/// order, one at a time. The read loop used to fire-and-forget straight
+/// into the sink (<c>_ = sink.OnDataAsync(...)</c>): under backpressure
+/// (a <see cref="System.IO.Pipelines.Pipe"/>'s default
+/// PauseWriterThreshold) that could leave two overlapping WriteAsync
+/// calls in flight on the same Pipe at once -- undefined behavior for a
+/// single-writer type. This queues both data frames and the terminal
+/// control message (exit_status/error -- the only ones any sink ever
+/// receives) and drains them on a dedicated background task, so
+/// OnDataAsync calls for one channel are always sequential and the
+/// terminal OnControl always arrives after every data frame queued
+/// ahead of it. The shared read loop itself never blocks on a slow
+/// sink: TryWrite on an unbounded channel always succeeds immediately,
+/// so a backed-up queue only delays that one channel's own delivery,
+/// never any other channel's.
+/// </summary>
+internal sealed class AgentChannelDataPump : IAgentChannelSink
+{
+    private readonly record struct QueueItem(bool IsData, byte Stream, ReadOnlyMemory<byte> Data, AgentMessage? Control);
+
+    private readonly IAgentChannelSink _inner;
+    private readonly System.Threading.Channels.Channel<QueueItem> _queue =
+        System.Threading.Channels.Channel.CreateUnbounded<QueueItem>(new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+    private readonly Task _pumpTask;
+
+    public AgentChannelDataPump(IAgentChannelSink inner)
+    {
+        _inner = inner;
+        _pumpTask = Task.Run(RunAsync);
+    }
+
+    private async Task RunAsync()
+    {
+        await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            if (item.IsData)
+            {
+                // A write failure here reaches the caller through the
+                // sink's own OnControl("error")/OnFault path, not
+                // through this fire-and-forget-from-the-queue's-
+                // perspective call -- nothing more useful to do with
+                // the exception at this point.
+                try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
+                catch { }
+            }
+            else
+            {
+                _inner.OnControl(item.Control!);
+            }
+        }
+    }
+
+    public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
+    {
+        _queue.Writer.TryWrite(new QueueItem(true, stream, data, null));
+        return Task.CompletedTask;
+    }
+
+    public void OnControl(AgentMessage msg)
+    {
+        _queue.Writer.TryWrite(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg));
+        if (msg.Msg is "exit_status" or "error")
+            _queue.Writer.TryComplete();
+    }
+
+    public void OnFault(Exception ex)
+    {
+        _queue.Writer.TryComplete();
+        _inner.OnFault(ex);
+    }
+}
+
 /// <summary>A sink that ignores data/control traffic for its channel -- forward listeners, whose only meaningful message (channel_opened) is consumed before this is even registered.</summary>
 internal sealed class AgentIgnoreSink : IAgentChannelSink
 {
@@ -790,15 +931,23 @@ public sealed class MeowshellForward : IAsyncDisposable
     private readonly MeowshellAgentConnection _connection;
     private readonly uint _id;
 
-    internal MeowshellForward(MeowshellAgentConnection connection, uint id, string boundAddress)
+    internal MeowshellForward(MeowshellAgentConnection connection, uint id, string boundAddress, string? socksUsername, string? socksPassword)
     {
         _connection = connection;
         _id = id;
         BoundAddress = boundAddress;
+        SocksUsername = socksUsername;
+        SocksPassword = socksPassword;
     }
 
     /// <summary>The actual bound listen address -- resolved by the OS when the request asked for port 0.</summary>
     public string BoundAddress { get; }
+
+    /// <summary>The SOCKS5 username a client must present to use this proxy, when opened via <see cref="MeowshellAgentConnection.OpenSocksForwardAsync"/>/<see cref="MeowshellAgentConnection.OpenSocksForwardOnUnixSocketAsync"/> with auth enabled. Null for a forward with no auth, or for a forward_local/forward_remote channel.</summary>
+    public string? SocksUsername { get; }
+
+    /// <summary>The SOCKS5 password paired with <see cref="SocksUsername"/>.</summary>
+    public string? SocksPassword { get; }
 
     /// <summary>Stops the forward: new connections are refused; ones already forwarded finish or fail on their own.</summary>
     public Task CloseAsync(CancellationToken cancellationToken = default) => _connection.CloseForwardAsync(_id, cancellationToken);

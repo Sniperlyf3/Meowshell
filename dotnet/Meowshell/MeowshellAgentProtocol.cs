@@ -165,6 +165,9 @@ internal sealed class AgentMessage
     public byte[][]? KeystorePublicKeys { get; set; }
     public bool AgentForwarding { get; set; }
 
+    /// <summary>SOCKS5/HTTP CONNECT proxy for the first TCP hop, part of configure so it never lands on the agent process's own argv.</summary>
+    public string? ProxyUrl { get; set; }
+
     // sftp_op / sftp_result
     public string? Op { get; set; }
     public string? Path { get; set; }
@@ -183,6 +186,16 @@ internal sealed class AgentMessage
     public string? ListenAddr { get; set; }
     public string? RemoteAddr { get; set; }
     public string? BoundAddr { get; set; }
+
+    /// <summary>"tcp" (default, when null/empty) or "unix" -- selects what ListenAddr means for forward_local/forward_socks.</summary>
+    public string? ListenNetwork { get; set; }
+
+    /// <summary>Must be set true to bind a "tcp" listener to anything other than loopback; ignored for ListenNetwork "unix".</summary>
+    public bool AllowNonLoopbackBind { get; set; }
+
+    /// <summary>forward_socks only: RFC 1929 username/password SOCKS5 auth. Both empty means no auth.</summary>
+    public string? SocksUsername { get; set; }
+    public string? SocksPassword { get; set; }
 }
 
 /// <summary>One directory entry or a single file's metadata -- an sftp_op "ls"/"stat"/"lstat" result, mirroring Go's <c>sftpEntry</c>.</summary>
