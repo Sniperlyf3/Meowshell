@@ -58,6 +58,7 @@ const usage = `meowshell -- an interactive shell over a tailcat address
 USAGE
   meowshell serve [flags] [-- <command> [args...]]
   meowshell connect [flags] <tc-addr> [command [args...]]
+  meowshell agent [flags] <tc-addr>
   meowshell socks [flags]
   meowshell forward [flags] <tc-addr> <mapping> [<mapping> ...]
   meowshell cp [flags] <source>... <target>
@@ -116,6 +117,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "connect":
 		err = connect(os.Args[2:])
+	case "agent":
+		err = agentCmd(os.Args[2:])
 	case "socks":
 		err = socks(os.Args[2:])
 	case "forward":

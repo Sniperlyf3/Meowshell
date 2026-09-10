@@ -184,6 +184,21 @@ func TestConnectRejectsConflictingPtyFlags(t *testing.T) {
 	}
 }
 
+// agent's argv building (tailcatClientArgv) is the same shared helper
+// connect and cp use, covered by TestTailcatClientArgv in cp_test.go. The
+// multiplexed session itself is covered by the protocol-level tests in
+// protocol_test.go plus dotnet/Meowshell.Tests' end-to-end coverage, the
+// same split connect's own session behavior uses above.
+
+func TestAgentRequiresExactlyOneAddress(t *testing.T) {
+	cases := [][]string{nil, {"tcaddr", "extra"}}
+	for _, args := range cases {
+		if err := agentCmd(args); err == nil {
+			t.Errorf("agentCmd(%v) did not error", args)
+		}
+	}
+}
+
 func TestSocksArgv(t *testing.T) {
 	tailcat := writeFakeTailcat(t)
 
