@@ -35,10 +35,10 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 	// services otherwise -- see cmd/tailcat/tailcat.go's own OnTCP, which
 	// serves 22 and any --files/--ssh-authorized-keys ports but sends a RST
 	// for anything else unless "exit-node" is one of its served services).
-	// startE2EServer (used by the general daemon E2E tests) starts a plain
-	// "no-auth-ssh" server via "meowshell serve", which has no equivalent
-	// flag for this -- so this test drives "tailcat serve" directly instead.
-	addr := startE2EServerWithExitNode(t, tailcatBin, home)
+	// meowshell serve's own --exit-node flag (main.go) requests exactly
+	// that -- unlike startE2EServer (used by the general daemon E2E tests),
+	// which starts a plain "no-auth-ssh" server with no forwarding at all.
+	addr := startE2EServerWithExitNode(t, tailcatBin, meowshellBin, home)
 
 	// Stands in for "a service running on the server": from the tailcat
 	// server's own point of view this is its own loopback, since the test
@@ -143,18 +143,17 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 	})
 }
 
-// startE2EServerWithExitNode starts a real "tailcat serve" (not through
-// meowshell -- meowshell's own "serve" subcommand has no way to also
-// request the "exit-node" service) over a hermetic local DERP relay,
-// serving "no-auth-ssh" (so an agent can still connect at all) and
-// "exit-node" (so its OnTCP handler forwards any port, not just the ones
-// its other services already listen on -- see this test's own comment at
-// its call site).
-func startE2EServerWithExitNode(t *testing.T, tailcatBin, home string) string {
+// startE2EServerWithExitNode starts "meowshell serve --insecure-no-auth
+// --exit-node" (so an agent can still connect at all, and its OnTCP
+// handler also forwards any port, not just the ones its other services
+// already listen on -- see this test's own comment at its call site) over
+// a hermetic local DERP relay.
+func startE2EServerWithExitNode(t *testing.T, tailcatBin, meowshellBin, home string) string {
 	t.Helper()
 	addrFile := filepath.Join(home, "addr")
-	cmd := exec.Command(tailcatBin, "serve", "no-auth-ssh,exit-node")
+	cmd := exec.Command(meowshellBin, "serve", "--insecure-no-auth", "--exit-node", "--tailcat="+tailcatBin)
 	cmd.Env = append(os.Environ(),
+		"TAILCAT_BIN="+tailcatBin,
 		"TAILCAT_ADDR_FILE="+addrFile,
 		"HOME="+home,
 		"TS_DEBUG_TAILCAT_LOCAL_DERP=1",

@@ -149,6 +149,16 @@ func TestServeArgv(t *testing.T) {
 			args: []string{"--tailcat=" + tailcat, "--", "echo", "hi"},
 			want: []string{tailcat, "serve", "--", "echo", "hi"},
 		},
+		{
+			name: "exit-node alone, no ssh service token",
+			args: []string{"--exit-node", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "exit-node"},
+		},
+		{
+			name: "exit-node combined with no-auth-ssh joins into one comma-separated service token",
+			args: []string{"--insecure-no-auth", "--exit-node", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "no-auth-ssh,exit-node"},
+		},
 	}
 
 	for _, c := range cases {

@@ -132,11 +132,12 @@ and `TailcatListenerOptions`, and inherited by all four options types below
 | `FullAddress` | `false` | Embed the DERP server's info in the address, so a client can connect without fetching a DERP map. |
 | `Psk` | `true` | Include a WireGuard pre-shared key in the address. Only disable it for tailcat clients v0.5.0 and earlier. |
 | `Files` | — | A directory to serve over SFTP, with an optional `:ro`/`:rw`/`:wo`/`:wo+` suffix. Combinable with `AuthorizedKeys`/`InsecureNoAuth` to also serve a shell — but not together with `ForcedCommand`, which would leave the ssh service serving nothing but that one command. |
+| `AllowExitNode` | `false` | Let a client's `MeowshellPortForward`/`MeowshellSocksProxy` (or a `MeowshellAgentConnection`'s own forward_local/forward_socks) reach any port this machine can dial, not just the ports above — tailcat's own "exit-node" service. Without it, forwarding to an unlisted port is refused outright, no matter which client API asks. Pair with `AllowClientKeys` to restrict who gets that reach. |
 | `ForcedCommand` | none (login shell) | Run this command for every session instead of a shell, OpenSSH-`ForceCommand`-style. The command sees `TAILCAT_PEER_KEY`, `TAILCAT_REMOTE_ADDR`, `TAILCAT_LOCAL_ADDR`. |
 
-`AuthorizedKeys`/`InsecureNoAuth`, `Files`, and `ForcedCommand` combine
-freely except for that one case above — set none of the three and
-`StartAsync` throws, since there'd be nothing to serve.
+`AuthorizedKeys`/`InsecureNoAuth`, `Files`, `AllowExitNode`, and
+`ForcedCommand` combine freely except for that one case above — set none
+of the four and `StartAsync` throws, since there'd be nothing to serve.
 
 **`MeowshellSocksOptions`** (for `MeowshellSocksProxy`) — `HomeDirectory` required.
 
@@ -323,14 +324,19 @@ common case with a simpler call shape; reach for this when you also need
 a shell or a forward on the same connection, or need an op neither of
 those expose.
 
-**Forwarding note:** `OpenLocalForwardAsync`/`OpenRemoteForwardAsync`/
-`OpenSocksForwardAsync` only work against a general SSH host. tailcat's
-own embedded SSH service never implements SSH-level port forwarding at
-all (it only ever served a shell/SFTP), so a forward opened against a
-tailcat address accepts local connections without erroring but closes
-every one of them immediately — reach for `MeowshellPortForward` instead
-to tunnel through a tailcat *server*, which is what it's actually built
-for.
+**Forwarding note:** `OpenLocalForwardAsync`/`OpenSocksForwardAsync` also
+work against a tailcat address, not just a general SSH host: tailcat's own
+embedded SSH service never implements SSH-level port forwarding at all (it
+only ever served a shell/SFTP), so these dial out through a native tailcat
+client instead when the destination is a tailcat address — the same
+mechanism `MeowshellPortForward`/`MeowshellSocksProxy` (over
+`tailcat forward`/`tailcat socks`) already use. Either way, the *server*
+has to allow it: `MeowshellOptions.AllowExitNode` requests tailcat's own
+"exit-node" service, without which a forward to any port the server isn't
+already otherwise serving is refused outright — a real, protocol-level
+requirement of tailcat itself, the same for every client API. `OpenRemoteForwardAsync`
+("-R", asking the *far end* to open a listener) is the one exception: it's
+SSH-only, since tailcat has no equivalent feature to fall back to.
 
 ### Errors
 

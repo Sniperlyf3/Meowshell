@@ -185,9 +185,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     // ---- Channels: shell/exec ----
 
-    /// <summary>Opens an interactive shell with a pseudo-terminal.</summary>
-    public Task<MeowshellAgentShellChannel> OpenShellAsync(int columns = 80, int rows = 24, string? term = null, CancellationToken cancellationToken = default) =>
-        OpenShellChannelAsync(new AgentMessage { Msg = "open_channel", Kind = "shell", Cols = columns, Rows = rows, Term = term }, cancellationToken);
+    /// <summary>Opens an interactive shell, with a pseudo-terminal unless <paramref name="pty"/> is set false.</summary>
+    public Task<MeowshellAgentShellChannel> OpenShellAsync(int columns = 80, int rows = 24, string? term = null, bool? pty = null, CancellationToken cancellationToken = default) =>
+        OpenShellChannelAsync(new AgentMessage { Msg = "open_channel", Kind = "shell", Pty = pty, Cols = columns, Rows = rows, Term = term }, cancellationToken);
 
     /// <summary>Runs <paramref name="command"/> non-interactively (or with a pseudo-terminal if <paramref name="pty"/> is true). Elements are joined with plain spaces, same as a real ssh client's trailing command line -- no quoting is added.</summary>
     public Task<MeowshellAgentShellChannel> OpenExecAsync(IReadOnlyList<string> command, bool? pty = null, int columns = 80, int rows = 24, string? term = null, CancellationToken cancellationToken = default) =>

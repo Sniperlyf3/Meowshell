@@ -185,20 +185,21 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
     }
 
     /// <summary>
-    /// -L/-D forwarding (see forwarding.go's doc comment) only works
-    /// against a general SSH host: tailcat's own embedded SSH server never
-    /// registers a "direct-tcpip" channel handler, so it always refuses
-    /// the channel a forward's Dial opens -- confirmed here rather than
-    /// left as an assumption, since a real Go-level fake-SSH-server test
-    /// already proves the *feature* works where the peer supports it (see
-    /// cmd/meowshell/agent_forward_e2e_test.go); what this checks instead
-    /// is that the C# client's own open/close plumbing behaves sanely
-    /// against a peer that can't: the listener still opens successfully
-    /// (BoundAddress comes back), and a forwarded connection is simply
-    /// closed rather than hanging or crashing anything.
+    /// -L/-D forwarding against a tailcat destination: forwardClient
+    /// (tailcatdial.go) dials through a native tailcat.Client instead of
+    /// an SSH direct-tcpip channel there, since tailcat's own embedded SSH
+    /// service never implements the latter (see forwarding.go's doc
+    /// comment) -- the same mechanism tailcat's own "forward"/"socks"
+    /// subcommands use. That dial is still gated by the destination
+    /// server's own tailcat.Server.OnTCP: without <see cref="MeowshellOptions.AllowExitNode"/>
+    /// it refuses anything but the server's own already-served ports, so
+    /// this starts the server with it set and checks actual bytes cross
+    /// the forward to an arbitrary backend -- not just that the listener
+    /// opens (a real Go-level daemon test already proves the underlying
+    /// feature: cmd/meowshell/agent_tailcat_forward_e2e_test.go).
     /// </summary>
     [Fact]
-    public async Task LocalForwardOpensAgainstTailcatButEachConnectionIsRefused()
+    public async Task LocalForwardReachesAnArbitraryBackendOnAnExitNodeServer()
     {
         var real = FindRealBinaries();
         if (real is null) return; // see FindRealBinaries()
@@ -210,6 +211,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
             HomeDirectory = Path.Combine(_dir, "server-home"),
             WorkDirectory = Path.Combine(_dir, "server-work"),
             InsecureNoAuth = true,
+            AllowExitNode = true,
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
         });
@@ -219,6 +221,21 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
         using var backend = new TcpListener(IPAddress.Loopback, 0);
         backend.Start();
+        const string backendReply = "hello from the exit-node-forwarded backend";
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient client;
+                try { client = await backend.AcceptTcpClientAsync(); }
+                catch { return; }
+                _ = Task.Run(async () =>
+                {
+                    using (client)
+                        await client.GetStream().WriteAsync(Encoding.UTF8.GetBytes(backendReply));
+                });
+            }
+        });
 
         await using var forward = await connection.OpenLocalForwardAsync(
             "127.0.0.1:0", $"127.0.0.1:{((IPEndPoint)backend.LocalEndpoint).Port}");
@@ -227,10 +244,13 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         var boundEndpoint = IPEndPoint.Parse(forward.BoundAddress);
         using var socket = new TcpClient();
         await socket.ConnectAsync(boundEndpoint);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var buffer = new byte[256];
-        var n = await socket.GetStream().ReadAsync(buffer, cts.Token);
-        Assert.Equal(0, n); // closed, not hung and not carrying any bytes -- tailcat never accepted the forwarded channel
+        var total = 0;
+        int n;
+        while (total < buffer.Length && (n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), cts.Token)) > 0)
+            total += n;
+        Assert.Equal(backendReply, Encoding.UTF8.GetString(buffer, 0, total));
     }
 
     /// <summary>
