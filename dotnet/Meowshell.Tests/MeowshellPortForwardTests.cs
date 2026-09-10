@@ -2,17 +2,12 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Exercises MeowshellPortForward against a stand-in for meowshell, the
-/// same way <see cref="MeowshellServerTests"/> does for MeowshellServer.
-/// </summary>
 public sealed class MeowshellPortForwardTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("meowshell-forward-test-").FullName;
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Writes stand-in binaries whose "meowshell" records its own argv, one element per line, then runs <paramref name="script"/> (default: stay up).</summary>
     private (MeowshellPortForwardOptions options, string argsFile) Fake(string script = "exec sleep 300\n")
     {
         var bin = Path.Combine(_dir, "bin");
@@ -80,7 +75,7 @@ public sealed class MeowshellPortForwardTests : IDisposable
         Assert.False(forward.Completed.IsCompleted, "forward exited on its own instead of staying up as a listener");
 
         await forward.StopAsync();
-        await forward.StopAsync(); // must not throw
+        await forward.StopAsync();
         Assert.True(forward.Completed.IsCompletedSuccessfully);
         await forward.DisposeAsync();
     }

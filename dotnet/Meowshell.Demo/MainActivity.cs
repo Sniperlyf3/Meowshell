@@ -5,26 +5,14 @@ using Android.Util;
 using Android.Widget;
 using Meowshell;
 
-// Denied by default; without it tailcat cannot reach the network at all.
 [assembly: Android.App.UsesPermission(Android.Manifest.Permission.Internet)]
 
 namespace Meowshell.Demo;
 
-/// <summary>
-/// A real, installable demo: one button generates a fresh throwaway shell
-/// address, one field lets you copy it. Tap "Regenerate" again and the old
-/// address stops working immediately -- a new server, a new ephemeral key,
-/// a new address.
-///
-/// Built the same way Meowshell.AndroidProbe is (MeowshellOptions.Create,
-/// no path or platform check of any kind) but kept running and interactive,
-/// since the point here is a person actually using it, not a pass/fail check.
-/// </summary>
 [Activity(Label = "Meowshell Demo", MainLauncher = true, Exported = true)]
 public sealed class MainActivity : Activity
 {
-    // Long enough that nobody using the app hits it by surprise; Regenerate
-    // starts a fresh server (and so a fresh deadline) at any time regardless.
+
     private static readonly TimeSpan ServerLifetime = TimeSpan.FromHours(4);
 
     private TextView _addressField = null!;
@@ -80,17 +68,13 @@ public sealed class MainActivity : Activity
         _server = null;
         if (old is not null)
         {
-            // The old address must stop working before a new one is handed
-            // out, not after: otherwise both would be live at once.
+
             await old.DisposeAsync();
         }
 
         try
         {
-            // No path, no Context, no platform check: exactly what a real
-            // consumer writes, on any platform. EphemeralKey defaults to
-            // true, so this alone is what makes "Regenerate" regenerate --
-            // a fresh key, and so a fresh address, every call.
+
             var options = MeowshellOptions.Create(ServerLifetime) with
             {
                 InsecureNoAuth = true,

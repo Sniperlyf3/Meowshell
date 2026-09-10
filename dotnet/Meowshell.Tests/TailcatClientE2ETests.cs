@@ -5,23 +5,9 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Runs <see cref="TailcatClient"/> against the real tailcat binary built by
-/// build.sh, feeding its actual output through this library's real parsing
-/// code -- the check that a future tailcat release changing its output
-/// shape breaks this suite, not just the recorded fixtures in
-/// <see cref="TailcatClientTests"/>. Genkey/parse/printpub need no network
-/// (a numeric --region skips the DERP map fetch); resolve/ping/ls need a
-/// live server and real network, so they also cover the same ground as
-/// <see cref="MeowshellServerE2ETests"/> from the client side.
-///
-/// Skipped (each test returns immediately) when the real binaries are not
-/// available, e.g. a local "dotnet test" run without a "dist" build.
-/// </summary>
 public sealed class TailcatClientE2ETests : IDisposable
 {
-    // Same reasoning as MeowshellServerE2ETests: a tailcat address is a live
-    // credential, so it must never reach a CI log verbatim.
+
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
     private static void Mask(string value)
@@ -36,7 +22,6 @@ public sealed class TailcatClientE2ETests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Same layout as MeowshellServerE2ETests.RealBinaries(). Returns null (skip) if either binary is unavailable.</summary>
     private (string binDir, string tailcatPath)? FindRealBinaries()
     {
         var tailcatSrc = Environment.GetEnvironmentVariable(TailcatEnvVar);
@@ -75,11 +60,10 @@ public sealed class TailcatClientE2ETests : IDisposable
     public async Task GenerateKeyAndParseRoundTripAgainstTheRealBinary()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
         var options = ClientOptions(bin);
 
-        // A numeric region needs no DERP map fetch, so this needs no network.
         var address = await TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions
         {
             Name = "e2e-server-key",
@@ -102,7 +86,7 @@ public sealed class TailcatClientE2ETests : IDisposable
     public async Task GenerateKeyForAClientReturnsAPublicKey()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var pub = await TailcatClient.GenerateKeyAsync(ClientOptions(bin), new TailcatKeyOptions
@@ -117,7 +101,7 @@ public sealed class TailcatClientE2ETests : IDisposable
     public async Task PrintPubReturnsAPublicKeyWithNoSavedKey()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var pub = await TailcatClient.PrintPubAsync(ClientOptions(bin));
@@ -128,7 +112,7 @@ public sealed class TailcatClientE2ETests : IDisposable
     public async Task ParseThrowsOnAGenuinelyInvalidAddress()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var ex = await Assert.ThrowsAsync<TailcatException>(
@@ -136,23 +120,11 @@ public sealed class TailcatClientE2ETests : IDisposable
         Assert.NotEqual(0, ex.ExitCode);
     }
 
-    /// <summary>
-    /// A malformed address fails address parsing before any network call,
-    /// so unlike most tests here this needs no live server or DERP access
-    /// -- and it's the case ConnectAsync's fail-fast timeout race exists
-    /// for: the failure has to surface as a thrown exception from
-    /// ConnectAsync itself, not just an eventually-faulted Completed the
-    /// caller happened to never await. TailcatSshSession is built on
-    /// MeowshellAgentConnection, whose failures report a typed
-    /// MeowshellErrorCode rather than a process exit code (the agent
-    /// process itself need not have exited nonzero at all for a connect
-    /// attempt to fail at the protocol level) -- ExitCode is always 0 here.
-    /// </summary>
     [Fact]
     public async Task SshSessionConnectAsyncThrowsOnAGenuinelyInvalidAddress()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var ex = await Assert.ThrowsAsync<TailcatException>(
@@ -160,20 +132,11 @@ public sealed class TailcatClientE2ETests : IDisposable
         Assert.NotEqual(MeowshellErrorCode.None, ex.Code);
     }
 
-    /// <summary>
-    /// Starts a real server (real binaries, real network -- the default
-    /// tailcat.dev DERP map) and exercises resolve/ping/ls against it
-    /// through TailcatClient, the client-side counterpart to
-    /// MeowshellServerE2ETests. Needs real network the same way that class
-    /// does: skips no differently than the other tests here when the
-    /// binaries are missing, but will fail rather than skip if network
-    /// access to tailcat.dev is blocked (as in this sandbox; CI has it).
-    /// </summary>
     [Fact]
     public async Task ResolvePingAndLsAgainstARealRunningServer()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var served = Path.Combine(_dir, "served");
@@ -219,18 +182,11 @@ public sealed class TailcatClientE2ETests : IDisposable
         await server.StopAsync();
     }
 
-    /// <summary>
-    /// Uploads a file to a real server's writable "files" share, confirms
-    /// it landed via ListFilesAsync, then downloads it back to a different
-    /// local path and checks the bytes round-tripped exactly -- CpAsync and
-    /// TailcatPath exercised against the real system scp, not a stand-in.
-    /// Needs real network the same way <see cref="ResolvePingAndLsAgainstARealRunningServer"/> does.
-    /// </summary>
     [Fact]
     public async Task CpUploadsAndDownloadsAFileAgainstARealServer()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var served = Path.Combine(_dir, "served-rw");
@@ -271,19 +227,11 @@ public sealed class TailcatClientE2ETests : IDisposable
         await server.StopAsync();
     }
 
-    /// <summary>
-    /// Opens an interactive pseudo-terminal session against a real server
-    /// and drives it entirely through TailcatSshSession's Output/WriteAsync
-    /// -- the same shape an Android app with no real console would use --
-    /// confirming a real shell prompt appears, a command's output comes
-    /// back, and exiting ends the session cleanly. Needs real network the
-    /// same way <see cref="ResolvePingAndLsAgainstARealRunningServer"/> does.
-    /// </summary>
     [Fact]
     public async Task SshSessionRunsAnInteractiveShellAgainstARealServer()
     {
         var real = FindRealBinaries();
-        if (real is null) return; // see FindRealBinaries()
+        if (real is null) return;
         var (bin, _) = real.Value;
 
         var serverOptions = new MeowshellOptions
@@ -311,7 +259,6 @@ public sealed class TailcatClientE2ETests : IDisposable
         await session.Completed;
     }
 
-    /// <summary>Reads from stream until <paramref name="marker"/> has appeared or <paramref name="timeout"/> elapses, returning everything read so far either way.</summary>
     private static async Task<string> ReadUntilAsync(Stream stream, string marker, TimeSpan timeout)
     {
         var buffer = new byte[4096];

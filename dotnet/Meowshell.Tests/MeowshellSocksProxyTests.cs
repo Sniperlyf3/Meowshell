@@ -2,17 +2,12 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Exercises MeowshellSocksProxy against a stand-in for meowshell, the same
-/// way <see cref="MeowshellServerTests"/> does for MeowshellServer.
-/// </summary>
 public sealed class MeowshellSocksProxyTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("meowshell-socks-test-").FullName;
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Writes stand-in binaries whose "meowshell" records its own argv, one element per line, then runs <paramref name="script"/> (default: stay up).</summary>
     private (MeowshellSocksOptions options, string argsFile) Fake(string script = "exec sleep 300\n")
     {
         var bin = Path.Combine(_dir, "bin");
@@ -46,9 +41,6 @@ public sealed class MeowshellSocksProxyTests : IDisposable
             Verbose = true,
         });
 
-        // StartAsync returns as soon as the process is created, with no
-        // handoff file to wait on the way MeowshellServer has -- give the
-        // fake's own write a moment to land.
         for (var i = 0; i < 100 && !File.Exists(argsFile); i++)
             await Task.Delay(50);
 
@@ -69,7 +61,7 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         Assert.False(proxy.Completed.IsCompleted, "the proxy exited on its own instead of staying up as a listener");
 
         await proxy.StopAsync();
-        await proxy.StopAsync(); // must not throw
+        await proxy.StopAsync();
         Assert.True(proxy.Completed.IsCompletedSuccessfully);
         await proxy.DisposeAsync();
     }

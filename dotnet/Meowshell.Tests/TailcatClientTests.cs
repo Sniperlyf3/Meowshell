@@ -2,29 +2,12 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
-/// <summary>
-/// Exercises TailcatClient against a stand-in for the bare tailcat binary --
-/// unlike MeowshellServer/MeowshellSocksProxy/MeowshellPortForward, these
-/// calls never go through meowshell, so the fake here plays "tailcat"
-/// directly (CpAsync goes through meowshell too, but only on Android; this
-/// non-Android test process always takes its system-scp path). The
-/// PlatformNotSupportedException SshAsync raises on Android isn't covered
-/// here: OperatingSystem.IsAndroid() reflects the real runtime, not
-/// something this net8.0 test process can fake.
-///
-/// The parsing tests below feed real output captured from the actual
-/// tailcat binary (built from tailscale/tailcat, run against a hermetic
-/// local DERP+STUN server -- see tailscale.com/tstest/integration), not
-/// guessed strings, so a future tailcat release changing its output shape
-/// fails these loudly rather than silently producing wrong typed results.
-/// </summary>
 public sealed class TailcatClientTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("tailcat-client-test-").FullName;
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    /// <summary>Writes a stand-in "tailcat" running <paramref name="script"/>, recording its own argv, one element per line, plus a trivial "meowshell" (unused, but MeowshellBinaries.Locate requires both to exist).</summary>
     private (TailcatClientOptions options, string argsFile) Fake(string script)
     {
         var bin = Path.Combine(_dir, "bin");
@@ -51,7 +34,6 @@ public sealed class TailcatClientTests : IDisposable
         }, argsFile);
     }
 
-    /// <summary>Same idea as <see cref="Fake"/>, but for GetEnvironmentAsync, which runs "meowshell" directly rather than "tailcat".</summary>
     private TailcatClientOptions FakeMeowshell(string script)
     {
         var bin = Path.Combine(_dir, "bin");
@@ -115,9 +97,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task GenerateKeyThrowsOnUnexpectedOutputShape()
     {
-        // A zero exit but output that isn't a tailcat address at all --
-        // this should never happen against a real binary, but must not be
-        // silently trusted if it does.
+
         var (options, _) = Fake("echo not-an-address\n");
         var ex = await Assert.ThrowsAsync<TailcatException>(() =>
             TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions { Name = "key" }));
@@ -142,8 +122,6 @@ public sealed class TailcatClientTests : IDisposable
         Assert.Equal(["genkey", "--list"], File.ReadAllLines(argsFile));
     }
 
-    // Captured from `tailcat parse <addr>` for a short address with no
-    // embedded region (just a RegionID reference).
     private const string ParseJsonShort = """
         {
             "ServerPublic": "nodekey:8d927fef23cb84f285a936d650be0d73820f5a613062ed2ffe1922bfe77cf55d",
@@ -153,9 +131,6 @@ public sealed class TailcatClientTests : IDisposable
         }
         """;
 
-    // Captured from `tailcat parse <resolved-addr>`, where <resolved-addr>
-    // came from `tailcat resolve` -- a "full address" embedding its DERP
-    // node directly instead of referencing a region by ID.
     private const string ParseJsonEmbeddedRegion = """
         {
             "ServerPublic": "nodekey:2aeee97e7151c4189254361d2d1ba08553c99b8993881e9375e2f1adb9de7f59",
@@ -265,7 +240,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingParsesADirectPong()
     {
-        // Captured from `tailcat ping <addr>` against a hermetic local server.
+
         var (options, argsFile) = Fake("printf 'pong in 580µs via 127.0.0.1:45437\\n'\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR");
 
@@ -280,7 +255,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingParsesADerpRelayedPong()
     {
-        // Captured from `tailcat ping <addr>` when the connection fell back to DERP.
+
         var (options, _) = Fake("printf 'pong in 680µs via DERP(test)\\n'\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR");
 
@@ -306,8 +281,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingDoesNotThrowOnANonZeroExit()
     {
-        // --until-direct timing out is a meaningful, non-exceptional result,
-        // and can still have printed relayed pongs before giving up.
+
         var (options, argsFile) = Fake("echo 'pong in 42ms via DERP(sfo)'\nexit 1\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR", untilDirect: true, timeout: TimeSpan.FromSeconds(5));
 
@@ -331,8 +305,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesAShortListing()
     {
-        // Captured from `tailcat ls <addr>` against a directory containing
-        // one file and one subdirectory.
+
         var (options, argsFile) = Fake("printf 'hello.txt\\nsubdir/\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: false);
 
@@ -348,7 +321,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesALongListing()
     {
-        // Captured from `tailcat ls -l <addr>` against the same directory.
+
         var (options, argsFile) = Fake(
             "printf -- '-rw-r--r--            3 Sep  9 10:56 hello.txt\\ndrwxr-xr-x         4096 Sep  9 10:56 subdir/\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true);
@@ -380,8 +353,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesALongListingOfASingleFileTarget()
     {
-        // Captured from `tailcat ls -l <addr>:hello.txt` (a file, not a
-        // directory): one entry, no directory traversal.
+
         var (options, _) = Fake("printf -- '-rw-r--r--            3 Sep  9 10:56 hello.txt\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR:hello.txt", longListing: true);
         var entry = Assert.Single(entries);
@@ -392,10 +364,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesAnOlderEntryWithAYearInsteadOfATime()
     {
-        // tailcat prints a year instead of a time of day for anything
-        // modified more than 180 days ago -- not reachable from a fresh
-        // hermetic test server, so this line is built from the verified
-        // "%s %12d %s %s" format (tailcat's ls.go) rather than captured live.
+
         var (options, _) = Fake("printf -- '-rw-r--r--          512 Jan 15  2019 old.txt\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true);
         var entry = Assert.Single(entries);
@@ -534,8 +503,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task CpDoesNotThrowOnANonZeroExit()
     {
-        // Like SshAsync, an arbitrary scp/remote-command exit code isn't
-        // "tailcat itself failed" -- it's returned, not thrown.
+
         var (options, _) = Fake("echo 'scp: no such file or directory' >&2\nexit 1\n");
         var result = await TailcatClient.CpAsync(
             options, TailcatPath.Local("missing.txt"), TailcatPath.Remote(new TailcatAddress("tcADDR")));
@@ -566,7 +534,7 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task GetEnvironmentParsesAFullMeowshellEnvReport()
     {
-        // Shape captured from cmd/meowshell/main.go's printEnv().
+
         var options = FakeMeowshell(
             "printf 'shell /bin/bash\\nhome  /home/e2e\\nuser  e2e\\npath  /usr/bin:/bin\\nterm  xterm-256color\\nlang  en_US.UTF-8\\ntailcat /opt/bin/tailcat\\n'\n");
 

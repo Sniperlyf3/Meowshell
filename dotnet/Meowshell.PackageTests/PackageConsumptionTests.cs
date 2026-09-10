@@ -4,38 +4,13 @@ using Meowshell;
 
 namespace Meowshell.PackageTests;
 
-/// <summary>
-/// Consumes Meowshell the way a real app would: as a package, not as
-/// this repo's source, and with only that one package referenced (see the
-/// csproj). Meowshell.Runtime.linux reaches this project only as a
-/// transitive dependency, so this proves two things at once: that adding
-/// just Meowshell is enough to end up with the right binaries on disk
-/// (nothing else here ever adds a runtime package explicitly), and that
-/// once there, MeowshellServer finds and runs them on its own, through
-/// BinaryLocator's search of the package's runtimes/&lt;rid&gt;/native
-/// layout. Meowshell.Tests cannot prove either: it references the
-/// library by ProjectReference and hands MeowshellServer a directory it
-/// built itself, so a broken package layout or a missing dependency would
-/// both pass there and only surface once a consumer actually installed
-/// the package.
-/// </summary>
 public sealed class PackageConsumptionTests : IDisposable
 {
     private readonly string _dir = Directory.CreateTempSubdirectory("tailcat-pkgtest-").FullName;
 
-    // tailcat client error output (e.g. a failed connection) commonly
-    // echoes the target address back; with InsecureNoAuth that address
-    // alone is a live credential, and the server here is still running
-    // when this could fire, so it must never reach a CI log verbatim.
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 
-    // Best-effort second layer alongside Redact() above: "::add-mask::" is a
-    // GitHub Actions runner command, not a .NET/xunit feature, so there is no
-    // guarantee dotnet test's captured console output is scanned for it the
-    // way a shell step's stdout is. Redact() is what actually keeps the
-    // address out of a failure message; this just registers it too, in case
-    // it helps.
     private static void Mask(string value)
     {
         if (!string.IsNullOrEmpty(value)) Console.WriteLine("::add-mask::" + value);
@@ -57,9 +32,7 @@ public sealed class PackageConsumptionTests : IDisposable
     [Fact]
     public async Task ARealSessionRunsUsingOnlyThePackagesOwnDiscovery()
     {
-        // BinaryDirectory is left unset: StartAsync must locate the
-        // binaries itself, exactly as it would for a real consumer that
-        // never sets it either.
+
         var options = new MeowshellOptions
         {
             HomeDirectory = Path.Combine(_dir, "home"),
