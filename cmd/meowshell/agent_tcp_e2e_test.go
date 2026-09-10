@@ -85,6 +85,15 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 
 func startAgent(t *testing.T, meowshellBin, knownHosts, dest string) (*exec.Cmd, *os.File, *bufio.Reader) {
 	t.Helper()
+	return startAgentConfigured(t, meowshellBin, knownHosts, dest, controlMessage{Msg: "configure"})
+}
+
+// startAgentConfigured is startAgent, sending configureMsg (which must set
+// Msg: "configure") as the mandatory first message instead of an empty
+// one -- for a test that needs to supply auth material (Keys,
+// KeystoreKeyIDs, DisableAgent, ...).
+func startAgentConfigured(t *testing.T, meowshellBin, knownHosts, dest string, configureMsg controlMessage) (*exec.Cmd, *os.File, *bufio.Reader) {
+	t.Helper()
 	cmd := exec.Command(meowshellBin, "agent", "--known-hosts="+knownHosts, dest)
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
@@ -108,6 +117,7 @@ func startAgent(t *testing.T, meowshellBin, knownHosts, dest string) (*exec.Cmd,
 			t.Logf("agent stderr:\n%s", stderr.String())
 		}
 	})
+	send(t, stdinW, 0, configureMsg)
 	return cmd, stdinW, bufio.NewReader(stdoutR)
 }
 

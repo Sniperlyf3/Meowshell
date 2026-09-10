@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 const agentUsage = `meowshell agent -- a persistent, multiplexed SSH connection
@@ -92,10 +93,27 @@ func agentCmd(args []string) error {
 	}
 
 	session := newAgentSession(os.Stdin, os.Stdout)
+
+	// The client's auth material (configure) has to be read synchronously,
+	// before serveFrames starts consuming stdin on its own goroutine --
+	// it's the one message with nowhere else to come from, since no
+	// prompt has been raised yet for serveFrames' usual
+	// prompt_response dispatch to deliver it through.
+	cfg, err := session.readConfigure()
+	if err != nil {
+		session.writeError(0, errProtocolError, err)
+		return err
+	}
+	auth, err := session.buildAuthMethods(cfg)
+	if err != nil {
+		session.writeError(0, errAuthFailed, err)
+		return err
+	}
+
 	frameErrCh := make(chan error, 1)
 	go func() { frameErrCh <- session.serveFrames() }()
 
-	err := session.connect(context.Background(), connectOptions{
+	err = session.connect(context.Background(), connectOptions{
 		destination:    dest,
 		jumps:          jumps,
 		tailcatBin:     bin,
@@ -105,12 +123,21 @@ func agentCmd(args []string) error {
 		port:           *port,
 		knownHostsPath: khPath,
 		proxyURL:       *proxyURL,
+		auth:           auth,
 	})
 	if err != nil {
 		session.writeError(0, classifyConnectError(err), err)
 		return err
 	}
 	defer session.closeHops()
+
+	if cfg.AgentForwarding && session.agentForwardSock != "" {
+		if err := agent.ForwardToRemote(session.client(), session.agentForwardSock); err != nil {
+			session.writeError(0, errUnknown, fmt.Errorf("setting up agent forwarding: %w", err))
+		} else {
+			session.agentForwardingReady = true
+		}
+	}
 
 	if err := session.writeControl(0, controlMessage{Msg: "connected"}); err != nil {
 		return err
@@ -155,7 +182,8 @@ type connectOptions struct {
 	verbose        bool
 	port           string
 	knownHostsPath string
-	proxyURL       string // SOCKS5 or HTTP CONNECT proxy for the first TCP hop only; see proxyDialer
+	proxyURL       string           // SOCKS5 or HTTP CONNECT proxy for the first TCP hop only; see proxyDialer
+	auth           []ssh.AuthMethod // from buildAuthMethods; every hop dials with the same auth list
 }
 
 // agentChannel is one multiplexed shell or exec session, live on the
@@ -192,6 +220,15 @@ type agentSession struct {
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
 	nextPromptID atomic.Uint64
+
+	// Auth-related state buildAuthMethods/agentCmd populate before connect
+	// runs and later reads: agentForwardSock is the local ssh-agent socket
+	// (if one was found and configure didn't disable it) ForwardToRemote
+	// needs; agentForwardingReady is set once that forwarding is actually
+	// wired up on the connected client, gating whether openChannel asks
+	// for it per session.
+	agentForwardSock     string
+	agentForwardingReady bool
 }
 
 func newAgentSession(in io.Reader, out io.Writer) *agentSession {
@@ -204,6 +241,27 @@ func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 }
 
 func (a *agentSession) client() *ssh.Client { return a.scPtr.Load() }
+
+// readConfigure reads the client's mandatory first message, synchronously,
+// before serveFrames starts consuming a.in on its own goroutine -- see the
+// comment at its one call site in agentCmd for why that ordering matters.
+func (a *agentSession) readConfigure() (controlMessage, error) {
+	f, err := readFrame(a.in)
+	if err != nil {
+		return controlMessage{}, fmt.Errorf("reading configure: %w", err)
+	}
+	if f.Type != frameTypeControl {
+		return controlMessage{}, fmt.Errorf("expected a configure control frame, got a data frame")
+	}
+	var msg controlMessage
+	if err := json.Unmarshal(f.Payload, &msg); err != nil {
+		return controlMessage{}, fmt.Errorf("decoding configure: %w", err)
+	}
+	if msg.Msg != "configure" {
+		return controlMessage{}, fmt.Errorf("expected %q as the first message, got %q", "configure", msg.Msg)
+	}
+	return msg, nil
+}
 
 // connect dials destination (and any --jump hops before it), completing
 // the SSH handshake for each hop in turn, and publishes the final client
@@ -251,7 +309,7 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 			hkCallback = cb
 		}
 
-		sc, err := dialSSHClient(ctx, dial, remoteAddr, user, hkCallback, sshAgentAuthMethods())
+		sc, err := dialSSHClient(ctx, dial, remoteAddr, user, hkCallback, opts.auth)
 		if err != nil {
 			closeClients(chain)
 			return fmt.Errorf("connecting to %s: %w", hop, err)
@@ -491,6 +549,12 @@ func (a *agentSession) openChannel(msg controlMessage) {
 		a.removeChannel(id)
 		session.Close()
 		return
+	}
+
+	if a.agentForwardingReady {
+		if err := agent.RequestAgentForwarding(session); err != nil {
+			a.writeError(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", err))
+		}
 	}
 
 	switch msg.Kind {

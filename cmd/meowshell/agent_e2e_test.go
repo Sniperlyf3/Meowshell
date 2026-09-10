@@ -58,6 +58,7 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 
 	out := bufio.NewReader(stdout)
+	send(t, stdin, 0, controlMessage{Msg: "configure"})
 	expectConnected(t, out)
 
 	t.Run("exec channel runs a command and reports exit status", func(t *testing.T) {

@@ -155,4 +155,40 @@ type controlMessage struct {
 	Answer    string   `json:"answer,omitempty"`    // password/passphrase
 	Answers   []string `json:"answers,omitempty"`   // keyboard_interactive
 	Cancelled bool     `json:"cancelled,omitempty"` // the user declined to answer at all
+
+	// PromptKind "sign": a Keystore-backed key's Sign, round-tripped the
+	// same way a password or passphrase prompt is (see agentauth.go's
+	// keystoreSigner) rather than as a separate message pair -- it is one
+	// more request/response the client answers, just with binary key
+	// material instead of typed text. KeyID and Algorithm identify which
+	// key and which signature format the agent's SSH negotiation asked
+	// for; []byte fields are base64 on the wire, encoding/json's default
+	// for a byte slice.
+	KeyID     string `json:"key_id,omitempty"`
+	Algorithm string `json:"algorithm,omitempty"`
+	SignData  []byte `json:"sign_data,omitempty"`
+	Signature []byte `json:"signature,omitempty"`
+
+	// configure (client -> agent, mandatory, always the first message on
+	// the connection, before anything else including a prompt_response --
+	// no prompt exists yet to answer at that point). Every public-key
+	// signer this connection may offer, gathered up front rather than
+	// fetched on demand, since SSH tries public-key auth as one method
+	// covering every key at once (see agentauth.go's buildAuthMethods).
+	DisableAgent bool `json:"disable_agent,omitempty"` // skip the local ssh-agent even if one is running
+
+	// Keys are private key blobs (any format ssh.ParsePrivateKey accepts);
+	// Certificates, index-paired with Keys, are OpenSSH certificate public
+	// keys to sign with instead of the bare key at the same index -- a
+	// shorter Certificates than Keys leaves the extra keys uncertified.
+	Keys         [][]byte `json:"keys,omitempty"`
+	Certificates [][]byte `json:"certificates,omitempty"`
+
+	// KeystoreKeyIDs/KeystorePublicKeys are index-paired: a public key the
+	// agent can offer without ever holding the private half, signing
+	// through a "sign" prompt instead (Android Keystore's own use case).
+	KeystoreKeyIDs     []string `json:"keystore_key_ids,omitempty"`
+	KeystorePublicKeys [][]byte `json:"keystore_public_keys,omitempty"`
+
+	AgentForwarding bool `json:"agent_forwarding,omitempty"` // forward the local ssh-agent (if any) to the remote, once connected
 }
