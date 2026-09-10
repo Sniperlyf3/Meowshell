@@ -149,6 +149,18 @@ of the four and `StartAsync` throws, since there'd be nothing to serve.
 | `Verbose` | `false` | Same as `MeowshellOptions.Verbose`. |
 | `GracePeriod` | 3s | Same as `MeowshellOptions.GracePeriod`. |
 
+`MeowshellSocksProxy` exposes a real SOCKS5 proxy, including the UDP
+ASSOCIATE command — but there is currently no `MeowshellServer` on the
+other end that will accept a relayed UDP datagram: `tailcat serve`'s
+shipping CLI never wires up its own UDP relay support (only its test
+suite and README examples do), so a UDP ASSOCIATE request against any
+real `MeowshellServer`/`tailcat serve` destination fails once traffic
+actually needs to flow, even though the SOCKS5 handshake for it succeeds.
+TCP CONNECT and port forwarding are unaffected. Fixing this for real
+would mean patching tailcat's own vendored CLI (`patches/tailcat/`), not
+just meowshell — noted here as a known upstream gap rather than
+something this library's API can currently paper over.
+
 **`MeowshellPortForwardOptions`** (for `MeowshellPortForward`) —
 `HomeDirectory`, `Address`, and `Mappings` (at least one) required.
 
