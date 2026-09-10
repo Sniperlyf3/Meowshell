@@ -89,6 +89,7 @@ shell server above:
 | `MeowshellPortForward` | `meowshell forward` | One or more local TCP ports forwarded to a tailcat server. |
 | `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing and transfer, and (not on Android) a console-attached `ssh` session. All work on Android too, `ssh` included via `TailcatSshSession` below. |
 | `TailcatSshSession` | `meowshell connect` | A native (no system `ssh`/`sftp` binary, on any platform) interactive pseudo-terminal session, driven programmatically — raw `Output`/`WriteAsync`, not a console. The one to use anywhere there's no real console to inherit (an Android app, most of all). |
+| `MeowshellAgentConnection` | `meowshell agent` | A persistent, multiplexed connection — shell/exec, the full SFTP verb set, and `-L`/`-R`/`-D` port forwarding, all over one login instead of a fresh process and handshake per operation. Also the only one of these that can reach a general (non-tailcat) SSH host, with real host-key verification and password/keyboard-interactive/certificate/Keystore-callback auth. See [below](#a-persistent-multiplexed-connection). |
 
 ### Why the long-lived ones go through meowshell
 
@@ -248,6 +249,62 @@ other than a shell, still with a pseudo-terminal unless you set
 process dies unexpectedly, the same as the three listener types; call
 `StopAsync` (or dispose the session) to end it deliberately.
 
+### A persistent, multiplexed connection
+
+`TailcatSshSession`, `CpAsync`, and `ListFilesAsync` each spawn their own
+process and their own full handshake — fine for one thing at a time, but
+opening a shell *and* browsing files against the same host means two
+logins. **`MeowshellAgentConnection`** dials once and keeps the connection
+open, multiplexing every operation over it as its own channel:
+
+```csharp
+await using var connection = await MeowshellAgentConnection.ConnectAsync(options, address);
+
+await using var shell = await connection.OpenShellAsync();
+await shell.WriteAsync("ls -la\n"u8.ToArray());
+await shell.ResizeAsync(columns: 100, rows: 40);   // live, any time -- unlike TailcatSshSession
+
+await connection.UploadAsync("photo.jpg", "photos/photo.jpg", preserve: true);
+var entries = await connection.ListFilesAsync("photos");
+
+await using var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.5:5432");
+Console.WriteLine($"forwarding through {forward.BoundAddress}");
+```
+
+It's also the only type here that can reach a **general SSH host**, not
+just a tailcat address — pass `"[user@]host[:port]"` instead of a tailcat
+address, and it dials over TCP with real host-key verification (a
+`known_hosts` file, trust-on-first-use for a host seen for the first
+time) instead of tailcat's own WireGuard-peer trust. `jumpHosts` chains
+through one or more bastions first, and `proxyUrl` reaches the first hop
+through a SOCKS5 or HTTP CONNECT proxy.
+
+Auth beyond a local ssh-agent — which Android has none of, so this is
+what actually makes an authenticated server reachable from an app —
+comes from `MeowshellAgentConfigureOptions` (private keys and OpenSSH
+certificates as bytes, never written to disk; Keystore-backed keys that
+never leave the app at all, signing through the `SignRequested` event
+instead) plus prompt events answered asynchronously: `HostKeyPromptRequested`,
+`PasswordRequested`, `PassphraseRequested`, `KeyboardInteractiveRequested`.
+Subscribe before calling `ConnectAsync`, since a prompt can fire mid-call.
+
+The full SFTP verb set (`MkdirAsync`, `RenameAsync`, `ChmodAsync`,
+`SymlinkAsync`, `TruncateAsync`, ...) is here too, alongside
+`UploadAsync`/`DownloadAsync` with an `IProgress<T>` callback and
+cancellation via the token — `CpAsync`/`ListFilesAsync` above cover the
+common case with a simpler call shape; reach for this when you also need
+a shell or a forward on the same connection, or need an op neither of
+those expose.
+
+**Forwarding note:** `OpenLocalForwardAsync`/`OpenRemoteForwardAsync`/
+`OpenSocksForwardAsync` only work against a general SSH host. tailcat's
+own embedded SSH service never implements SSH-level port forwarding at
+all (it only ever served a shell/SFTP), so a forward opened against a
+tailcat address accepts local connections without erroring but closes
+every one of them immediately — reach for `MeowshellPortForward` instead
+to tunnel through a tailcat *server*, which is what it's actually built
+for.
+
 ### Errors
 
 Everything that can go wrong at the process level -- a non-zero exit, or a
@@ -256,7 +313,13 @@ comes back as one type, `TailcatException`, carrying `ExitCode` and
 `Diagnostics` (tailcat's own captured stderr, or a description of the
 unexpected output). Its `Message` already includes `Diagnostics`, so
 catching it is normally enough to know what went wrong, with no need to
-subscribe to a `Log` event or inspect a process yourself:
+subscribe to a `Log` event or inspect a process yourself. A failure from
+`MeowshellAgentConnection` also carries a typed `Code` (`MeowshellErrorCode`)
+-- `HostKeyChanged`, `AuthFailed`, `ConnectionLost`, and so on -- so a UI
+can branch on what happened instead of pattern-matching `Diagnostics`
+text; `HostKeyChanged` in particular is worth checking for explicitly,
+since it means a possible MITM and should drive a hard-stop warning, not
+a retry.
 
 ```csharp
 try
@@ -292,9 +355,9 @@ Everything else works on Android too, unchanged in the API: `CpAsync` uses
 the system `scp` everywhere else, but on Android routes through
 meowshell's own native SFTP `cp` instead — same `TailcatPath` arguments,
 same `TailcatResult`, no platform check needed in your own code.
-`ListFilesAsync` and `TailcatSshSession` never depended on a system binary
-anywhere to begin with. `Files`/`ForcedCommand` on `MeowshellServer` also
-work the same on Android as anywhere else.
+`ListFilesAsync`, `TailcatSshSession`, and `MeowshellAgentConnection` never
+depended on a system binary anywhere to begin with. `Files`/`ForcedCommand`
+on `MeowshellServer` also work the same on Android as anywhere else.
 
 ## Packages
 
