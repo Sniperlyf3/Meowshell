@@ -33,7 +33,11 @@ wrapper around tailcat: an SFTP file service and forced-command sessions
 alongside the shell, a SOCKS5 proxy, TCP port forwarding, native interactive
 sessions and file transfer as a *client* too (no system `ssh`/`scp` needed,
 so this also works from inside an Android app), and one-shot operations for
-key management, address inspection, and connectivity checks. See
+key management, address inspection, and connectivity checks. A persistent
+`MeowshellAgentConnection` goes further still: one login multiplexing a
+shell, the full SFTP verb set, and port forwarding together, and the only
+one of these that also reaches a general (non-tailcat) SSH host, with real
+host-key verification and password/certificate/Keystore-backed auth. See
 [`dotnet/README.md`](dotnet/README.md) for the full surface, every option,
 and the one thing (a console-attached `ssh` client, as opposed to a
 programmatic session) an Android app sandbox can't run.

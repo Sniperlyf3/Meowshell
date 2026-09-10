@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -69,7 +70,8 @@ func connect(args []string) error {
 	if err != nil {
 		return err
 	}
-	sc, err := dialSSHClient(bin, tailcatClientArgv(*key, *derpMapURL, *verbose, addr, *port))
+	dial, remoteAddr, hkCallback := tailcatSSHDialer(bin, tailcatClientArgv(*key, *derpMapURL, *verbose, addr, *port))
+	sc, err := dialSSHClient(context.Background(), dial, remoteAddr, "", hkCallback, sshAgentAuthMethods())
 	if err != nil {
 		return err
 	}

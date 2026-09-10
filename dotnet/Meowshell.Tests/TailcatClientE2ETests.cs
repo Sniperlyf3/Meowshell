@@ -142,7 +142,11 @@ public sealed class TailcatClientE2ETests : IDisposable
     /// -- and it's the case ConnectAsync's fail-fast timeout race exists
     /// for: the failure has to surface as a thrown exception from
     /// ConnectAsync itself, not just an eventually-faulted Completed the
-    /// caller happened to never await.
+    /// caller happened to never await. TailcatSshSession is built on
+    /// MeowshellAgentConnection, whose failures report a typed
+    /// MeowshellErrorCode rather than a process exit code (the agent
+    /// process itself need not have exited nonzero at all for a connect
+    /// attempt to fail at the protocol level) -- ExitCode is always 0 here.
     /// </summary>
     [Fact]
     public async Task SshSessionConnectAsyncThrowsOnAGenuinelyInvalidAddress()
@@ -153,7 +157,7 @@ public sealed class TailcatClientE2ETests : IDisposable
 
         var ex = await Assert.ThrowsAsync<TailcatException>(
             () => TailcatSshSession.ConnectAsync(ClientOptions(bin), "tcnotarealaddress"));
-        Assert.NotEqual(0, ex.ExitCode);
+        Assert.NotEqual(MeowshellErrorCode.None, ex.Code);
     }
 
     /// <summary>

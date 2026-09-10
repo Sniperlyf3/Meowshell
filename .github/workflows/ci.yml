@@ -28,7 +28,30 @@ jobs:
         with:
           go-version: stable
 
+      # cmd/meowshell's go.mod replaces github.com/tailscale/tailcat with a
+      # local ./.tailcat-src checkout (see tailcatdial.go's doc comment for
+      # why meowshell imports tailcat's own package at all: forwarding
+      # through a tailcat destination dials via tailcat.Client, the same
+      # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
+      # test need that directory to exist before either can even resolve
+      # imports. A plain, unpatched clone is enough here: the two patches
+      # below only change Android-specific networking behavior, irrelevant
+      # to vetting/testing meowshell on this runner's own host platform.
+      # ./build.sh (further down) later reuses and patches this same
+      # checkout for the real cross-compiled build.
+      - name: Fetch tailcat source (for go.mod's replace directive)
+        env:
+          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+        run: |
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+
       - name: Vet and test meowshell
+        env:
+          # tailcat's go.mod asks for a newer Go than setup-go's stable may
+          # be; let the toolchain fetch it rather than pinning a version here.
+          GOTOOLCHAIN: auto
         run: |
           go vet ./...
           go test ./...

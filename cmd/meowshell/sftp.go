@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -73,37 +73,26 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "tailcat" }
 func (pipeAddr) String() string  { return "tailcat" }
 
-// dialSSHClient starts tailcat's own bare client mode as a subprocess (argv
-// from tailcatClientArgv) and speaks SSH directly over its stdin/stdout --
-// no system ssh binary involved, which is what makes this work in an
-// Android app sandbox (and piped into from anywhere else with no real
-// terminal attached at all). A "no-auth-ssh" or "files" service accepts
-// SSH's "none" auth method (always tried first) on tailcat's own
-// WireGuard-peer trust alone, the same trust tailcat's own native "ls"
-// subcommand relies on -- but a plain "ssh" service configured with
-// --ssh-authorized-keys requires real SSH public-key auth on top of that,
-// which sshAgentAuthMethods offers from the local ssh-agent when one is
-// running (matching what a real ssh client does automatically). Closing
-// the returned client also tears down the subprocess.
-func dialSSHClient(tailcatBin string, argv []string) (*ssh.Client, error) {
-	cmd := exec.Command(tailcatBin, argv...)
-	cmd.Stderr = os.Stderr
-	stdin, err := cmd.StdinPipe()
+// dialSSHClient dials through dial (tailcatDialer, tcpDialer, or
+// jumpDialer -- see transport.go) and speaks SSH directly over the
+// resulting net.Conn: no system ssh binary involved anywhere in this call,
+// which is what makes it work in an Android app sandbox (and piped into
+// from anywhere else with no real terminal attached at all). remoteAddr is
+// passed to the handshake only for hostKeyCallback to key its lookups on
+// ("tailcat" is fine there -- see hostkeys.go for why tailcat transport
+// trusts the peer through WireGuard instead of a host key at all). Closing
+// the returned client also closes whatever dial returned (for the tailcat
+// dialer, that tears down its subprocess too).
+func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, hostKeyCallback ssh.HostKeyCallback, auth []ssh.AuthMethod) (*ssh.Client, error) {
+	conn, err := dial(ctx)
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	conn := &pipeConn{cmd: cmd, stdout: stdout, stdin: stdin}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, "tailcat", &ssh.ClientConfig{
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Auth:            sshAgentAuthMethods(),
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, remoteAddr, &ssh.ClientConfig{
+		User:            user,
+		HostKeyCallback: hostKeyCallback,
+		Auth:            auth,
+		Timeout:         sshHandshakeTimeout,
 	})
 	if err != nil {
 		conn.Close()
@@ -112,9 +101,26 @@ func dialSSHClient(tailcatBin string, argv []string) (*ssh.Client, error) {
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
-// dialSFTP is dialSSHClient plus opening the SFTP subsystem on top.
+// sshHandshakeTimeout bounds ssh.NewClientConn itself, on top of whatever
+// timeout ctx already puts on the dial step -- a TCP host that accepts the
+// connection but never completes (or never finishes) the SSH handshake
+// would otherwise hang dialSSHClient forever, since golang.org/x/crypto/ssh
+// has no context-based cancellation of its own.
+const sshHandshakeTimeout = 20 * time.Second
+
+// tailcatSSHDialer builds the tailcat-transport dialer + host-key callback
+// pair dialSSHClient needs: the shared shape connect.go, cp.go, and
+// agent.go all still use today, while agent.go alone also offers the TCP
+// alternative in transport.go/hostkeys.go.
+func tailcatSSHDialer(tailcatBin string, argv []string) (dialer, string, ssh.HostKeyCallback) {
+	return tailcatDialer(tailcatBin, argv), "tailcat", tailcatHostKeyCallback()
+}
+
+// dialSFTP is dialSSHClient plus opening the SFTP subsystem on top, for
+// connect.go and cp.go's still tailcat-only use.
 func dialSFTP(tailcatBin string, argv []string) (*sftp.Client, io.Closer, error) {
-	sc, err := dialSSHClient(tailcatBin, argv)
+	dial, remoteAddr, hkCallback := tailcatSSHDialer(tailcatBin, argv)
+	sc, err := dialSSHClient(context.Background(), dial, remoteAddr, "", hkCallback, sshAgentAuthMethods())
 	if err != nil {
 		return nil, nil, err
 	}

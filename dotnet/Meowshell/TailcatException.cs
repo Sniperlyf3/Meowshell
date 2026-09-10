@@ -27,12 +27,22 @@ public sealed class TailcatException : Exception
     /// </summary>
     public string Diagnostics { get; }
 
+    /// <summary>
+    /// The typed reason this failed, when one is known -- always set for a
+    /// failure that came back over <see cref="MeowshellAgentConnection"/>'s
+    /// control protocol, <see cref="MeowshellErrorCode.None"/> for one that
+    /// didn't (a plain nonzero process exit, for one of this library's
+    /// other, non-agent APIs).
+    /// </summary>
+    public MeowshellErrorCode Code { get; }
+
     /// <summary>Builds a message combining a short summary with the captured diagnostics.</summary>
-    public TailcatException(string summary, int exitCode, string diagnostics)
+    public TailcatException(string summary, int exitCode, string diagnostics, MeowshellErrorCode code = MeowshellErrorCode.None)
         : base(Compose(summary, diagnostics))
     {
         ExitCode = exitCode;
         Diagnostics = diagnostics;
+        Code = code;
     }
 
     private static string Compose(string summary, string diagnostics) =>

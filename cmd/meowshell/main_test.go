@@ -149,6 +149,16 @@ func TestServeArgv(t *testing.T) {
 			args: []string{"--tailcat=" + tailcat, "--", "echo", "hi"},
 			want: []string{tailcat, "serve", "--", "echo", "hi"},
 		},
+		{
+			name: "exit-node alone, no ssh service token",
+			args: []string{"--exit-node", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "exit-node"},
+		},
+		{
+			name: "exit-node combined with no-auth-ssh joins into one comma-separated service token",
+			args: []string{"--insecure-no-auth", "--exit-node", "--tailcat=" + tailcat},
+			want: []string{tailcat, "serve", "no-auth-ssh,exit-node"},
+		},
 	}
 
 	for _, c := range cases {
@@ -181,6 +191,21 @@ func TestConnectRequiresAnAddress(t *testing.T) {
 func TestConnectRejectsConflictingPtyFlags(t *testing.T) {
 	if err := connect([]string{"-t", "-T", "tcaddr"}); err == nil {
 		t.Fatal("connect with both -t and -T did not error")
+	}
+}
+
+// agent's argv building (tailcatClientArgv) is the same shared helper
+// connect and cp use, covered by TestTailcatClientArgv in cp_test.go. The
+// multiplexed session itself is covered by the protocol-level tests in
+// protocol_test.go plus dotnet/Meowshell.Tests' end-to-end coverage, the
+// same split connect's own session behavior uses above.
+
+func TestAgentRequiresExactlyOneAddress(t *testing.T) {
+	cases := [][]string{nil, {"tcaddr", "extra"}}
+	for _, args := range cases {
+		if err := agentCmd(args); err == nil {
+			t.Errorf("agentCmd(%v) did not error", args)
+		}
 	}
 }
 

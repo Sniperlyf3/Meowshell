@@ -32,6 +32,15 @@
           Pack="true" PackagePath="buildTransitive/net10.0-android36.0/" />
   </ItemGroup>
 
+  <!-- MeowshellAgentConnection's channel Output/Error streams are backed by
+       Pipe: an async producer (the agent's read loop) writing frames as
+       they arrive, a consumer reading them as an ordinary Stream. Framework-
+       provided on many TFMs but not implicitly referenced on this one, so
+       it needs to be explicit. -->
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+  </ItemGroup>
+
   <!-- Depending on the runtime packages here, rather than leaving it to
        each consumer, is what lets referencing this one package be enough:
        from there, NuGet's own RID-based asset selection is what keeps only

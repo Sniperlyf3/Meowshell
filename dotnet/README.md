@@ -89,6 +89,7 @@ shell server above:
 | `MeowshellPortForward` | `meowshell forward` | One or more local TCP ports forwarded to a tailcat server. |
 | `TailcatClient` | `tailcat genkey` / `parse` / `resolve` / `printpub` / `ping` / `ls` / `ssh` / `cp` | One-shot key management, address inspection, connectivity checks, file listing and transfer, and (not on Android) a console-attached `ssh` session. All work on Android too, `ssh` included via `TailcatSshSession` below. |
 | `TailcatSshSession` | `meowshell connect` | A native (no system `ssh`/`sftp` binary, on any platform) interactive pseudo-terminal session, driven programmatically — raw `Output`/`WriteAsync`, not a console. The one to use anywhere there's no real console to inherit (an Android app, most of all). |
+| `MeowshellAgentConnection` | `meowshell agent` | A persistent, multiplexed connection — shell/exec, the full SFTP verb set, and `-L`/`-R`/`-D` port forwarding, all over one login instead of a fresh process and handshake per operation. Also the only one of these that can reach a general (non-tailcat) SSH host, with real host-key verification and password/keyboard-interactive/certificate/Keystore-callback auth. See [below](#a-persistent-multiplexed-connection). |
 
 ### Why the long-lived ones go through meowshell
 
@@ -131,11 +132,12 @@ and `TailcatListenerOptions`, and inherited by all four options types below
 | `FullAddress` | `false` | Embed the DERP server's info in the address, so a client can connect without fetching a DERP map. |
 | `Psk` | `true` | Include a WireGuard pre-shared key in the address. Only disable it for tailcat clients v0.5.0 and earlier. |
 | `Files` | — | A directory to serve over SFTP, with an optional `:ro`/`:rw`/`:wo`/`:wo+` suffix. Combinable with `AuthorizedKeys`/`InsecureNoAuth` to also serve a shell — but not together with `ForcedCommand`, which would leave the ssh service serving nothing but that one command. |
+| `AllowExitNode` | `false` | Let a client's `MeowshellPortForward`/`MeowshellSocksProxy` (or a `MeowshellAgentConnection`'s own forward_local/forward_socks) reach any port this machine can dial, not just the ports above — tailcat's own "exit-node" service. Without it, forwarding to an unlisted port is refused outright, no matter which client API asks. Pair with `AllowClientKeys` to restrict who gets that reach. |
 | `ForcedCommand` | none (login shell) | Run this command for every session instead of a shell, OpenSSH-`ForceCommand`-style. The command sees `TAILCAT_PEER_KEY`, `TAILCAT_REMOTE_ADDR`, `TAILCAT_LOCAL_ADDR`. |
 
-`AuthorizedKeys`/`InsecureNoAuth`, `Files`, and `ForcedCommand` combine
-freely except for that one case above — set none of the three and
-`StartAsync` throws, since there'd be nothing to serve.
+`AuthorizedKeys`/`InsecureNoAuth`, `Files`, `AllowExitNode`, and
+`ForcedCommand` combine freely except for that one case above — set none
+of the four and `StartAsync` throws, since there'd be nothing to serve.
 
 **`MeowshellSocksOptions`** (for `MeowshellSocksProxy`) — `HomeDirectory` required.
 
@@ -146,6 +148,18 @@ freely except for that one case above — set none of the three and
 | `DerpMapUrl` | tailcat's own default | Same as `MeowshellOptions.DerpMapUrl`. |
 | `Verbose` | `false` | Same as `MeowshellOptions.Verbose`. |
 | `GracePeriod` | 3s | Same as `MeowshellOptions.GracePeriod`. |
+
+`MeowshellSocksProxy` exposes a real SOCKS5 proxy, including the UDP
+ASSOCIATE command — but there is currently no `MeowshellServer` on the
+other end that will accept a relayed UDP datagram: `tailcat serve`'s
+shipping CLI never wires up its own UDP relay support (only its test
+suite and README examples do), so a UDP ASSOCIATE request against any
+real `MeowshellServer`/`tailcat serve` destination fails once traffic
+actually needs to flow, even though the SOCKS5 handshake for it succeeds.
+TCP CONNECT and port forwarding are unaffected. Fixing this for real
+would mean patching tailcat's own vendored CLI (`patches/tailcat/`), not
+just meowshell — noted here as a known upstream gap rather than
+something this library's API can currently paper over.
 
 **`MeowshellPortForwardOptions`** (for `MeowshellPortForward`) —
 `HomeDirectory`, `Address`, and `Mappings` (at least one) required.
@@ -176,8 +190,12 @@ when tailcat printed one, and `Success` doesn't throw on its own, since
 e.g. `--until-direct` timing out is meaningful information, not an error),
 `ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp` binary
 involved — returns typed `TailcatFileEntry` records, not raw text), `SshAsync`,
-and `CpAsync`. `GenerateKeyAsync` takes a **`TailcatKeyOptions`** —
-`Name` required:
+`CpAsync`, and `GetEnvironmentAsync` (`meowshell env` — the shell/home/user/
+path/term/lang meowshell resolved for this environment, where it found the
+tailcat binary, and any resolver warnings, as a typed `TailcatEnvironment`;
+useful for diagnosing a broken sandbox up front rather than from a session
+that fails mysteriously once it's already running). `GenerateKeyAsync` takes
+a **`TailcatKeyOptions`** — `Name` required:
 
 | Option | Default | What it does |
 | --- | --- | --- |
@@ -248,6 +266,94 @@ other than a shell, still with a pseudo-terminal unless you set
 process dies unexpectedly, the same as the three listener types; call
 `StopAsync` (or dispose the session) to end it deliberately.
 
+### A persistent, multiplexed connection
+
+`TailcatSshSession`, `CpAsync`, and `ListFilesAsync` each spawn their own
+process and their own full handshake — fine for one thing at a time, but
+opening a shell *and* browsing files against the same host means two
+logins. **`MeowshellAgentConnection`** dials once and keeps the connection
+open, multiplexing every operation over it as its own channel:
+
+```csharp
+await using var connection = await MeowshellAgentConnection.ConnectAsync(options, address);
+
+await using var shell = await connection.OpenShellAsync();
+await shell.WriteAsync("ls -la\n"u8.ToArray());
+await shell.ResizeAsync(columns: 100, rows: 40);   // live, any time -- unlike TailcatSshSession
+
+await connection.UploadAsync("photo.jpg", "photos/photo.jpg", preserve: true);
+var entries = await connection.ListFilesAsync("photos");
+
+await using var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.5:5432");
+Console.WriteLine($"forwarding through {forward.BoundAddress}");
+```
+
+**Forward/SOCKS access control.** A loopback TCP listener is reachable by
+any other local process — on Android, by any other app on the device, not
+just this one. So `OpenLocalForwardAsync`/`OpenRemoteForwardAsync`/
+`OpenSocksForwardAsync` refuse to bind anything other than loopback
+(`127.0.0.0/8`, `::1`, `localhost`) unless you pass `allowNonLoopbackBind:
+true` deliberately, and `OpenSocksForwardAsync` requires SOCKS5
+username/password auth (RFC 1929) by default — a random token is generated
+for you and comes back on `MeowshellForward.SocksUsername`/`SocksPassword`;
+pass `requireAuth: false` for the classic unauthenticated behavior, or your
+own credentials instead of the generated pair. Where a caller (an Android
+app, say) can hand a filesystem path to whatever will connect to the
+forward, prefer a Unix domain socket over TCP loopback entirely —
+`OpenLocalForwardOnUnixSocketAsync`/`OpenSocksForwardOnUnixSocketAsync`
+bind a `0600` socket under a path you choose, so filesystem permissions
+(not "which port happened to be free") are what restrict access:
+
+```csharp
+await using var forward = await connection.OpenLocalForwardOnUnixSocketAsync(
+    Path.Combine(appPrivateDir, "pg.sock"), "10.0.0.5:5432");
+
+await using var socks = await connection.OpenSocksForwardAsync("127.0.0.1:0");
+Console.WriteLine($"SOCKS5 proxy at {socks.BoundAddress}, auth {socks.SocksUsername}:{socks.SocksPassword}");
+```
+
+It's also the only type here that can reach a **general SSH host**, not
+just a tailcat address — pass `"[user@]host[:port]"` instead of a tailcat
+address, and it dials over TCP with real host-key verification (a
+`known_hosts` file, trust-on-first-use for a host seen for the first
+time) instead of tailcat's own WireGuard-peer trust. `jumpHosts` chains
+through one or more bastions first, and `proxyUrl` reaches the first hop
+through a SOCKS5 or HTTP CONNECT proxy — credentials embedded in it never
+land on the agent process's own command line (readable via `/proc/<pid>/cmdline`
+by anything sharing enough local privilege), the same reasoning the auth
+material below already gets right.
+
+Auth beyond a local ssh-agent — which Android has none of, so this is
+what actually makes an authenticated server reachable from an app —
+comes from `MeowshellAgentConfigureOptions` (private keys and OpenSSH
+certificates as bytes, never written to disk; Keystore-backed keys that
+never leave the app at all, signing through the `SignRequested` event
+instead) plus prompt events answered asynchronously: `HostKeyPromptRequested`,
+`PasswordRequested`, `PassphraseRequested`, `KeyboardInteractiveRequested`.
+Subscribe before calling `ConnectAsync`, since a prompt can fire mid-call.
+
+The full SFTP verb set (`MkdirAsync`, `RenameAsync`, `ChmodAsync`,
+`SymlinkAsync`, `TruncateAsync`, ...) is here too, alongside
+`UploadAsync`/`DownloadAsync` with an `IProgress<T>` callback and
+cancellation via the token — `CpAsync`/`ListFilesAsync` above cover the
+common case with a simpler call shape; reach for this when you also need
+a shell or a forward on the same connection, or need an op neither of
+those expose.
+
+**Forwarding note:** `OpenLocalForwardAsync`/`OpenSocksForwardAsync` also
+work against a tailcat address, not just a general SSH host: tailcat's own
+embedded SSH service never implements SSH-level port forwarding at all (it
+only ever served a shell/SFTP), so these dial out through a native tailcat
+client instead when the destination is a tailcat address — the same
+mechanism `MeowshellPortForward`/`MeowshellSocksProxy` (over
+`tailcat forward`/`tailcat socks`) already use. Either way, the *server*
+has to allow it: `MeowshellOptions.AllowExitNode` requests tailcat's own
+"exit-node" service, without which a forward to any port the server isn't
+already otherwise serving is refused outright — a real, protocol-level
+requirement of tailcat itself, the same for every client API. `OpenRemoteForwardAsync`
+("-R", asking the *far end* to open a listener) is the one exception: it's
+SSH-only, since tailcat has no equivalent feature to fall back to.
+
 ### Errors
 
 Everything that can go wrong at the process level -- a non-zero exit, or a
@@ -256,7 +362,13 @@ comes back as one type, `TailcatException`, carrying `ExitCode` and
 `Diagnostics` (tailcat's own captured stderr, or a description of the
 unexpected output). Its `Message` already includes `Diagnostics`, so
 catching it is normally enough to know what went wrong, with no need to
-subscribe to a `Log` event or inspect a process yourself:
+subscribe to a `Log` event or inspect a process yourself. A failure from
+`MeowshellAgentConnection` also carries a typed `Code` (`MeowshellErrorCode`)
+-- `HostKeyChanged`, `AuthFailed`, `ConnectionLost`, and so on -- so a UI
+can branch on what happened instead of pattern-matching `Diagnostics`
+text; `HostKeyChanged` in particular is worth checking for explicitly,
+since it means a possible MITM and should drive a hard-stop warning, not
+a retry.
 
 ```csharp
 try
@@ -292,9 +404,9 @@ Everything else works on Android too, unchanged in the API: `CpAsync` uses
 the system `scp` everywhere else, but on Android routes through
 meowshell's own native SFTP `cp` instead — same `TailcatPath` arguments,
 same `TailcatResult`, no platform check needed in your own code.
-`ListFilesAsync` and `TailcatSshSession` never depended on a system binary
-anywhere to begin with. `Files`/`ForcedCommand` on `MeowshellServer` also
-work the same on Android as anywhere else.
+`ListFilesAsync`, `TailcatSshSession`, and `MeowshellAgentConnection` never
+depended on a system binary anywhere to begin with. `Files`/`ForcedCommand`
+on `MeowshellServer` also work the same on Android as anywhere else.
 
 ## Packages
 

@@ -102,6 +102,18 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     public string? Files { get; init; }
 
     /// <summary>
+    /// Let a client's <see cref="MeowshellPortForward"/>/<see cref="MeowshellSocksProxy"/>
+    /// (or a <see cref="MeowshellAgentConnection"/>'s own forward_local/forward_socks
+    /// channels) reach any port this machine can dial, not just the SSH/files
+    /// ports above -- tailcat's own "exit-node" service. Without it, tailcat's
+    /// protocol-level access gate refuses a forward to any port this server
+    /// wasn't already otherwise serving, no matter which client API asks.
+    /// Pair with <see cref="AllowClientKeys"/> to restrict who gets that
+    /// reach. Passed to meowshell's own <c>--exit-node</c>.
+    /// </summary>
+    public bool AllowExitNode { get; init; }
+
+    /// <summary>
     /// Run this command for every session instead of a login shell, like
     /// OpenSSH's ForceCommand: the client gets no shell, no client-chosen
     /// command, and no SFTP subsystem. The command sees the peer's node key
@@ -240,10 +252,10 @@ public sealed class MeowshellServer : IAsyncDisposable
             throw new ArgumentException(
                 "Set at most one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
         }
-        if (!hasSSH && string.IsNullOrEmpty(options.Files) && options.ForcedCommand.Count == 0)
+        if (!hasSSH && string.IsNullOrEmpty(options.Files) && !options.AllowExitNode && options.ForcedCommand.Count == 0)
         {
             throw new ArgumentException(
-                "Set at least one of AuthorizedKeys, InsecureNoAuth, Files, or ForcedCommand.", nameof(options));
+                "Set at least one of AuthorizedKeys, InsecureNoAuth, Files, AllowExitNode, or ForcedCommand.", nameof(options));
         }
         if (!string.IsNullOrEmpty(options.Files) && hasSSH && options.ForcedCommand.Count > 0)
         {
@@ -293,6 +305,8 @@ public sealed class MeowshellServer : IAsyncDisposable
             psi.ArgumentList.Add("--psk=false");
         if (!string.IsNullOrEmpty(options.Files))
             psi.ArgumentList.Add($"--files={options.Files}");
+        if (options.AllowExitNode)
+            psi.ArgumentList.Add("--exit-node");
         if (options.ForcedCommand.Count > 0)
         {
             psi.ArgumentList.Add("--");

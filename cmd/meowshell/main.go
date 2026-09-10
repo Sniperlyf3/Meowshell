@@ -58,6 +58,7 @@ const usage = `meowshell -- an interactive shell over a tailcat address
 USAGE
   meowshell serve [flags] [-- <command> [args...]]
   meowshell connect [flags] <tc-addr> [command [args...]]
+  meowshell agent [flags] <tc-addr>
   meowshell socks [flags]
   meowshell forward [flags] <tc-addr> <mapping> [<mapping> ...]
   meowshell cp [flags] <source>... <target>
@@ -75,6 +76,11 @@ Serve a shell to holders of the address alone (no SSH auth), restricted
 to one tailcat client key:
 
 	meowshell serve --insecure-no-auth --allow=nodekey:abc...
+
+Also let "tailcat forward"/"tailcat socks" clients reach any port this
+machine can dial, not just the ports above (see --exit-node's own help):
+
+	meowshell serve --insecure-no-auth --exit-node --allow=nodekey:abc...
 
 Connect to one:
 
@@ -116,6 +122,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "connect":
 		err = connect(os.Args[2:])
+	case "agent":
+		err = agentCmd(os.Args[2:])
 	case "socks":
 		err = socks(os.Args[2:])
 	case "forward":
@@ -152,6 +160,7 @@ func serve(args []string) error {
 	fullAddress := fs.Bool("full-address", false, "print a longer tailcat address with embedded DERP server info, so clients can connect without a DERP map fetch. Passed to tailcat's own --full-address")
 	psk := fs.Bool("psk", true, "include a WireGuard pre-shared key in the tailcat address (recommended; disabling weakens security). Passed to tailcat's own --psk")
 	files := fs.String("files", "", "directory to serve to SFTP clients (scp, sftp), with an optional :ro (read-only, the default), :rw, :wo (flat write-only drop box), or :wo+ (recursive write-only drop box) suffix. Can be combined with --authorized-keys/--insecure-no-auth to also serve a shell. Passed to tailcat's own --files")
+	exitNode := fs.Bool("exit-node", false, "let a client's \"tailcat forward\"/\"tailcat socks\" (or an agent connection's own forward_local/forward_socks) reach any port this machine can dial, not just this server's own served ports -- tailcat's own \"exit-node\" service, without which forwarding to an arbitrary port is refused outright (a real, protocol-level requirement of tailcat's own OnTCP gate, not something this flag works around). Combine with --allow to restrict who gets that reach.")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage); fs.PrintDefaults() }
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -161,8 +170,8 @@ func serve(args []string) error {
 	switch {
 	case *authKeys != "" && *noAuth:
 		return fmt.Errorf("--authorized-keys and --insecure-no-auth are mutually exclusive")
-	case !hasSSH && *files == "" && len(command) == 0:
-		return fmt.Errorf("choose what to serve: --authorized-keys=<sources>, --insecure-no-auth, --files=<dir>, or a command after --")
+	case !hasSSH && *files == "" && !*exitNode && len(command) == 0:
+		return fmt.Errorf("choose what to serve: --authorized-keys=<sources>, --insecure-no-auth, --files=<dir>, --exit-node, or a command after --")
 	case *files != "" && hasSSH && len(command) > 0:
 		return fmt.Errorf("--files cannot be combined with a forced command on the ssh/no-auth-ssh service, which would allow nothing but that command")
 	}
@@ -197,6 +206,9 @@ func serve(args []string) error {
 	if *files != "" && *allow == "" {
 		fmt.Fprintln(os.Stderr, "# warning: --files without --allow serves files to anyone who learns this address")
 	}
+	if *exitNode && *allow == "" {
+		fmt.Fprintln(os.Stderr, "# warning: --exit-node without --allow lets anyone who learns this address reach any port this machine can dial")
+	}
 
 	argv := []string{bin, "serve"}
 	if *allow != "" {
@@ -223,12 +235,19 @@ func serve(args []string) error {
 	if *files != "" {
 		argv = append(argv, "--files="+*files)
 	}
+	var services []string
 	if hasSSH {
 		service := "ssh"
 		if *noAuth {
 			service = "no-auth-ssh"
 		}
-		argv = append(argv, service)
+		services = append(services, service)
+	}
+	if *exitNode {
+		services = append(services, "exit-node")
+	}
+	if len(services) > 0 {
+		argv = append(argv, strings.Join(services, ","))
 	}
 	if len(command) > 0 {
 		argv = append(argv, "--")
