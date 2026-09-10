@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"github.com/tailscale/tailcat"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"tailscale.com/types/key"
 )
 
 const agentUsage = `meowshell agent -- a persistent, multiplexed SSH connection
@@ -252,6 +254,16 @@ type agentSession struct {
 	// for it per session.
 	agentForwardSock     string
 	agentForwardingReady bool
+
+	// Set by connect when the final hop is a tailcat address (never for a
+	// --jump hop or a general SSH host) -- what forwardClient needs to
+	// build a native tailcat.Client for forward_local/forward_socks.
+	tcAddr       tailcat.Addr
+	tcKey        key.NodePrivate
+	tcDERPMapURL string
+
+	tcMu     sync.Mutex
+	tcClient *tailcat.Client // lazily built by forwardClient; most connections never open a forward at all
 }
 
 func newAgentSession(in io.Reader, out io.Writer) *agentSession {
@@ -264,6 +276,33 @@ func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 }
 
 func (a *agentSession) client() *ssh.Client { return a.scPtr.Load() }
+
+// forwardClient returns the Dial-shaped client forward_local/forward_socks
+// should dial through: the existing *ssh.Client for a general SSH host
+// (SSH direct-tcpip -- unavailable against tailcat's own embedded SSH
+// service, see forwarding.go's doc comment), or, when the destination is a
+// tailcat address, a native tailcat.Client instead, since forwarding
+// through a tailcat server was never an SSH feature there in the first
+// place (see tailcat's own "forward"/"socks" subcommands). Lazily built
+// and cached: most connections never open a forward at all, and building
+// one starts a real WireGuard session.
+func (a *agentSession) forwardClient() interface {
+	Dial(network, addr string) (net.Conn, error)
+} {
+	if a.tcAddr == "" {
+		return a.client()
+	}
+	a.tcMu.Lock()
+	defer a.tcMu.Unlock()
+	if a.tcClient == nil {
+		a.tcClient = &tailcat.Client{
+			Server:     a.tcAddr,
+			Key:        a.tcKey,
+			DERPMapURL: a.tcDERPMapURL,
+		}
+	}
+	return &tailcatForwardClient{cl: a.tcClient}
+}
 
 // readConfigure reads the client's mandatory first message, synchronously,
 // before serveFrames starts consuming a.in on its own goroutine -- see the
@@ -307,6 +346,14 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 		if last && looksLikeTailcatAddress(hop) {
 			dial = tailcatDialer(opts.tailcatBin, tailcatClientArgv(opts.key, opts.derpMapURL, opts.verbose, hop, opts.port))
 			hkCallback = tailcatHostKeyCallback()
+			tcKey, err := tailcatKeyFromName(opts.key)
+			if err != nil {
+				closeClients(chain)
+				return fmt.Errorf("resolving --key %q for forwarding: %w", opts.key, err)
+			}
+			a.tcAddr = tailcat.Addr(hop)
+			a.tcKey = tcKey
+			a.tcDERPMapURL = opts.derpMapURL
 		} else {
 			var hostPort string
 			user, hostPort = splitUserHost(hop, opts.port)
@@ -356,6 +403,11 @@ func (a *agentSession) closeHops() {
 	if a.sftpClient != nil {
 		a.sftpClient.Close()
 	}
+	a.tcMu.Lock()
+	if a.tcClient != nil {
+		a.tcClient.Close()
+	}
+	a.tcMu.Unlock()
 	closeClients(a.hops)
 }
 

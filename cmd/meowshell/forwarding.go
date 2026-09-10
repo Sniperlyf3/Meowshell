@@ -9,35 +9,39 @@ import (
 	"os"
 )
 
-// openForwardChannel opens one of the three generic SSH forwarding modes,
+// openForwardChannel opens one of the three generic forwarding modes,
 // each as its own listener living inside this agent process for as long
 // as its channel stays open (unlike a shell/exec/SFTP channel, none of
 // these carry their own bytes over the framed protocol at all -- once a
 // forwarded connection is accepted, its bytes flow directly between a
-// local net.Conn and the SSH client's own Dial/Listen, entirely inside
-// this process). Separate from tailcat's own "forward" subcommand
-// (MeowshellPortForward), which tunnels through a tailcat *server*
-// instead -- a different, still-valid use case this doesn't replace.
+// local net.Conn and the far end's own dial, entirely inside this
+// process).
 //
-// Only works against a general SSH host, not against tailcat's own
-// embedded service: tailcat_ssh.go registers no "direct-tcpip" channel
-// handler and no "tcpip-forward" request handler at all (confirmed
-// against its source), so a tailcat server always refuses the channel
-// forward_local/forward_socks need and the global request forward_remote
-// needs -- this isn't a bug here to fix, tailcat's minimal SSH server
-// simply never implemented forwarding. The listener itself still opens
-// successfully either way (nothing about accepting a connection touches
-// the remote yet); the failure lands per forwarded connection instead,
-// silently closing it rather than reporting an error back over the
-// control channel -- a known, minor gap (see proxyForwardedConn) rather
-// than something a caller can currently distinguish from "the backend
-// simply refused."
+// forward_local and forward_socks dial out through forwardClient, which
+// picks the right mechanism for the destination this agent connected to:
+// SSH direct-tcpip (client.Dial) for a general SSH host, or a native
+// tailcat.Client (tailcatdial.go) for a tailcat address -- tailcat's own
+// embedded SSH service registers no "direct-tcpip" channel handler at all
+// (confirmed against tailcat_ssh.go's source), so SSH-level forwarding
+// was never available against it; forwarding through a tailcat server
+// instead uses the same mechanism tailcat's own "forward"/"socks"
+// subcommands do. forward_remote is SSH-only: it asks the *far end* to
+// open a listener (client.Listen / tcpip-forward), a feature only an SSH
+// server can offer, and tailcat's own embedded one doesn't (no
+// "tcpip-forward" global request handler either) -- opening one against a
+// tailcat destination still succeeds (nothing about accepting a
+// connection touches the remote yet) but every connection it accepts is
+// simply refused rather than reported as an error over the control
+// channel, a known, minor gap (see proxyForwardedConn) rather than
+// something a caller can currently distinguish from "the backend simply
+// refused."
 //
 // forward_local and forward_socks create a *local* listener, which needs
 // its own access control: see resolveLocalListener. forward_remote does
-// not -- its "listener" is virtual, implemented entirely over the SSH
-// wire protocol (client.Listen / tcpip-forward) with no local socket of
-// any kind, so nothing else on this machine can reach it that way.
+// not -- when it does work (a general SSH host), its "listener" is
+// virtual, implemented entirely over the SSH wire protocol with no local
+// socket of any kind, so nothing else on this machine can reach it that
+// way.
 func (a *agentSession) openForwardChannel(msg controlMessage) {
 	switch msg.Kind {
 	case "forward_local":
@@ -124,15 +128,16 @@ func listenUnix(path string) (net.Listener, error) {
 
 // openLocalForward implements "-L": the agent listens (see
 // resolveLocalListener), and forwards each accepted connection to
-// RemoteAddr through the SSH client (client.Dial), the same as OpenSSH's
-// -L.
+// RemoteAddr through forwardClient, the same as OpenSSH's -L against a
+// general SSH host, or through tailcat's own client-side dial against a
+// tailcat destination.
 func (a *agentSession) openLocalForward(msg controlMessage) {
 	ln, err := resolveLocalListener(msg)
 	if err != nil {
 		a.writeError(0, errUnknown, err)
 		return
 	}
-	client := a.client()
+	client := a.forwardClient()
 	id := a.registerForward(ln)
 	a.writeControl(id, controlMessage{Msg: "channel_opened", BoundAddr: ln.Addr().String()})
 
@@ -153,9 +158,15 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 // listen on ListenAddr (client.Listen, SSH's tcpip-forward), and for each
 // connection the remote side accepts, dials RemoteAddr locally -- a
 // resource on this process's own machine, made reachable from the far
-// end of the connection. No local listener of any kind is created here
-// (see this file's top-level doc comment), so resolveLocalListener/UDS/
-// loopback restriction don't apply.
+// end of the connection. Always goes through a.client() (SSH), unlike
+// openLocalForward/openSOCKSForward: there's no forwardClient equivalent
+// here, since tailcat has no "ask the server to listen and forward back"
+// feature of its own to fall back to -- against a tailcat destination,
+// client.Listen simply gets refused the same way it always has (tailcat's
+// embedded SSH service registers no "tcpip-forward" request handler
+// either), surfaced here as a real error. No local listener of any kind
+// is created here (see this file's top-level doc comment), so
+// resolveLocalListener/UDS/loopback restriction don't apply.
 func (a *agentSession) openRemoteForward(msg controlMessage) {
 	client := a.client()
 	ln, err := client.Listen("tcp", msg.ListenAddr)
@@ -182,14 +193,14 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 // openSOCKSForward implements "-D": the agent runs a minimal SOCKS5
 // server on the listener resolveLocalListener builds, gated by
 // SocksUsername/SocksPassword when either is set (RFC 1929), dialing each
-// requested destination through the SSH client.
+// requested destination through forwardClient.
 func (a *agentSession) openSOCKSForward(msg controlMessage) {
 	ln, err := resolveLocalListener(msg)
 	if err != nil {
 		a.writeError(0, errUnknown, err)
 		return
 	}
-	client := a.client()
+	client := a.forwardClient()
 	id := a.registerForward(ln)
 	a.writeControl(id, controlMessage{Msg: "channel_opened", BoundAddr: ln.Addr().String()})
 
