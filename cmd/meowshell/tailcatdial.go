@@ -52,7 +52,17 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid forward target port %q: %w", portStr, err)
 	}
-	ctx := context.Background()
+	// A bounded context, not context.Background(): a destination the
+	// server refuses (no OnTCP/OnTCPForward handler for it -- e.g. no
+	// --exit-node and this isn't one of its already-served ports) can
+	// leave UserDial/DialContextTCP hanging rather than returning a
+	// prompt error, since gVisor's netstack has no obligation to surface
+	// a refusal as fast as a real RST would; on the client's own first
+	// use this also covers standing up its WireGuard session. Same
+	// timeout tcpDialer/dialHTTPConnectProxy already use for a real TCP
+	// dial elsewhere in this file's siblings.
+	ctx, cancel := context.WithTimeout(context.Background(), tcpDialTimeout)
+	defer cancel()
 	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return c.cl.DialTCPPort(ctx, uint16(port))
 	}
