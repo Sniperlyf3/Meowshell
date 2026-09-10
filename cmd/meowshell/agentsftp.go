@@ -210,7 +210,6 @@ func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 	}
 	if ch.uploadPreserve {
 		if sf, err := a.sftpClientFor(); err == nil {
-
 			if err := sf.Chmod(ch.uploadPath, os.FileMode(ch.uploadMode)); err != nil {
 				a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode: %w", err))
 			}

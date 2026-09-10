@@ -32,7 +32,6 @@ public sealed class PackageConsumptionTests : IDisposable
     [Fact]
     public async Task ARealSessionRunsUsingOnlyThePackagesOwnDiscovery()
     {
-
         var options = new MeowshellOptions
         {
             HomeDirectory = Path.Combine(_dir, "home"),

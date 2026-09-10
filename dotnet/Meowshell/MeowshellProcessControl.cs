@@ -6,7 +6,6 @@ namespace Meowshell;
 
 internal static class MeowshellProcessControl
 {
-
     private const int ETXTBSY = 26;
 
     public static void Start(Process process)

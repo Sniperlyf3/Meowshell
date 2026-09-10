@@ -95,11 +95,37 @@ func stripFile(path string) (out []byte, changed bool, err error) {
 	if err := format.Node(&buf, fset, file); err != nil {
 		return nil, false, err
 	}
-	out = []byte(buf.String())
+	out = []byte(collapseBraceBlankLines(buf.String()))
 	if len(tags) > 0 {
 		out = append([]byte(strings.Join(tags, "\n")+"\n\n"), out...)
 	}
 	return out, string(out) != string(original), nil
+}
+
+// collapseBraceBlankLines drops a blank line left directly inside a brace
+// pair -- right after the line that opens it, or right before the line that
+// closes it -- the shape a removed comment that used to be the first or
+// last line of a block leaves behind. gofmt itself has no opinion on these
+// (a blank line is valid either place), so nothing upstream removes them.
+func collapseBraceBlankLines(src string) string {
+	lines := strings.Split(src, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		cur := lines[i]
+		if strings.HasSuffix(strings.TrimRight(cur, " \t"), "{") && i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "" {
+			out = append(out, cur)
+			i++
+			continue
+		}
+		if strings.TrimSpace(cur) == "" && i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			if next == "}" || strings.HasPrefix(next, "}") {
+				continue
+			}
+		}
+		out = append(out, cur)
+	}
+	return strings.Join(out, "\n")
 }
 
 func extractBuildTags(src []byte) []string {

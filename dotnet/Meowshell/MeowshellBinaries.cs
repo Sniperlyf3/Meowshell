@@ -42,7 +42,6 @@ internal static class MeowshellBinaries
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-
         }
     }
 }

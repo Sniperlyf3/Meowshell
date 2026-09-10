@@ -39,7 +39,6 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-
 		ips, lookupErr := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("resolving forward target host %q: %w", host, lookupErr)

@@ -139,7 +139,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task AGracefulStopIsAttemptedBeforeKilling()
     {
-
         var marker = Path.Combine(_dir, "sigterm");
         var script =
             $"trap 'printf caught > {marker}; exit 0' TERM\n" +
@@ -154,7 +153,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task APrivateKeyIsPipedInOnStdin()
     {
-
         var seen = Path.Combine(_dir, "stdin-key");
         var script =
             $"cat > {seen}\n" +
@@ -171,7 +169,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task TheServerIsToldWhereTailcatIs()
     {
-
         var seen = Path.Combine(_dir, "env");
         var script =
             $"printf '%s\\n' \"$TAILCAT_BIN\" \"$HOME\" > {seen}\n" +
@@ -287,7 +284,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void BinaryNamingFollowsThePlatformConvention()
     {
-
         Assert.Equal("libtailcat.so", BinaryNaming.Android.FileName("tailcat"));
         Assert.Equal("tailcat.exe", BinaryNaming.Windows.FileName("tailcat"));
         Assert.Equal("tailcat", BinaryNaming.Plain.FileName("tailcat"));
@@ -296,7 +292,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void CreateLeavesBinaryDiscoveryToBinaryLocatorOnNonAndroidPlatforms()
     {
-
         var host = MeowshellOptions.Create(TimeSpan.FromMinutes(1));
         Assert.Null(host.BinaryDirectory);
         Assert.Equal(BinaryNaming.ForCurrentPlatform(), host.Naming);
@@ -348,7 +343,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public void LocateIgnoresAnIncompleteDirectory()
     {
-
         var app = Path.Combine(_dir, "half");
         Directory.CreateDirectory(app);
         var naming = BinaryNaming.ForCurrentPlatform();
@@ -360,7 +354,6 @@ public sealed class MeowshellServerTests : IDisposable
     [Fact]
     public async Task ABinaryWithoutTheExecutableBitIsMadeRunnable()
     {
-
         if (OperatingSystem.IsWindows()) return;
         var opts = Fake(PublishesAddress);
         var shell = Path.Combine(opts.BinaryDirectory!, opts.Naming.FileName("meowshell"));

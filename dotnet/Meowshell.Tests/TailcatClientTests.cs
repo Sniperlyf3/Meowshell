@@ -97,7 +97,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task GenerateKeyThrowsOnUnexpectedOutputShape()
     {
-
         var (options, _) = Fake("echo not-an-address\n");
         var ex = await Assert.ThrowsAsync<TailcatException>(() =>
             TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions { Name = "key" }));
@@ -240,7 +239,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingParsesADirectPong()
     {
-
         var (options, argsFile) = Fake("printf 'pong in 580µs via 127.0.0.1:45437\\n'\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR");
 
@@ -255,7 +253,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingParsesADerpRelayedPong()
     {
-
         var (options, _) = Fake("printf 'pong in 680µs via DERP(test)\\n'\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR");
 
@@ -281,7 +278,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task PingDoesNotThrowOnANonZeroExit()
     {
-
         var (options, argsFile) = Fake("echo 'pong in 42ms via DERP(sfo)'\nexit 1\n");
         var result = await TailcatClient.PingAsync(options, "tcADDR", untilDirect: true, timeout: TimeSpan.FromSeconds(5));
 
@@ -305,7 +301,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesAShortListing()
     {
-
         var (options, argsFile) = Fake("printf 'hello.txt\\nsubdir/\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: false);
 
@@ -321,7 +316,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesALongListing()
     {
-
         var (options, argsFile) = Fake(
             "printf -- '-rw-r--r--            3 Sep  9 10:56 hello.txt\\ndrwxr-xr-x         4096 Sep  9 10:56 subdir/\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true);
@@ -353,7 +347,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesALongListingOfASingleFileTarget()
     {
-
         var (options, _) = Fake("printf -- '-rw-r--r--            3 Sep  9 10:56 hello.txt\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR:hello.txt", longListing: true);
         var entry = Assert.Single(entries);
@@ -364,7 +357,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ListFilesParsesAnOlderEntryWithAYearInsteadOfATime()
     {
-
         var (options, _) = Fake("printf -- '-rw-r--r--          512 Jan 15  2019 old.txt\\n'\n");
         var entries = await TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true);
         var entry = Assert.Single(entries);
@@ -503,7 +495,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task CpDoesNotThrowOnANonZeroExit()
     {
-
         var (options, _) = Fake("echo 'scp: no such file or directory' >&2\nexit 1\n");
         var result = await TailcatClient.CpAsync(
             options, TailcatPath.Local("missing.txt"), TailcatPath.Remote(new TailcatAddress("tcADDR")));
@@ -534,7 +525,6 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task GetEnvironmentParsesAFullMeowshellEnvReport()
     {
-
         var options = FakeMeowshell(
             "printf 'shell /bin/bash\\nhome  /home/e2e\\nuser  e2e\\npath  /usr/bin:/bin\\nterm  xterm-256color\\nlang  en_US.UTF-8\\ntailcat /opt/bin/tailcat\\n'\n");
 

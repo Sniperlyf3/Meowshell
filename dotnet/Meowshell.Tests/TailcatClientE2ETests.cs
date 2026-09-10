@@ -7,7 +7,6 @@ namespace Meowshell.Tests;
 
 public sealed class TailcatClientE2ETests : IDisposable
 {
-
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
     private static void Mask(string value)

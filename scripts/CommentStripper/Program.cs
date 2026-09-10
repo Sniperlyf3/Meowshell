@@ -17,7 +17,7 @@ foreach (var path in files)
     var tree = CSharpSyntaxTree.ParseText(original, path: path);
     var root2 = (CompilationUnitSyntax)await tree.GetRootAsync();
     var stripped = (CompilationUnitSyntax)new CommentStripper().Visit(root2)!;
-    var result = stripped.ToFullString();
+    var result = CollapseBraceBlankLines(stripped.ToFullString());
 
     if (result == original) continue;
     changed++;
@@ -32,6 +32,34 @@ Console.Error.WriteLine($"{changed}/{files.Count} files had comments stripped");
 
 static bool PathHasSegment(string path, string segment) =>
     path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains(segment);
+
+// Drops a blank line left directly inside a brace pair -- right after the
+// line that opens it, or right before the line that closes it -- the shape
+// a removed comment that used to be the first or last line of a block
+// leaves behind. The trivia-level Filter pass has no way to see this: an
+// empty line at the very start of a block is legitimate C# either way, so
+// nothing there removes it on its own.
+static string CollapseBraceBlankLines(string src)
+{
+    var lines = src.Split('\n');
+    var outLines = new List<string>(lines.Length);
+    for (var i = 0; i < lines.Length; i++)
+    {
+        var cur = lines[i];
+        if (cur.TrimEnd(' ', '\t').EndsWith('{') && i + 1 < lines.Length && lines[i + 1].Trim() == "")
+        {
+            outLines.Add(cur);
+            i++;
+            continue;
+        }
+        if (cur.Trim() == "" && i + 1 < lines.Length && lines[i + 1].TrimStart().StartsWith('}'))
+        {
+            continue;
+        }
+        outLines.Add(cur);
+    }
+    return string.Join('\n', outLines);
+}
 
 // Removes every comment/doc-comment trivia node (line, block, and /// or /** */
 // documentation comments alike -- each is its own SyntaxTriviaList entry, so

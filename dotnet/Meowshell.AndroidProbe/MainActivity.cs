@@ -26,7 +26,6 @@ public sealed class MainActivity : Activity
     {
         try
         {
-
             var options = MeowshellOptions.Create(TimeSpan.FromMinutes(3)) with
             {
                 InsecureNoAuth = true,

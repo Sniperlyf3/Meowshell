@@ -61,7 +61,6 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 
 	t.Run("exec channel with a nonzero exit reports it as a structured value", func(t *testing.T) {
-
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"sh", "-c", "'exit 42'"}})
 		id := expectChannelOpened(t, out)
 

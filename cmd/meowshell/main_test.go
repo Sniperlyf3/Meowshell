@@ -170,7 +170,6 @@ func TestServeArgv(t *testing.T) {
 }
 
 func TestConnectRequiresAnAddress(t *testing.T) {
-
 	if err := connect(nil); err == nil {
 		t.Fatal("connect with no address did not error")
 	}

@@ -75,7 +75,6 @@ func (r *resolver) termuxPrefix() string {
 
 func (r *resolver) shell() (string, []string) {
 	if r.goos == "windows" {
-
 		return "", nil
 	}
 	var warns []string
@@ -112,7 +111,6 @@ func (r *resolver) shell() (string, []string) {
 
 func (r *resolver) path() string {
 	if r.goos == "windows" {
-
 		return r.getenv("PATH")
 	}
 	var dirs []string

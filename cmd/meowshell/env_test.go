@@ -45,7 +45,6 @@ func TestShellPrefersTermuxBash(t *testing.T) {
 }
 
 func TestShellFallsBackToAndroidSh(t *testing.T) {
-
 	r := fakeFS("android", nil, []string{"/system/bin/sh"}, nil)
 	got, _ := r.shell()
 	if want := "/system/bin/sh"; got != want {
@@ -66,7 +65,6 @@ func TestShellRejectsBadOverride(t *testing.T) {
 }
 
 func TestPathOmitsDirsThatDoNotExist(t *testing.T) {
-
 	r := fakeFS("android", map[string]string{"PREFIX": termuxUsr}, nil,
 		[]string{termuxUsr + "/bin", "/system/bin", "/system/xbin"})
 	got := r.path()
@@ -92,7 +90,6 @@ func TestPathPutsTermuxFirst(t *testing.T) {
 }
 
 func TestHomeCreatedWhenUnset(t *testing.T) {
-
 	r := fakeFS("android", nil, nil, nil)
 	got, _ := r.home()
 	if got == "" {
@@ -135,7 +132,6 @@ func TestResolveFillsTermAndLang(t *testing.T) {
 }
 
 func TestResolveKeepsClientTerm(t *testing.T) {
-
 	r := fakeFS("android", map[string]string{"TERM": "screen-256color"},
 		[]string{"/system/bin/sh"}, nil)
 	if got := r.Resolve().Term; got != "screen-256color" {
@@ -144,7 +140,6 @@ func TestResolveKeepsClientTerm(t *testing.T) {
 }
 
 func TestPathDropsSymlinkedDuplicates(t *testing.T) {
-
 	r := fakeFS("android", nil, nil, []string{"/system/bin", "/bin"})
 	got := r.path()
 	if got != "/system/bin" {
@@ -153,7 +148,6 @@ func TestPathDropsSymlinkedDuplicates(t *testing.T) {
 }
 
 func TestSetEnvReplacesRatherThanShadowing(t *testing.T) {
-
 	got := setEnv(
 		[]string{"SHELL=/bin/sh", "PATH=/keep/me", "HOME=/old"},
 		[][2]string{{"SHELL", "/path/to/meowshell"}, {"HOME", "/new"}},
@@ -190,7 +184,6 @@ func TestValidateKeyAcceptsARealKey(t *testing.T) {
 }
 
 func TestValidateKeyRejectsJunk(t *testing.T) {
-
 	for name, in := range map[string]string{
 		"not json":    "hello",
 		"empty":       "",
@@ -204,7 +197,6 @@ func TestValidateKeyRejectsJunk(t *testing.T) {
 }
 
 func TestShimDetectionAcceptsAnyFlag(t *testing.T) {
-
 	for _, args := range [][]string{{"-l"}, {"-c", "echo hi"}, {"--login"}, {"-lc", "x"}} {
 		if !isShimInvocation(args) {
 			t.Errorf("isShimInvocation(%q) = false, want true", args)
@@ -218,7 +210,6 @@ func TestShimDetectionAcceptsAnyFlag(t *testing.T) {
 }
 
 func TestFindTailcatDoesNotRequireAnExecuteBitOnWindows(t *testing.T) {
-
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "tailcat.exe")
 	if err := os.WriteFile(bin, []byte("stub"), 0o644); err != nil {
@@ -241,7 +232,6 @@ func TestFindTailcatDoesNotRequireAnExecuteBitOnWindows(t *testing.T) {
 }
 
 func TestResolveOnWindowsUsesWindowsNotions(t *testing.T) {
-
 	r := fakeFS("windows", map[string]string{
 		"USERPROFILE": `C:\Users\someone`,
 		"PATH":        `C:\Windows\system32;C:\Windows`,

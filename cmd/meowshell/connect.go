@@ -114,7 +114,6 @@ func connect(args []string) error {
 	session.Stderr = os.Stderr
 
 	if len(command) > 0 {
-
 		err = session.Run(strings.Join(command, " "))
 	} else if err = session.Shell(); err == nil {
 		err = session.Wait()

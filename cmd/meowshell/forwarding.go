@@ -159,7 +159,6 @@ func serveSOCKS5(conn net.Conn, client interface {
 	Dial(network, addr string) (net.Conn, error)
 }, username, password string) {
 	defer func() {
-
 		if r := recover(); r != nil {
 			conn.Close()
 		}

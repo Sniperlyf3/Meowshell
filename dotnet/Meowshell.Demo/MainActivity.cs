@@ -12,7 +12,6 @@ namespace Meowshell.Demo;
 [Activity(Label = "Meowshell Demo", MainLauncher = true, Exported = true)]
 public sealed class MainActivity : Activity
 {
-
     private static readonly TimeSpan ServerLifetime = TimeSpan.FromHours(4);
 
     private TextView _addressField = null!;
@@ -68,13 +67,11 @@ public sealed class MainActivity : Activity
         _server = null;
         if (old is not null)
         {
-
             await old.DisposeAsync();
         }
 
         try
         {
-
             var options = MeowshellOptions.Create(ServerLifetime) with
             {
                 InsecureNoAuth = true,

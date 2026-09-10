@@ -6,7 +6,6 @@ namespace Meowshell.Tests;
 
 public sealed class MeowshellServerE2ETests : IDisposable
 {
-
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
     private static string Redact(string text) => AddressPattern.Replace(text, "tc<redacted>");
 

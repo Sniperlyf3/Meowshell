@@ -43,7 +43,6 @@ internal sealed class TailcatListener : IAsyncDisposable
 
         process.Exited += async (_, _) =>
         {
-
             await process.WaitForExitAsync().ConfigureAwait(false);
             if (listener._stopped) listener._exited.TrySetResult();
             else listener._exited.TrySetException(new TailcatException(
