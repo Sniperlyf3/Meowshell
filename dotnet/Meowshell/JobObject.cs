@@ -6,17 +6,6 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Meowshell;
 
-/// <summary>
-/// A Windows job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: the OS kills
-/// every process assigned to it as soon as this handle closes, including
-/// when the owning process itself crashes and the kernel closes its handles
-/// for it. Windows has no exec(), so meowshell stays as a separate parent of
-/// tailcat rather than becoming it; if the host process dies before
-/// MeowshellServer's own shutdown code runs, this is what stops tailcat
-/// surviving as an orphan. Assigning meowshell to the job is enough --
-/// tailcat, started later as meowshell's child, joins the same job by
-/// Windows' default nesting behavior.
-/// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class JobObject : IDisposable
 {
@@ -74,13 +63,6 @@ internal sealed class JobObject : IDisposable
 
     private JobObject(SafeFileHandle handle) => _handle = handle;
 
-    /// <summary>
-    /// Creates a kill-on-close job object and assigns <paramref name="process"/>
-    /// to it. Returns null if the OS refuses (e.g. the process already
-    /// belongs to a job that forbids further nesting) -- the deadline and
-    /// the orderly stop/kill path still apply either way; this is only a
-    /// backstop for a crash.
-    /// </summary>
     public static JobObject? Wrap(Process process)
     {
         var handle = CreateJobObjectW(0, null);

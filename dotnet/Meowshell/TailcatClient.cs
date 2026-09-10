@@ -25,10 +25,7 @@ public sealed record TailcatClientOptions : TailcatOptions
 /// <summary>Configuration for <see cref="TailcatClient.GenerateKeyAsync"/>.</summary>
 public sealed record TailcatKeyOptions
 {
-    /// <summary>
-    /// Key name (written to <c>$CONFIG/tailcat/keys/&lt;name&gt;.private.json</c>)
-    /// or a path, if it contains a slash.
-    /// </summary>
+    /// <summary>Key name (written to <c>$CONFIG/tailcat/keys/&lt;name&gt;.private.json</c>) or a path, if it contains a slash.</summary>
     public required string Name { get; init; }
 
     /// <summary>Generate a client identity key (no DERP region), for use in an <c>--allow</c> list, instead of a server key.</summary>
@@ -37,11 +34,7 @@ public sealed record TailcatKeyOptions
     /// <summary>Overwrite an existing key of the same name.</summary>
     public bool Force { get; init; }
 
-    /// <summary>
-    /// Region ID, code, or substring, or one or more comma-separated
-    /// hostnames to use custom DERP server(s). "auto" (the default) picks
-    /// one by latency at each server startup.
-    /// </summary>
+    /// <summary>Region ID, code, or substring, or one or more comma-separated hostnames to use custom DERP server(s). "auto" (the default) picks one by latency at each server startup.</summary>
     public string? Region { get; init; }
 
     /// <summary>Discover the nearest DERP region once, now, and bake it into the key and address.</summary>
@@ -54,14 +47,7 @@ public sealed record TailcatKeyOptions
     public bool Psk { get; init; } = true;
 }
 
-/// <summary>
-/// One-shot tailcat operations that call the bare <c>tailcat</c> binary
-/// directly, not meowshell: none of these spawn a shell (the reason
-/// meowshell exists) or run for long enough to risk being orphaned by a
-/// crashed host (the reason <see cref="MeowshellServer"/>,
-/// <see cref="MeowshellSocksProxy"/> and <see cref="MeowshellPortForward"/>
-/// go through it).
-/// </summary>
+/// <summary>One-shot tailcat operations that call the bare <c>tailcat</c> binary directly, not meowshell.</summary>
 public static class TailcatClient
 {
     private static ProcessStartInfo Prepare(TailcatClientOptions options)
@@ -103,7 +89,7 @@ public static class TailcatClient
         }
         catch (OperationCanceledException)
         {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
             throw new TimeoutException($"{commandForTimeoutMessage} did not finish within {timeout}");
         }
         return new TailcatResult(
@@ -112,18 +98,13 @@ public static class TailcatClient
             (await stderrTask.ConfigureAwait(false)).Trim());
     }
 
-    /// <summary>Builds the exception for a non-zero exit, carrying tailcat's own stderr.</summary>
     private static TailcatException Failure(string command, TailcatResult result) =>
         new($"tailcat {command} failed", result.ExitCode, result.Stderr);
 
-    /// <summary>Builds the exception for output that doesn't match the shape this method expects, despite a zero exit.</summary>
     private static TailcatException UnexpectedOutput(string command, string detail) =>
         new($"unexpected output from tailcat {command}", exitCode: 0, detail);
 
-    /// <summary>
-    /// Generates a key and returns its tailcat address (or, for a
-    /// <see cref="TailcatKeyOptions.Client"/> key, its public key).
-    /// </summary>
+    /// <summary>Generates a key and returns its tailcat address (or, for a <see cref="TailcatKeyOptions.Client"/> key, its public key).</summary>
     /// <exception cref="TailcatException">tailcat exited non-zero, or printed something other than the expected address/public key.</exception>
     public static async Task<string> GenerateKeyAsync(TailcatClientOptions options, TailcatKeyOptions key)
     {
@@ -137,9 +118,7 @@ public static class TailcatClient
 
         var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
         if (!result.Success) throw Failure("genkey", result);
-        // genkey's last line of stdout is the address (earlier lines can
-        // include a "# wrote file to ..." notice); client keys print only
-        // the public key, on their own single line.
+
         var lines = result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (lines.Length == 0)
             throw UnexpectedOutput("genkey", "printed nothing");
@@ -210,32 +189,22 @@ public static class TailcatClient
         return result.Stdout;
     }
 
-    /// <summary>
-    /// Pings a server, reporting whether the pong arrived via DERP or a
-    /// direct path. Does not throw on a non-zero exit (e.g.
-    /// <paramref name="untilDirect"/> timing out without going direct) --
-    /// check <see cref="TailcatPingResult.Success"/>. <see cref="TailcatPingResult.Pong"/>
-    /// carries the most recent parsed pong either way, since a timed-out
-    /// <paramref name="untilDirect"/> attempt can still have printed
-    /// several relayed pongs before giving up.
-    /// </summary>
+    /// <summary>Pings a server, reporting whether the pong arrived via DERP or a direct path. Does not throw on a non-zero exit -- check <see cref="TailcatPingResult.Success"/>.</summary>
     public static async Task<TailcatPingResult> PingAsync(
         TailcatClientOptions options, string address, bool untilDirect = false, TimeSpan? timeout = null)
     {
         var args = new List<string> { "ping" };
         if (untilDirect) args.Add("--until-direct");
-        // Go's duration flag parser wants "5s", not TimeSpan's default
-        // "00:00:05"; a plain number of seconds with an "s" suffix is
-        // always valid for it, fractional or not.
+
         if (timeout is { } t) args.Add($"--timeout={t.TotalSeconds.ToString(CultureInfo.InvariantCulture)}s");
         args.Add(address);
         var result = await RunAsync(options, [.. args]).ConfigureAwait(false);
         return TailcatPingResult.From(result);
     }
 
-    /// <summary>Lists files on a tailcat server (a "files" service, or the home directory of an ssh/no-auth-ssh one), over SFTP directly -- no ssh or sftp binary is involved.</summary>
+    /// <summary>Lists files on a tailcat server, over SFTP directly -- no ssh or sftp binary is involved.</summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
-    /// <param name="target">A remote path: <see cref="TailcatPath.Remote"/> or <see cref="TailcatPath.RemoteHost"/>, with an optional path under the served/home directory.</param>
+    /// <param name="target">A remote path: <see cref="TailcatPath.Remote"/> or <see cref="TailcatPath.RemoteHost"/>.</param>
     /// <param name="longListing">Include permissions, size, and modification time.</param>
     /// <exception cref="ArgumentException"><paramref name="target"/> is a local path.</exception>
     /// <exception cref="TailcatException">tailcat exited non-zero, or a line didn't match the expected shape.</exception>
@@ -266,13 +235,8 @@ public static class TailcatClient
         return TailcatFileEntry.ParseAll(result.Stdout, longListing);
     }
 
-    /// <summary>
-    /// Connects the system ssh client through a tailcat server.
-    /// </summary>
-    /// <exception cref="PlatformNotSupportedException">
-    /// Running on Android: this shells out to a system <c>ssh</c> binary, which an app sandbox does not provide.
-    /// Use <see cref="MeowshellServer"/> or <c>meowshell connect</c> for shell access there instead.
-    /// </exception>
+    /// <summary>Connects the system ssh client through a tailcat server.</summary>
+    /// <exception cref="PlatformNotSupportedException">Running on Android: this shells out to a system <c>ssh</c> binary, which an app sandbox does not provide.</exception>
     public static Task<TailcatResult> SshAsync(
         TailcatClientOptions options, string destination, IReadOnlyList<string>? command = null, string? port = null)
     {
@@ -289,9 +253,7 @@ public static class TailcatClient
         return RunAsync(options, [.. args]);
     }
 
-    /// <summary>
-    /// Copies one source to <paramref name="target"/>.
-    /// </summary>
+    /// <summary>Copies one source to <paramref name="target"/>.</summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="source">The file or directory to copy: <see cref="TailcatPath.Local"/> to upload, or <see cref="TailcatPath.Remote"/>/<see cref="TailcatPath.RemoteHost"/> to download.</param>
     /// <param name="target">Where to copy it to: local for a download, remote for an upload.</param>
@@ -304,23 +266,14 @@ public static class TailcatClient
         bool recursive = false, bool preserve = false, string? port = null) =>
         CpAsync(options, [source], target, recursive, preserve, port);
 
-    /// <summary>
-    /// Copies one or more sources to <paramref name="target"/> -- the multi-source form of
-    /// <see cref="CpAsync(TailcatClientOptions, TailcatPath, TailcatPath, bool, bool, string?)"/>, for copying
-    /// several local files to one remote directory in a single call. Uses the system scp everywhere except
-    /// Android, where an app sandbox provides no such binary; there it speaks SFTP directly instead, through
-    /// meowshell's own "cp" subcommand (routed over tailcat's own client mode, not a system ssh/scp client).
-    /// </summary>
+    /// <summary>Copies one or more sources to <paramref name="target"/> -- the multi-source form of <see cref="CpAsync(TailcatClientOptions, TailcatPath, TailcatPath, bool, bool, string?)"/>.</summary>
     /// <param name="options">Where the binaries live and how to reach the server.</param>
     /// <param name="sources">The files or directories to copy.</param>
     /// <param name="target">Where to copy them to.</param>
     /// <param name="recursive">Recursively copy directories.</param>
     /// <param name="preserve">Preserve modification times and modes.</param>
     /// <param name="port">The server's SSH (file service) port, when it isn't 22.</param>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="sources"/> is empty; none of <paramref name="sources"/> or <paramref name="target"/> is
-    /// remote (there would be no tailcat server to route the copy through); or they don't all name the same server.
-    /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="sources"/> is empty; none of <paramref name="sources"/> or <paramref name="target"/> is remote; or they don't all name the same server.</exception>
     public static Task<TailcatResult> CpAsync(
         TailcatClientOptions options, IReadOnlyList<TailcatPath> sources, TailcatPath target,
         bool recursive = false, bool preserve = false, string? port = null)
@@ -357,12 +310,7 @@ public static class TailcatClient
             : RunAsync(options, ["cp", .. cpArgs]);
     }
 
-    /// <summary>
-    /// meowshell's own resolved environment for a session: shell/home/user/path/term/lang and where it found
-    /// the tailcat binary, exactly as it would hand them to a real <see cref="MeowshellServer"/>/<see cref="TailcatSshSession"/>
-    /// session. Useful for diagnosing a broken environment (an Android app sandbox, <c>adb shell</c>, a stripped
-    /// container) up front, rather than from a session that fails mysteriously once it's already running.
-    /// </summary>
+    /// <summary>meowshell's own resolved environment for a session, exactly as it would hand it to a real <see cref="MeowshellServer"/>/<see cref="TailcatSshSession"/> session.</summary>
     /// <param name="options">Where the binaries live.</param>
     /// <exception cref="TailcatException">meowshell exited non-zero.</exception>
     public static async Task<TailcatEnvironment> GetEnvironmentAsync(TailcatClientOptions options)
@@ -384,11 +332,6 @@ public static class TailcatClient
         return TailcatEnvironment.Parse(result.Stdout);
     }
 
-    /// <summary>
-    /// Android counterpart to the system-scp path above: runs meowshell's own "cp" subcommand, which speaks SFTP
-    /// directly (routed over tailcat's own bare client mode, not a system ssh/scp binary an app sandbox lacks)
-    /// instead of shelling out to scp.
-    /// </summary>
     private static Task<TailcatResult> RunMeowshellCpAsync(TailcatClientOptions options, IReadOnlyList<string> cpArgs)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
@@ -406,8 +349,7 @@ public static class TailcatClient
         if (options.Verbose)
             psi.ArgumentList.Add("--verbose");
         foreach (var a in cpArgs) psi.ArgumentList.Add(a);
-        // meowshell looks for a sibling file literally named "tailcat"; under
-        // NativeLibraryDir everything is lib*.so, so point it at the binary.
+
         psi.Environment["TAILCAT_BIN"] = tailcat;
         psi.Environment["HOME"] = options.HomeDirectory;
         return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));

@@ -4,14 +4,6 @@ using System.Runtime.InteropServices;
 
 namespace Meowshell;
 
-/// <summary>
-/// The process lifecycle shared by every long-lived meowshell-spawned
-/// listener (<see cref="MeowshellServer"/>, <see cref="MeowshellSocksProxy"/>,
-/// <see cref="MeowshellPortForward"/>): captures stderr regardless of
-/// whether anything is listening, completes or faults <see cref="Completed"/>
-/// depending on whether the exit was requested, and stops the process
-/// (SIGTERM, then SIGKILL if that doesn't land in time).
-/// </summary>
 internal sealed class TailcatListener : IAsyncDisposable
 {
     private const int SIGTERM = 15;
@@ -27,17 +19,10 @@ internal sealed class TailcatListener : IAsyncDisposable
     private JobObject? _job;
     private bool _stopped;
 
-    /// <summary>The underlying process, for a caller that needs it directly (MeowshellServer polls it for an early exit before it has an address to report).</summary>
     public Process Process { get; }
 
-    /// <summary>
-    /// Completes when the process has exited. Succeeds after a
-    /// <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/>
-    /// if the process dies on its own first (a crash, an OOM kill).
-    /// </summary>
     public Task Completed => _exited.Task;
 
-    /// <summary>Diagnostic output from tailcat. Raised on a background thread.</summary>
     public event Action<string>? Log;
 
     private TailcatListener(Process process, TimeSpan gracePeriod)
@@ -46,14 +31,6 @@ internal sealed class TailcatListener : IAsyncDisposable
         _gracePeriod = gracePeriod;
     }
 
-    /// <summary>
-    /// Starts <paramref name="process"/> (already configured with a
-    /// <see cref="ProcessStartInfo"/> that redirects stdout/stderr) and
-    /// wires up output capture and the crash-fault <see cref="Completed"/>
-    /// semantics. On Windows, also assigns the process to a kill-on-close
-    /// job object, so it doesn't outlive a crashed host even if
-    /// <see cref="StopAsync"/> is never called.
-    /// </summary>
     public static TailcatListener Start(Process process, TimeSpan gracePeriod, Action<string>? onLog)
     {
         process.EnableRaisingEvents = true;
@@ -66,11 +43,7 @@ internal sealed class TailcatListener : IAsyncDisposable
 
         process.Exited += async (_, _) =>
         {
-            // Exited can fire before the async reads behind
-            // BeginErrorReadLine finish delivering the last lines;
-            // WaitForExitAsync (unlike the Exited event itself) is
-            // documented to synchronize with that, so _diagnostics is
-            // complete by the time this reads it.
+
             await process.WaitForExitAsync().ConfigureAwait(false);
             if (listener._stopped) listener._exited.TrySetResult();
             else listener._exited.TrySetException(new TailcatException(
@@ -89,13 +62,6 @@ internal sealed class TailcatListener : IAsyncDisposable
         return listener;
     }
 
-    /// <summary>
-    /// Throws a <see cref="TailcatException"/> if the process has already
-    /// exited, first synchronizing with the diagnostics stream the same
-    /// way the <see cref="Completed"/> fault path does -- for a caller
-    /// (MeowshellServer) polling for an early exit before it considers
-    /// itself started.
-    /// </summary>
     public async Task ThrowIfExitedAsync(string summary, CancellationToken cancellationToken = default)
     {
         if (!Process.HasExited) return;
@@ -103,7 +69,6 @@ internal sealed class TailcatListener : IAsyncDisposable
         throw new TailcatException(summary, Process.ExitCode, _diagnostics.Tail());
     }
 
-    /// <summary>Stops the process: SIGTERM, then SIGKILL if it does not go quietly. Safe to call repeatedly.</summary>
     public async Task StopAsync()
     {
         await _stopLock.WaitAsync().ConfigureAwait(false);
@@ -133,7 +98,6 @@ internal sealed class TailcatListener : IAsyncDisposable
         }
     }
 
-    /// <summary>Stops the process and releases everything it holds.</summary>
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);

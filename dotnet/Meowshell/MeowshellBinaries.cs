@@ -2,17 +2,8 @@
 
 namespace Meowshell;
 
-/// <summary>
-/// Locating and preparing the meowshell and tailcat binaries, shared by
-/// every wrapper that spawns one of them.
-/// </summary>
 internal static class MeowshellBinaries
 {
-    /// <summary>
-    /// Resolves the meowshell and tailcat binary paths and makes sure both
-    /// are executable.
-    /// </summary>
-    /// <exception cref="FileNotFoundException">No binaries were found, or one of the two is missing from the resolved directory.</exception>
     public static (string Meowshell, string Tailcat) Locate(string? binaryDirectory, BinaryNaming naming)
     {
         var binaries = binaryDirectory ?? BinaryLocator.Locate(naming);
@@ -36,13 +27,6 @@ internal static class MeowshellBinaries
         return (meowshell, tailcat);
     }
 
-    /// <summary>
-    /// Makes sure a binary can be executed. NuGet restore does not reliably
-    /// carry the executable bit onto Unix filesystems, so a package-delivered
-    /// binary can arrive unrunnable; Android unpacks its own and needs
-    /// nothing. Failures here are ignored: if the bit really cannot be set,
-    /// starting the process reports it far better than guessing would.
-    /// </summary>
     private static void EnsureExecutable(string path)
     {
         if (OperatingSystem.IsWindows()) return;
@@ -58,7 +42,7 @@ internal static class MeowshellBinaries
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-            // Left to the process start to report.
+
         }
     }
 }

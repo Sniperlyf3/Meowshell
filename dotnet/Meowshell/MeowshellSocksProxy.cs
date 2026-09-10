@@ -6,34 +6,19 @@ namespace Meowshell;
 /// <summary>Configuration for a <see cref="MeowshellSocksProxy"/>.</summary>
 public sealed record MeowshellSocksOptions : TailcatListenerOptions
 {
-    /// <summary>
-    /// SOCKS5 proxy listen <c>[address]:port</c>; a bare port means
-    /// localhost, a bare address means an OS-assigned port. Empty lets
-    /// tailcat pick its own default. Passed to tailcat's own
-    /// <c>--listen</c>.
-    /// </summary>
+    /// <summary>SOCKS5 proxy listen <c>[address]:port</c>; a bare port means localhost, a bare address means an OS-assigned port. Empty lets tailcat pick its own default. Passed to tailcat's own <c>--listen</c>.</summary>
     public string? Listen { get; init; }
 
     /// <summary>tailcat client key name or path (see 'tailcat genkey').</summary>
     public string? ClientKey { get; init; }
 }
 
-/// <summary>
-/// Runs a SOCKS5 proxy that dials tailcat servers, until stopped. A
-/// long-lived local listener, so -- like <see cref="MeowshellServer"/> --
-/// it goes through meowshell rather than a bare tailcat, to inherit the
-/// same crash backstop (Windows job object here; PR_SET_PDEATHSIG is armed
-/// inside meowshell on Unix, before it execs tailcat).
-/// </summary>
+/// <summary>Runs a SOCKS5 proxy that dials tailcat servers, until stopped.</summary>
 public sealed class MeowshellSocksProxy : IAsyncDisposable
 {
     private readonly TailcatListener _listener;
 
-    /// <summary>
-    /// Completes when the process has exited. Succeeds after a
-    /// <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/>
-    /// if the process dies on its own first.
-    /// </summary>
+    /// <summary>Completes when the process has exited. Succeeds after a <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/> if the process dies on its own first.</summary>
     public Task Completed => _listener.Completed;
 
     /// <summary>Diagnostic output from tailcat. Raised on a background thread.</summary>
