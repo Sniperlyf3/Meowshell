@@ -16,6 +16,20 @@ import (
 // this process). Separate from tailcat's own "forward" subcommand
 // (MeowshellPortForward), which tunnels through a tailcat *server*
 // instead -- a different, still-valid use case this doesn't replace.
+//
+// Only works against a general SSH host, not against tailcat's own
+// embedded service: tailcat_ssh.go registers no "direct-tcpip" channel
+// handler and no "tcpip-forward" request handler at all (confirmed
+// against its source), so a tailcat server always refuses the channel
+// forward_local/forward_socks need and the global request forward_remote
+// needs -- this isn't a bug here to fix, tailcat's minimal SSH server
+// simply never implemented forwarding. The listener itself still opens
+// successfully either way (nothing about accepting a connection touches
+// the remote yet); the failure lands per forwarded connection instead,
+// silently closing it rather than reporting an error back over the
+// control channel -- a known, minor gap (see proxyForwardedConn) rather
+// than something a caller can currently distinguish from "the backend
+// simply refused."
 func (a *agentSession) openForwardChannel(msg controlMessage) {
 	switch msg.Kind {
 	case "forward_local":
