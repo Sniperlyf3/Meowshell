@@ -36,8 +36,6 @@ Copy a directory tree to a directory the server offers read-write:
 	meowshell cp -r ./photos <tc-addr>:photos
 `
 
-// cp implements the "meowshell cp" subcommand: an SFTP-native counterpart
-// to "tailcat cp" that never shells out to a system ssh/scp client.
 func cp(args []string) error {
 	fs2 := flag.NewFlagSet("cp", flag.ExitOnError)
 	recursive := fs2.Bool("r", false, "recursively copy directories")
@@ -91,8 +89,6 @@ func cp(args []string) error {
 	return nil
 }
 
-// copyOne copies one source to target, in whichever direction the two
-// arguments' remoteness implies.
 func copyOne(sf *sftp.Client, src, target string, recursive, preserve, multiSource bool) error {
 	_, srcPath, srcRemote := splitRemoteArg(src)
 	_, dstPath, dstRemote := splitRemoteArg(target)
@@ -237,13 +233,6 @@ func downloadFile(sf *sftp.Client, remotePath, localPath string, fi os.FileInfo,
 	return os.Chmod(localPath, fi.Mode().Perm())
 }
 
-// filepathRelFromSlash returns target's path relative to base, as a local,
-// OS-separated path. Both are SFTP paths (always "/"-separated), and
-// sf.Walk(base) guarantees every path it yields is base itself or nested
-// under it, so no ".." case exists to handle -- but when base is "."
-// (a bare "tc-addr:" root), the walker's paths already come back clean and
-// unprefixed, unlike a named root's "root/child" paths, so both shapes
-// need handling here.
 func filepathRelFromSlash(base, target string) (string, error) {
 	base, target = path.Clean(base), path.Clean(target)
 	if target == base {

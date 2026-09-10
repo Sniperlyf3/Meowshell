@@ -1,36 +1,3 @@
-// meowshell wraps the tailcat binary to serve a proper interactive shell
-// over a tailcat address: a real PTY with completion, colours, job control
-// and window resizing.
-//
-// tailcat's built-in ssh service already allocates a PTY, applies the
-// client's termios modes and forwards SIGWINCH. What it does not do is
-// survive Android: it derives the session's PATH from a hardcoded
-// /usr/local/bin:/usr/bin:/bin, falls back to /bin/sh for the login shell,
-// and aborts the session outright when user.Current fails, which on Android
-// happens whenever $HOME is unset.
-//
-// meowshell fixes that from both ends. Before starting the server it
-// exports a HOME, USER and SHELL that tailcat can read. It then passes
-// itself as $SHELL, so tailcat launches meowshell rather than the real
-// shell; invoked that way (with -l or -c) meowshell repairs PATH, TERM and
-// LANG in the session's own environment and execs the real shell.
-//
-// serve/socks/forward run tailcat through runTailcat, which also arms a
-// parent-death watchdog (exec_unix.go, exec_windows.go): each is a
-// long-lived listener that would otherwise survive an orphaning host
-// process indefinitely.
-//
-// cp and connect solve a related Android problem each: tailcat's own
-// cp/ssh shell out to a system scp/ssh client, which an app sandbox does
-// not provide (tailcat's ls has no such dependency -- it already speaks
-// SFTP directly in-process, and works on Android unchanged). Both speak
-// SSH themselves instead (sftp.go, connect.go), routed through tailcat's
-// own bare client mode as a subprocess rather than a system ssh/scp
-// binary, so file transfer and interactive sessions both work there too --
-// connect's session is plain stdin/stdout either way, so it works exactly
-// as well piped into from another process (an Android app driving it as a
-// child process, with no real terminal anywhere in the picture) as it does
-// from a real terminal.
 package main
 
 import (
@@ -49,8 +16,6 @@ import (
 
 var runtimeGOOS = runtime.GOOS
 
-// runTailcatFn is the seam tests replace to capture the argv a subcommand
-// built instead of actually launching a process.
 var runTailcatFn = runTailcat
 
 const usage = `meowshell -- an interactive shell over a tailcat address
@@ -254,9 +219,6 @@ func serve(args []string) error {
 		argv = append(argv, command...)
 	}
 
-	// tailcat reads SHELL for the login shell, and HOME/USER through
-	// user.Current. Setting SHELL to this binary is what gets the shim
-	// above run for each session.
 	vars := [][2]string{}
 	if shimSupported {
 		vars = append(vars,
@@ -269,13 +231,6 @@ func serve(args []string) error {
 	return runTailcatFn(bin, argv, setEnv(os.Environ(), vars))
 }
 
-// splitForcedCommand splits args on the first literal "--", returning the
-// flags before it and the command after it. tailcat's own serve subcommand
-// takes this to mean "run this command instead of a shell, for every
-// session" (or, without ssh/no-auth-ssh, a standalone exec service); passed
-// through unexamined. Go's flag package would otherwise consume a leading
-// "--" itself while still parsing flags, dropping the marker tailcat needs
-// to see.
 func splitForcedCommand(args []string) (rest, command []string) {
 	i := slices.Index(args, "--")
 	if i < 0 {
@@ -284,8 +239,6 @@ func splitForcedCommand(args []string) (rest, command []string) {
 	return args[:i], args[i+1:]
 }
 
-// validateKey rejects input that is not a tailcat private key, so a bad
-// pipe fails here rather than as a confusing error out of tailcat.
 func validateKey(data []byte) error {
 	var k struct {
 		Private string
@@ -299,11 +252,6 @@ func validateKey(data []byte) error {
 	return nil
 }
 
-// stagingDir picks a writable directory to stage the key in.
-//
-// os.TempDir is the portable answer: it honours TMPDIR on unix and TEMP or
-// TMP on Windows. home is only a fallback for the rare case os.TempDir
-// returns nothing at all.
 func stagingDir(home string) string {
 	if d := os.TempDir(); d != "" {
 		return d
@@ -311,8 +259,6 @@ func stagingDir(home string) string {
 	return home
 }
 
-// keyFromStdin reads a tailcat private key from stdin and returns a path
-// tailcat can read it from.
 func keyFromStdin(dir string) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<16))
 	if err != nil {
@@ -324,14 +270,6 @@ func keyFromStdin(dir string) (string, error) {
 	return stageKey(dir, data)
 }
 
-// setEnv returns environ with each given variable set, replacing any entry
-// already there.
-//
-// Appending would not do: Go keeps the first mention of a key and clears
-// later duplicates, so an appended override of a variable the caller already
-// exported is silently ignored -- e.g. adb shell exports SHELL=/bin/sh, so
-// an appended SHELL would never reach tailcat, which starts the shim only
-// when SHELL points at it.
 func setEnv(environ []string, vars [][2]string) []string {
 	replacing := make(map[string]bool, len(vars))
 	for _, v := range vars {
@@ -350,9 +288,6 @@ func setEnv(environ []string, vars [][2]string) []string {
 	return out
 }
 
-// socks runs "tailcat socks" through runTailcat rather than execing it
-// directly, so its parent-death watchdog (see exec_unix.go/exec_windows.go)
-// covers this long-lived proxy the same way it covers serve.
 func socks(args []string) error {
 	fs := flag.NewFlagSet("socks", flag.ExitOnError)
 	key := fs.String("key", "", "tailcat client key name or path")
@@ -387,9 +322,6 @@ func socks(args []string) error {
 	return runTailcatFn(bin, argv, os.Environ())
 }
 
-// forward runs "tailcat forward" through runTailcat for the same reason
-// socks does: it is a long-lived local listener, so it gets the same
-// parent-death watchdog serve does.
 func forward(args []string) error {
 	fs := flag.NewFlagSet("forward", flag.ExitOnError)
 	key := fs.String("key", "", "tailcat client key name or path")
@@ -442,8 +374,6 @@ func printEnv() error {
 	return nil
 }
 
-// findTailcat locates the tailcat binary: an explicit path, then
-// $TAILCAT_BIN, then alongside this executable, then $PATH.
 func findTailcat(explicit string) (string, error) {
 	var tried []string
 	check := func(p string) (string, bool) {
@@ -455,8 +385,7 @@ func findTailcat(explicit string) (string, error) {
 		if err != nil || fi.IsDir() {
 			return "", false
 		}
-		// Windows has no execute bit; requiring one rejects every file
-		// there, so meowshell would never find tailcat at all.
+
 		if runtimeGOOS != "windows" && fi.Mode()&0o111 == 0 {
 			return "", false
 		}

@@ -13,17 +13,6 @@ import (
 	"time"
 )
 
-// TestAgentEndToEnd drives "meowshell agent" as a real subprocess against a
-// real tailcat server (hermetic: TS_DEBUG_TAILCAT_LOCAL_DERP replaces the
-// public DERP/STUN infrastructure with an in-process one, so this needs no
-// network access), speaking the framed control protocol exactly as
-// dotnet/Meowshell's MeowshellAgentConnection eventually will. It proves
-// the multiplexing daemon model end to end: one process, one handshake,
-// two channels (an exec and a resized shell) opened on it in turn.
-//
-// Needs real tailcat/meowshell binaries built for this platform; skips
-// itself when they aren't found rather than failing the whole package
-// (dist/ is a local/CI build product, not checked in).
 func TestAgentEndToEnd(t *testing.T) {
 	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat_linux_amd64")
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
@@ -72,9 +61,7 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 
 	t.Run("exec channel with a nonzero exit reports it as a structured value", func(t *testing.T) {
-		// Quoted, not bare: Command elements are joined with plain spaces
-		// (agent.go documents this, matching connect.go and a real ssh
-		// client), so "exit 42" must survive as one argument to sh -c.
+
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"sh", "-c", "'exit 42'"}})
 		id := expectChannelOpened(t, out)
 
@@ -103,9 +90,6 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 }
 
-// findE2EBinary locates a real binary for the e2e test to drive: an
-// explicit env var override, falling back to dist/<name> relative to the
-// repo root (build.sh's own output layout).
 func findE2EBinary(t *testing.T, envVar, distName string) string {
 	t.Helper()
 	if p := os.Getenv(envVar); p != "" {
@@ -122,9 +106,6 @@ func findE2EBinary(t *testing.T, envVar, distName string) string {
 	return abs
 }
 
-// startE2EServer starts an unauthenticated meowshell server over a
-// hermetic local DERP relay and returns the address it publishes, the same
-// setup e2e/host-e2e.sh uses against real binaries.
 func startE2EServer(t *testing.T, tailcatBin, meowshellBin, home string) string {
 	t.Helper()
 	addrFile := filepath.Join(home, "addr")
@@ -175,10 +156,6 @@ func mustWriteFrame(t *testing.T, w io.Writer, f frame) {
 	}
 }
 
-// expectConnected reads the connection-level handshake message the agent
-// sends once it has finished dialing (and any host-key/auth prompting
-// along the way): "connected" on success, or an "error" that fails the
-// test outright, since nothing after this point can succeed either.
 func expectConnected(t *testing.T, r *bufio.Reader) {
 	t.Helper()
 	f, err := readFrameWithDeadline(t, r)
@@ -199,8 +176,6 @@ func expectConnected(t *testing.T, r *bufio.Reader) {
 	}
 }
 
-// expectChannelOpened reads frames until channel_opened, failing the test
-// on an error frame or a control message it didn't expect.
 func expectChannelOpened(t *testing.T, r *bufio.Reader) uint32 {
 	t.Helper()
 	for {
@@ -224,8 +199,6 @@ func expectChannelOpened(t *testing.T, r *bufio.Reader) uint32 {
 	}
 }
 
-// readUntilExit collects data frames for id until its exit_status arrives,
-// returning the concatenated stdout+stderr bytes seen along the way.
 func readUntilExit(t *testing.T, r *bufio.Reader, id uint32) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -239,7 +212,7 @@ func readUntilExit(t *testing.T, r *bufio.Reader, id uint32) []byte {
 		}
 		switch f.Type {
 		case frameTypeData:
-			buf.Write(f.Payload[1:]) // drop the stream tag
+			buf.Write(f.Payload[1:])
 		case frameTypeControl:
 			var msg controlMessage
 			if err := json.Unmarshal(f.Payload, &msg); err != nil {
@@ -255,8 +228,6 @@ func readUntilExit(t *testing.T, r *bufio.Reader, id uint32) []byte {
 	}
 }
 
-// readExitOnly is readUntilExit's counterpart when only the exit code
-// matters to the caller.
 func readExitOnly(t *testing.T, r *bufio.Reader, id uint32) int {
 	t.Helper()
 	for {
@@ -280,8 +251,6 @@ func readExitOnly(t *testing.T, r *bufio.Reader, id uint32) int {
 	}
 }
 
-// readUntil collects data frames for id until want appears in them or
-// timeout elapses.
 func readUntil(t *testing.T, r *bufio.Reader, id uint32, want string, timeout time.Duration) []byte {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -303,9 +272,6 @@ func readUntil(t *testing.T, r *bufio.Reader, id uint32, want string, timeout ti
 	return nil
 }
 
-// readFrameWithDeadline wraps readFrame with an overall per-call budget, so
-// a protocol bug hangs the one subtest that hit it instead of the whole
-// test binary.
 func readFrameWithDeadline(t *testing.T, r *bufio.Reader) (frame, error) {
 	t.Helper()
 	type result struct {

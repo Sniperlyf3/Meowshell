@@ -16,11 +16,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// startAuthTestSSHServer is startTestSSHServer with the auth requirement
-// left to the caller (configure sets a Password/PublicKey/KeyboardInteractive
-// callback on cfg before it's used), for tests that need meowshell agent's
-// new auth methods actually exercised end to end rather than the
-// NoClientAuth free pass startTestSSHServer gives every other test here.
 func startAuthTestSSHServer(t *testing.T, configure func(cfg *ssh.ServerConfig)) (addr string, hostKey ssh.Signer) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -52,10 +47,6 @@ func startAuthTestSSHServer(t *testing.T, configure func(cfg *ssh.ServerConfig))
 	return ln.Addr().String(), signer
 }
 
-// newTestKeyPair generates an ed25519 key pair and returns the private key
-// as an unencrypted PKCS#8 PEM block (what ssh.ParsePrivateKey accepts) and
-// its ssh.PublicKey, for tests that need real key bytes to hand a
-// "configure" message the way an app would.
 func newTestKeyPair(t *testing.T) (privatePEM []byte, public ssh.PublicKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -74,9 +65,6 @@ func newTestKeyPair(t *testing.T) (privatePEM []byte, public ssh.PublicKey) {
 	return pemBytes, sshPub
 }
 
-// acceptHostKeyPrompt reads and accepts the TOFU host-key prompt every
-// first connection to a fresh known_hosts file raises, so an auth-focused
-// test doesn't have to special-case it inline.
 func acceptHostKeyPrompt(t *testing.T, stdin *os.File, out *bufio.Reader) {
 	t.Helper()
 	f := mustReadFrame(t, out)
@@ -120,9 +108,6 @@ func TestAgentPasswordAuth(t *testing.T) {
 		cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
 		defer stopAgent(t, cmd, stdin)
 
-		// The host key is already trusted from the previous subtest's
-		// connection to the same address+known_hosts -- no TOFU prompt
-		// this time, straight to the password prompt.
 		f := mustReadFrame(t, out)
 		msg := decodeControl(t, f)
 		if msg.Msg != "prompt_request" || msg.PromptKind != "password" {
@@ -167,8 +152,6 @@ func TestAgentSuppliedPrivateKeyAuth(t *testing.T) {
 			controlMessage{Msg: "configure", Keys: [][]byte{wrongPEM}})
 		defer stopAgent(t, cmd, stdin)
 
-		// Host key already trusted from the previous subtest; straight to
-		// the auth failure this time.
 		f := mustReadFrame(t, out)
 		msg := decodeControl(t, f)
 		if msg.Msg != "error" || msg.Code != errAuthFailed {

@@ -11,18 +11,6 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// buildAuthMethods turns a configure message into the ordered
-// []ssh.AuthMethod dialSSHClient offers: every public-key-capable signer
-// (the local ssh-agent, keys supplied over the control channel, and
-// Keystore-backed keys) combined into one ssh.PublicKeys method, so
-// golang.org/x/crypto/ssh tries each in turn within a single auth round,
-// then keyboard-interactive, then password -- the package's own
-// partial-success negotiation handles the rest. Against tailcat's own
-// service this is mostly unused machinery (it only ever asks for
-// public-key or nothing at all -- see hostkeys.go's tailcat comment for
-// the same point about host keys) but it's what makes a general TCP SSH
-// host, or a tailcat --ssh-authorized-keys service from an Android app
-// with no ssh-agent, actually reachable.
 func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, error) {
 	var signers []ssh.Signer
 
@@ -80,11 +68,6 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 	return methods, nil
 }
 
-// parseKeyMaybePrompting parses a private key blob, round-tripping a
-// passphrase prompt (up to a few attempts, the same allowance a real ssh
-// client gives a typo'd passphrase) when the key turns out to be
-// encrypted. keyBytes are never written to disk anywhere in this path --
-// they arrive over the control channel and live only in process memory.
 func (a *agentSession) parseKeyMaybePrompting(keyBytes []byte) (ssh.Signer, error) {
 	signer, err := ssh.ParsePrivateKey(keyBytes)
 	if err == nil {
@@ -110,7 +93,6 @@ func (a *agentSession) parseKeyMaybePrompting(keyBytes []byte) (ssh.Signer, erro
 	return nil, fmt.Errorf("could not decrypt key after %d attempts: %w", maxAttempts, err)
 }
 
-// promptPassword is an ssh.PasswordCallback: one prompt, one answer.
 func (a *agentSession) promptPassword() (string, error) {
 	resp, err := a.prompt(controlMessage{PromptKind: "password"})
 	if err != nil {
@@ -122,12 +104,6 @@ func (a *agentSession) promptPassword() (string, error) {
 	return resp.Answer, nil
 }
 
-// keyboardInteractive is an ssh.KeyboardInteractiveChallenge: the actual
-// OTP/PAM path for a general SSH host (tailcat's own service never sends
-// this challenge -- confirmed against its server source, see hostkeys.go
-// and the project plan -- but the plumbing is shared and harmless against
-// it). May be invoked more than once per connection attempt; each call is
-// its own prompt round trip.
 func (a *agentSession) keyboardInteractive(name, instruction string, questions []string, echos []bool) ([]string, error) {
 	resp, err := a.prompt(controlMessage{
 		PromptKind:  "keyboard_interactive",
@@ -145,18 +121,6 @@ func (a *agentSession) keyboardInteractive(name, instruction string, questions [
 	return resp.Answers, nil
 }
 
-// keystoreSigner is an ssh.Signer backed entirely by a client-side
-// callback: the private key never reaches this process at all, only its
-// public half (supplied in the configure message) and, per signature, a
-// blob signed elsewhere -- Android Keystore hardware being the motivating
-// case. Sign blocks on the same prompt round trip host-key/password/etc.
-// prompts use, just carrying binary key material instead of typed text.
-//
-// This implements the plain ssh.Signer interface rather than
-// AlgorithmSigner, so it always signs with the key's default algorithm
-// (fine for ed25519/ecdsa, which only have one); an RSA Keystore key
-// talking to a server that insists on rsa-sha2-256/512 specifically would
-// need AlgorithmSigner support this pass doesn't add.
 type keystoreSigner struct {
 	session *agentSession
 	keyID   string

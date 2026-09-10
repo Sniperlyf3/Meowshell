@@ -7,10 +7,9 @@ import (
 	"strings"
 )
 
-// Env is the shell environment meowshell resolves for a session.
 type Env struct {
-	Shell string // absolute path of the real shell to exec
-	Home  string // an existing, ideally writable, home directory
+	Shell string
+	Home  string
 	User  string
 	Path  string
 	Lang  string
@@ -19,11 +18,9 @@ type Env struct {
 	Warnings []string
 }
 
-// resolver locates files and directories. It is a struct so tests can
-// substitute a fake filesystem rather than depend on the host's layout.
 type resolver struct {
 	getenv    func(string) string
-	isFile    func(string) bool // exists and is executable
+	isFile    func(string) bool
 	isDir     func(string) bool
 	writable  func(string) bool
 	mkdirAll  func(string) error
@@ -65,7 +62,6 @@ func newResolver() *resolver {
 	}
 }
 
-// termuxPrefix returns Termux's install prefix, if this looks like Termux.
 func (r *resolver) termuxPrefix() string {
 	if p := r.getenv("PREFIX"); p != "" && r.isDir(filepath.Join(p, "bin")) {
 		return p
@@ -77,13 +73,9 @@ func (r *resolver) termuxPrefix() string {
 	return ""
 }
 
-// shell picks the most capable interactive shell available. Shells with
-// completion and prompt colouring are preferred over plain sh, which on
-// Android is mksh and gives a bare "$" with no completion.
 func (r *resolver) shell() (string, []string) {
 	if r.goos == "windows" {
-		// tailcat chooses PowerShell from the registry there and never
-		// reads SHELL, so there is nothing for meowshell to resolve.
+
 		return "", nil
 	}
 	var warns []string
@@ -107,7 +99,7 @@ func (r *resolver) shell() (string, []string) {
 		"/bin/bash", "/usr/bin/bash",
 		"/bin/zsh", "/usr/bin/zsh",
 		"/system/bin/bash",
-		"/system/bin/sh", // Android: mksh
+		"/system/bin/sh",
 		"/bin/sh",
 	)
 	for _, c := range cands {
@@ -118,21 +110,16 @@ func (r *resolver) shell() (string, []string) {
 	return "/system/bin/sh", append(warns, "found no usable shell; falling back to /system/bin/sh")
 }
 
-// path builds a PATH from the directories that actually exist. tailcat
-// hardcodes /usr/local/bin:/usr/bin:/bin, none of which exist on Android.
 func (r *resolver) path() string {
 	if r.goos == "windows" {
-		// tailcat gives the session the server's own environment on
-		// Windows, so PATH is already whatever the operator has.
+
 		return r.getenv("PATH")
 	}
 	var dirs []string
 	if p := r.termuxPrefix(); p != "" {
 		dirs = append(dirs, filepath.Join(p, "bin"))
 	}
-	// Android's own directories come first so PATH names them canonically:
-	// /bin is a symlink to /system/bin there, and listing the symlink first
-	// would leave PATH pointing at the same directory under two names.
+
 	dirs = append(dirs,
 		"/system/bin", "/system/xbin",
 		"/vendor/bin", "/product/bin",
@@ -149,8 +136,7 @@ func (r *resolver) path() string {
 		if !r.isDir(d) {
 			continue
 		}
-		// Deduplicate by target, not by name, so a symlinked alias of a
-		// directory already on PATH is dropped.
+
 		if real := r.realpath(d); !seen[real] {
 			seen[real] = true
 			out = append(out, d)
@@ -159,9 +145,6 @@ func (r *resolver) path() string {
 	return strings.Join(out, ":")
 }
 
-// home returns a home directory that exists. tailcat passes this to
-// user.Current via $HOME, and on Android an unset $HOME makes
-// user.Current fail, which kills the session before the shell starts.
 func (r *resolver) home() (string, []string) {
 	if r.goos == "windows" {
 		if h := r.getenv("USERPROFILE"); h != "" {
@@ -191,7 +174,6 @@ func (r *resolver) home() (string, []string) {
 	}
 	cands = append(cands, "/data/local/tmp/meowshell", filepath.Join(os.TempDir(), "meowshell"))
 
-	// Prefer a writable directory; remember the first merely-existing one.
 	var readOnly string
 	for _, c := range cands {
 		p, ok := try(c)
@@ -224,7 +206,6 @@ func (r *resolver) user() string {
 	return "unknown"
 }
 
-// Resolve works out the environment a session should run with.
 func (r *resolver) Resolve() Env {
 	sh, warns := r.shell()
 	home, hw := r.home()

@@ -11,10 +11,6 @@ import (
 	"github.com/pkg/sftp"
 )
 
-// sftpClientFor lazily opens the one *sftp.Client this connection shares
-// across every ls/stat/mkdir/.../upload/download request -- pkg/sftp
-// already multiplexes concurrent requests over its single SSH subsystem
-// channel internally, so there is no need for more than one here.
 func (a *agentSession) sftpClientFor() (*sftp.Client, error) {
 	a.sftpMu.Lock()
 	defer a.sftpMu.Unlock()
@@ -29,12 +25,6 @@ func (a *agentSession) sftpClientFor() (*sftp.Client, error) {
 	return sf, nil
 }
 
-// classifySFTPError maps an SFTP failure to a typed error code. pkg/sftp
-// documents its client methods as returning errors satisfying the
-// standard os.IsNotExist/os.IsPermission predicates for the common
-// not-found/denied cases (wrapping the wire-level SSH_FX_* status), which
-// is enough to cover what a caller is actually likely to branch on without
-// this needing to unpack pkg/sftp's *sftp.StatusError codes by hand.
 func classifySFTPError(err error) errorCode {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -46,9 +36,6 @@ func classifySFTPError(err error) errorCode {
 	}
 }
 
-// sftpOp answers one metadata request/response op -- see protocol.go's
-// controlMessage doc for the field meanings and agentUsage-adjacent
-// sftpUsage-style listing of supported Op values.
 func (a *agentSession) sftpOp(msg controlMessage) {
 	sf, err := a.sftpClientFor()
 	if err != nil {
@@ -121,10 +108,6 @@ func fileInfoToEntry(fi os.FileInfo) sftpEntry {
 	}
 }
 
-// openSFTPChannel opens an upload or download channel: a file transfer,
-// unlike sftpOp's fast metadata request/response, gets its own channel ID
-// so its bytes can ride the same data-frame machinery shell/exec channels
-// use, with progress and cancellation alongside.
 func (a *agentSession) openSFTPChannel(msg controlMessage) {
 	sf, err := a.sftpClientFor()
 	if err != nil {
@@ -178,16 +161,8 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 	}
 }
 
-// sftpProgressInterval throttles progress messages -- frequent enough for
-// a UI progress bar to feel live, rare enough not to flood the control
-// channel on a fast local transfer.
 const sftpProgressInterval = 200 * time.Millisecond
 
-// pumpSFTPDownload streams a remote file to the client as data frames,
-// reporting progress and ending in exit_status (success) or error
-// (cancelled, or a real read failure) -- the same three-way outcome
-// waitChannel reports for a shell/exec channel, just driven by file reads
-// instead of session.Wait.
 func (a *agentSession) pumpSFTPDownload(id uint32, f *sftp.File, ctx context.Context) {
 	defer f.Close()
 	defer a.removeChannel(id)
@@ -225,11 +200,6 @@ func (a *agentSession) pumpSFTPDownload(id uint32, f *sftp.File, ctx context.Con
 	}
 }
 
-// finalizeUpload closes an sftp_upload channel's remote file and applies
-// Preserve (mode + mtime) if requested, reporting the outcome as
-// exit_status. close_channel is how the client signals "no more bytes
-// coming" for an upload -- this is where a transfer is actually considered
-// done, not just where its resources get cleaned up.
 func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 	if ch.cancel != nil {
 		defer ch.cancel()
@@ -240,9 +210,7 @@ func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 	}
 	if ch.uploadPreserve {
 		if sf, err := a.sftpClientFor(); err == nil {
-			// Best-effort: neither failure should turn an upload that
-			// otherwise completed into a reported failure, but the client
-			// should still hear about it.
+
 			if err := sf.Chmod(ch.uploadPath, os.FileMode(ch.uploadMode)); err != nil {
 				a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode: %w", err))
 			}

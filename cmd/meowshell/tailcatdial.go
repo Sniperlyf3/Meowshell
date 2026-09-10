@@ -15,31 +15,10 @@ import (
 	"tailscale.com/types/key"
 )
 
-// tailcatForwardClient adapts a *tailcat.Client to the small Dial-shaped
-// interface forwarding.go's openLocalForward/openSOCKSForward already take
-// (the same one a.client(), the *ssh.Client, satisfies for a general SSH
-// host) -- so forward_local/forward_socks can reuse that exact code
-// unmodified against a tailcat destination too, dialing through tailcat's
-// own client-side WireGuard connection instead of an SSH direct-tcpip
-// channel, which tailcat's own embedded SSH service never implements (see
-// forwarding.go's package doc comment). This mirrors what tailcat's own
-// "forward"/"socks" subcommands do (cmd/tailcat/forward.go's
-// forwardListener, cmd/tailcat/tailcat.go's dialSOCKSTarget) -- forwarding
-// through a tailcat server was never an SSH feature there either.
 type tailcatForwardClient struct {
 	cl *tailcat.Client
 }
 
-// Dial implements forwarding.go's client interface. network is always
-// "tcp" here (forward_local/forward_socks never ask for anything else,
-// unlike tailcat's own SOCKS5 UDP ASSOCIATE support, which this doesn't
-// need). addr is a "host:port": a target on the tailcat server's own
-// loopback dials that port on the server itself (DialTCPPort), matching a
-// bare-port mapping in "tailcat forward"'s own syntax; anything else is
-// routed through the server acting as an exit node (DialTCP), matching a
-// "local:remote-ip:remote-port" mapping there -- just always spelled as a
-// full host:port here, since that's this protocol's own RemoteAddr/SOCKS
-// CONNECT shape rather than a mapping string to parse.
 func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	if network != "tcp" {
 		return nil, fmt.Errorf("tailcat forwarding only supports tcp, not %q", network)
@@ -52,15 +31,7 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid forward target port %q: %w", portStr, err)
 	}
-	// A bounded context, not context.Background(): a destination the
-	// server refuses (no OnTCP/OnTCPForward handler for it -- e.g. no
-	// --exit-node and this isn't one of its already-served ports) can
-	// leave UserDial/DialContextTCP hanging rather than returning a
-	// prompt error, since gVisor's netstack has no obligation to surface
-	// a refusal as fast as a real RST would; on the client's own first
-	// use this also covers standing up its WireGuard session. Same
-	// timeout tcpDialer/dialHTTPConnectProxy already use for a real TCP
-	// dial elsewhere in this file's siblings.
+
 	ctx, cancel := context.WithTimeout(context.Background(), tcpDialTimeout)
 	defer cancel()
 	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
@@ -68,9 +39,7 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		// Prefer an IPv4 result, same as tailcat's own classifySOCKSAddr:
-		// it rides the exit node's NAT64 mapping, and the server may not
-		// have IPv6 connectivity of its own at all.
+
 		ips, lookupErr := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("resolving forward target host %q: %w", host, lookupErr)
@@ -89,13 +58,6 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	return c.cl.DialTCP(ctx, netip.AddrPortFrom(ip.Unmap(), uint16(port)))
 }
 
-// tailcatKeyFromName resolves a "--key" value the same way tailcat's own
-// CLI does (cmd/tailcat's clientKey/keyPath -- not importable from here,
-// since they live in a main package and this one needs its own copy): an
-// empty or "new" value means a fresh ephemeral node identity; anything
-// containing a path separator is a literal path to a key file; anything
-// else is a name under tailcat's own on-disk key directory, what
-// "tailcat genkey" itself writes to.
 func tailcatKeyFromName(name string) (key.NodePrivate, error) {
 	if name == "" || name == "new" {
 		return key.NewNode(), nil

@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// TestAgentRejectsNonLoopbackBindByDefault proves the fix for the
-// unrestricted-bind finding: a forward_local asking to listen on a
-// non-loopback address is refused unless AllowNonLoopbackBind is set.
 func TestAgentRejectsNonLoopbackBindByDefault(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -36,9 +33,7 @@ func TestAgentRejectsNonLoopbackBindByDefault(t *testing.T) {
 	t.Run("0.0.0.0 succeeds with AllowNonLoopbackBind", func(t *testing.T) {
 		cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
 		defer stopAgent(t, cmd, stdin)
-		// known_hosts already trusts this server from the first subtest,
-		// so no host-key prompt this time -- but "connected" still comes
-		// first, same as any other fresh connection.
+
 		expectConnected(t, out)
 
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "forward_local", ListenAddr: "0.0.0.0:0", RemoteAddr: "127.0.0.1:1", AllowNonLoopbackBind: true})
@@ -64,9 +59,6 @@ func TestAgentRejectsNonLoopbackBindByDefault(t *testing.T) {
 	})
 }
 
-// TestAgentUnixSocketForward proves the UDS fix: a forward_local with
-// listen_network "unix" listens on a filesystem-permission-protected
-// socket, chmod'd 0600 regardless of umask, and actually relays bytes.
 func TestAgentUnixSocketForward(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("unix domain sockets aren't this test's concern on Windows")
@@ -129,9 +121,6 @@ func TestAgentUnixSocketForward(t *testing.T) {
 	}
 }
 
-// TestAgentSocksAuthToken proves the SOCKS5 auth fix: a proxy opened with
-// SocksUsername/SocksPassword refuses a client presenting the wrong
-// credentials (or none), and serves one presenting the right pair.
 func TestAgentSocksAuthToken(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -188,8 +177,7 @@ func TestAgentSocksAuthToken(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer conn.Close()
-		// Offer only "no auth"; the server requires user/pass and must
-		// reject the method-selection outright (0xFF), not fall back.
+
 		if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 			t.Fatal(err)
 		}
@@ -218,10 +206,6 @@ func TestAgentSocksAuthToken(t *testing.T) {
 	})
 }
 
-// TestAgentConfigureCarriesProxyURL proves the argv fix: the agent
-// connects through a proxy configured via the "configure" message
-// (never a CLI flag, so it never lands in this process's own argv/
-// /proc/pid/cmdline) exactly as it did when --proxy was still a flag.
 func TestAgentConfigureCarriesProxyURL(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 	addr, _, _ := startTestSSHServer(t, echoCommandHandler)
@@ -257,10 +241,6 @@ func TestAgentConfigureCarriesProxyURL(t *testing.T) {
 	}
 }
 
-// serveHTTPConnectProxy answers exactly one CONNECT request by dialing
-// wantTarget itself (ignoring whatever the client asked for, since this
-// test only cares whether the agent used the proxy at all) and signals
-// dialed once it has.
 func serveHTTPConnectProxy(t *testing.T, conn net.Conn, wantTarget string, dialed chan<- struct{}) {
 	defer conn.Close()
 	buf := make([]byte, 4096)
@@ -287,8 +267,6 @@ func serveHTTPConnectProxy(t *testing.T, conn net.Conn, wantTarget string, diale
 
 const e2eDialTimeout = 5 * time.Second
 
-// socks5Auth performs the greeting + username/password subnegotiation
-// only, for a test that expects it to fail.
 func socks5Auth(conn net.Conn, username, password string) (bool, error) {
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
 		return false, err
@@ -317,8 +295,6 @@ func socks5Auth(conn net.Conn, username, password string) (bool, error) {
 	return true, nil
 }
 
-// socks5AuthAndConnect is socks5Auth plus a CONNECT request, returning
-// whatever the far end sends back.
 func socks5AuthAndConnect(conn net.Conn, username, password, target string) (string, error) {
 	if ok, err := socks5Auth(conn, username, password); err != nil || !ok {
 		return "", err

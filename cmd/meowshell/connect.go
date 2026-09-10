@@ -34,13 +34,6 @@ pseudo-terminal too.
 	meowshell connect -t <tc-addr> top
 `
 
-// connect implements "meowshell connect": an SFTP-cp-style native
-// replacement for what used to shell out to "tailcat ssh" (a system ssh
-// client). Requests a pseudo-terminal for an interactive shell by default,
-// forwards the local terminal into raw mode when there is one (a real CLI
-// user's own terminal; a no-op when stdin is a pipe, as it is for anything
-// driving this as a subprocess), and reports the remote exit status as its
-// own.
 func connect(args []string) error {
 	fs2 := flag.NewFlagSet("connect", flag.ExitOnError)
 	key := fs2.String("key", "", "tailcat client key name or path")
@@ -110,12 +103,6 @@ func connect(args []string) error {
 		}
 	}
 
-	// A real CLI user's own terminal needs raw mode so keystrokes reach the
-	// remote session immediately, unprocessed by the local tty driver (the
-	// same reason ssh(1) does this). A no-op -- IsTerminal false -- when
-	// stdin is a pipe, which is how everything else drives this: nothing
-	// local to put in raw mode, and nothing here otherwise touches stdin
-	// framing, so piped bytes reach the session exactly as written.
 	if term.IsTerminal(stdinFd) {
 		if state, err := term.MakeRaw(stdinFd); err == nil {
 			defer term.Restore(stdinFd, state)
@@ -127,12 +114,7 @@ func connect(args []string) error {
 	session.Stderr = os.Stderr
 
 	if len(command) > 0 {
-		// Plain space-join, no quoting: the SSH exec request is one string
-		// regardless, and this is exactly what a real ssh client sends too
-		// (try "ssh host echo 'a b'" against any real sshd -- it receives
-		// "echo a b", not "echo 'a b'"). Quoting is the caller's own job
-		// when a single argument needs to survive as one word remotely,
-		// same as it always was.
+
 		err = session.Run(strings.Join(command, " "))
 	} else if err = session.Shell(); err == nil {
 		err = session.Wait()

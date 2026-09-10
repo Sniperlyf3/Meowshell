@@ -8,9 +8,6 @@ import (
 	"testing"
 )
 
-// writeFakeTailcat creates an executable file findTailcat will accept, so
-// serve/connect/socks/forward can run to the point of building an argv
-// without a real tailcat binary.
 func writeFakeTailcat(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -25,8 +22,6 @@ func writeFakeTailcat(t *testing.T) string {
 	return p
 }
 
-// captureRunTailcat replaces runTailcatFn for the test's duration, recording
-// the bin/argv a subcommand built instead of actually launching anything.
 func captureRunTailcat(t *testing.T) *capturedRun {
 	t.Helper()
 	captured := &capturedRun{}
@@ -174,15 +169,8 @@ func TestServeArgv(t *testing.T) {
 	}
 }
 
-// connect's argv building (tailcatClientArgv) is covered by
-// TestTailcatClientArgv in cp_test.go, shared with cp. The session itself
-// (dialing, pty allocation, a remote command, exit status) has no local
-// server to dial in this package, so it's covered end-to-end against a
-// real one by dotnet/Meowshell.Tests' TailcatSshSession tests instead.
-
 func TestConnectRequiresAnAddress(t *testing.T) {
-	// Fails at flag/argument validation, before findTailcat or any dial --
-	// no fake binary needed.
+
 	if err := connect(nil); err == nil {
 		t.Fatal("connect with no address did not error")
 	}
@@ -193,12 +181,6 @@ func TestConnectRejectsConflictingPtyFlags(t *testing.T) {
 		t.Fatal("connect with both -t and -T did not error")
 	}
 }
-
-// agent's argv building (tailcatClientArgv) is the same shared helper
-// connect and cp use, covered by TestTailcatClientArgv in cp_test.go. The
-// multiplexed session itself is covered by the protocol-level tests in
-// protocol_test.go plus dotnet/Meowshell.Tests' end-to-end coverage, the
-// same split connect's own session behavior uses above.
 
 func TestAgentRequiresExactlyOneAddress(t *testing.T) {
 	cases := [][]string{nil, {"tcaddr", "extra"}}
@@ -257,7 +239,7 @@ func TestForwardRequiresAnAddressAndAMapping(t *testing.T) {
 	cases := [][]string{
 		nil,
 		{"--tailcat=" + tailcat},
-		{"--tailcat=" + tailcat, "tcaddr"}, // address with no mapping
+		{"--tailcat=" + tailcat, "tcaddr"},
 	}
 	for _, args := range cases {
 		if err := forward(args); err == nil {

@@ -16,11 +16,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// TestAgentTCPEndToEnd drives "meowshell agent" against a real (if
-// minimal) SSH server over plain TCP -- no tailcat involved at all -- to
-// prove the general-SSH-host path: TCP dialing, TOFU host-key prompting
-// round-tripped over the control channel, and the same known_hosts file
-// trusting the same key silently on a second connection.
 func TestAgentTCPEndToEnd(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -60,13 +55,12 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 		cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
 		defer stopAgent(t, cmd, stdin)
 
-		// No prompt this time: the very first message must be "connected".
 		expectConnected(t, out)
 	})
 
 	t.Run("a changed host key is refused, never silently prompted past", func(t *testing.T) {
 		port := addrPort(t, addr)
-		stopServer1() // free the port before the second server rebinds it
+		stopServer1()
 		_, hostKey2, _ := startTestSSHServerOnPort(t, port, echoCommandHandler)
 		if bytes.Equal(hostKey1.PublicKey().Marshal(), hostKey2.PublicKey().Marshal()) {
 			t.Fatal("the second server's host key is identical to the first; the test proves nothing")
@@ -88,10 +82,6 @@ func startAgent(t *testing.T, meowshellBin, knownHosts, dest string) (*exec.Cmd,
 	return startAgentConfigured(t, meowshellBin, knownHosts, dest, controlMessage{Msg: "configure"})
 }
 
-// startAgentConfigured is startAgent, sending configureMsg (which must set
-// Msg: "configure") as the mandatory first message instead of an empty
-// one -- for a test that needs to supply auth material (Keys,
-// KeystoreKeyIDs, DisableAgent, ...).
 func startAgentConfigured(t *testing.T, meowshellBin, knownHosts, dest string, configureMsg controlMessage) (*exec.Cmd, *os.File, *bufio.Reader) {
 	t.Helper()
 	cmd := exec.Command(meowshellBin, "agent", "--known-hosts="+knownHosts, dest)
@@ -154,20 +144,11 @@ func addrPort(t *testing.T, hostPort string) string {
 	return port
 }
 
-// echoCommandHandler is a fake SSH server's exec handler: it writes the
-// requested command line back to the channel and exits 0, just enough to
-// prove a channel round trip happened without needing a real shell.
 func echoCommandHandler(ch ssh.Channel, command string) {
 	fmt.Fprintf(ch, "%s\n", command)
 	ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{0}))
 }
 
-// startTestSSHServer starts a minimal SSH server on an OS-assigned port,
-// accepting any client (NoClientAuth -- auth methods aren't this test's
-// concern) and running handleExec for every "exec" request it receives.
-// Returns the server's address, host key, and a stop function (also
-// registered as t.Cleanup, but exposed for a test that needs the port
-// freed before it ends, e.g. to rebind it for a "changed host key" case).
 func startTestSSHServer(t *testing.T, handleExec func(ssh.Channel, string)) (addr string, key ssh.Signer, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -182,9 +163,6 @@ func startTestSSHServer(t *testing.T, handleExec func(ssh.Channel, string)) (add
 	return "127.0.0.1:" + port, signer, stop
 }
 
-// startTestSSHServerOnPort is startTestSSHServer for a specific, already
-// chosen port -- used to simulate a changed host key answering at the same
-// address a prior test server used.
 func startTestSSHServerOnPort(t *testing.T, port string, handleExec func(ssh.Channel, string)) (addr string, key ssh.Signer, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
@@ -266,13 +244,6 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig, handleExec func(s
 	}
 }
 
-// serveTestSSHDirectTCPIP answers a "direct-tcpip" channel request --
-// what ssh.Client.Dial sends server-side -- by dialing the requested
-// address locally and piping bytes both ways, the same shape a real
-// sshd's own forwarding support has. Without this, meowshell agent's own
-// forward_local/forward_socks channels (which both go through
-// client.Dial) have nothing on the server end to actually reach a
-// backend through.
 func serveTestSSHDirectTCPIP(newCh ssh.NewChannel) {
 	var payload struct {
 		DestAddr   string

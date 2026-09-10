@@ -12,16 +12,6 @@ import (
 	"time"
 )
 
-// TestAgentForwardsThroughTailcatDestination proves the fix for the daemon's
-// biggest forwarding gap: forward_local/forward_socks against a *tailcat*
-// destination used to open successfully (the listener bound fine) but drop
-// every accepted connection, since tailcat's own embedded SSH service never
-// implements SSH-level forwarding (see forwarding.go's doc comment). Now
-// forwardClient (tailcatdial.go) picks a native tailcat.Client instead of
-// the SSH client for that case, dialing the same way tailcat's own
-// "forward"/"socks" subcommands do. This drives both forward_local and
-// forward_socks against a real (hermetic, local-DERP) tailcat server and
-// checks actual bytes flow end to end -- not just that the channel opens.
 func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat_linux_amd64")
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
@@ -30,20 +20,8 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("TS_DEBUG_TAILCAT_LOCAL_DERP", "1")
 
-	// Forwarding to an arbitrary port needs the server started as an exit
-	// node (tailcat.Server.OnTCP only forwards a bare-port dial to its own
-	// services otherwise -- see cmd/tailcat/tailcat.go's own OnTCP, which
-	// serves 22 and any --files/--ssh-authorized-keys ports but sends a RST
-	// for anything else unless "exit-node" is one of its served services).
-	// meowshell serve's own --exit-node flag (main.go) requests exactly
-	// that -- unlike startE2EServer (used by the general daemon E2E tests),
-	// which starts a plain "no-auth-ssh" server with no forwarding at all.
 	addr := startE2EServerWithExitNode(t, tailcatBin, meowshellBin, home)
 
-	// Stands in for "a service running on the server": from the tailcat
-	// server's own point of view this is its own loopback, since the test
-	// server and this backend both run as this one test process's own
-	// child/local listeners on the same machine.
 	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -143,11 +121,6 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 	})
 }
 
-// startE2EServerWithExitNode starts "meowshell serve --insecure-no-auth
-// --exit-node" (so an agent can still connect at all, and its OnTCP
-// handler also forwards any port, not just the ones its other services
-// already listen on -- see this test's own comment at its call site) over
-// a hermetic local DERP relay.
 func startE2EServerWithExitNode(t *testing.T, tailcatBin, meowshellBin, home string) string {
 	t.Helper()
 	addrFile := filepath.Join(home, "addr")

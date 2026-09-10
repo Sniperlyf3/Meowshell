@@ -11,10 +11,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// testAuthSession wires an agentSession to a pair of pipes so a test can
-// play the client side of the control protocol directly, in-process --
-// no subprocess or real SSH server needed to exercise the prompt
-// round-trip logic in agentauth.go on its own.
 func testAuthSession(t *testing.T) (session *agentSession, fromAgent io.Reader, toAgent io.Writer) {
 	t.Helper()
 	agentIn, clientOut := io.Pipe()
@@ -57,7 +53,7 @@ func TestParseKeyMaybePromptingRetriesOnWrongPassphrase(t *testing.T) {
 		for range answers {
 			_, msg := readControlFrame(t, fromAgent)
 			if msg.Msg != "prompt_request" || msg.PromptKind != "passphrase" {
-				done <- nil // let the main goroutine's assertion below report the mismatch
+				done <- nil
 				return
 			}
 			answer := answers[0]
