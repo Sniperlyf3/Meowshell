@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/format"
 	"go/parser"
 	"go/token"
@@ -66,11 +67,22 @@ func main() {
 // it gofmt-formatted. Since comments were never part of the parsed tree, the
 // printed output has none -- string/rune literals are handled correctly by
 // the parser's own tokenizer, so nothing inside a string is ever touched.
+//
+// Build-constraint lines (//go:build, and the legacy // +build) are the one
+// exception: syntactically they're ordinary line comments, but the Go
+// toolchain reads them to decide which files even compile for a given
+// GOOS/GOARCH, so dropping one silently breaks the build instead of just
+// losing prose -- a real bug this tool shipped with once already, caught
+// only by CI actually building for a second platform. extractBuildTags scans
+// the original source's leading comment lines (constraints are only ever
+// valid before the package clause) and whatever it finds is spliced back
+// into the stripped output.
 func stripFile(path string) (out []byte, changed bool, err error) {
 	original, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false, err
 	}
+	tags := extractBuildTags(original)
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, original, parser.SkipObjectResolution)
@@ -84,5 +96,25 @@ func stripFile(path string) (out []byte, changed bool, err error) {
 		return nil, false, err
 	}
 	out = []byte(buf.String())
+	if len(tags) > 0 {
+		out = append([]byte(strings.Join(tags, "\n")+"\n\n"), out...)
+	}
 	return out, string(out) != string(original), nil
+}
+
+func extractBuildTags(src []byte) []string {
+	var tags []string
+	for _, raw := range strings.Split(string(src), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "//") {
+			break // constraints only ever precede the package clause
+		}
+		if constraint.IsGoBuild(line) || constraint.IsPlusBuild(line) {
+			tags = append(tags, line)
+		}
+	}
+	return tags
 }
