@@ -51,6 +51,32 @@ public sealed class TailcatClientTests : IDisposable
         }, argsFile);
     }
 
+    /// <summary>Same idea as <see cref="Fake"/>, but for GetEnvironmentAsync, which runs "meowshell" directly rather than "tailcat".</summary>
+    private TailcatClientOptions FakeMeowshell(string script)
+    {
+        var bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        var meowshell = Path.Combine(bin, naming.FileName("meowshell"));
+        File.WriteAllText(meowshell, "#!/bin/bash\n" + script);
+        var tailcat = Path.Combine(bin, naming.FileName("tailcat"));
+        File.WriteAllText(tailcat, "#!/bin/bash\ntrue\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            const UnixFileMode exec = UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite;
+            File.SetUnixFileMode(meowshell, exec);
+            File.SetUnixFileMode(tailcat, exec);
+        }
+
+        return new TailcatClientOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "home"),
+            Naming = naming,
+            Timeout = TimeSpan.FromSeconds(10),
+        };
+    }
+
     [Fact]
     public async Task GenerateKeyReturnsTheLastLineOfOutput()
     {
@@ -535,5 +561,44 @@ public sealed class TailcatClientTests : IDisposable
         Assert.Equal(
             ["--derpmap-url=https://derp.example/map.json", "--verbose", "resolve", "tcADDR"],
             File.ReadAllLines(argsFile));
+    }
+
+    [Fact]
+    public async Task GetEnvironmentParsesAFullMeowshellEnvReport()
+    {
+        // Shape captured from cmd/meowshell/main.go's printEnv().
+        var options = FakeMeowshell(
+            "printf 'shell /bin/bash\\nhome  /home/e2e\\nuser  e2e\\npath  /usr/bin:/bin\\nterm  xterm-256color\\nlang  en_US.UTF-8\\ntailcat /opt/bin/tailcat\\n'\n");
+
+        var env = await TailcatClient.GetEnvironmentAsync(options);
+
+        Assert.Equal("/bin/bash", env.Shell);
+        Assert.Equal("/home/e2e", env.Home);
+        Assert.Equal("e2e", env.User);
+        Assert.Equal("/usr/bin:/bin", env.Path);
+        Assert.Equal("xterm-256color", env.Term);
+        Assert.Equal("en_US.UTF-8", env.Lang);
+        Assert.Equal("/opt/bin/tailcat", env.TailcatBinaryPath);
+        Assert.Empty(env.Warnings);
+    }
+
+    [Fact]
+    public async Task GetEnvironmentSurfacesWarningsAndAMissingTailcatBinary()
+    {
+        var options = FakeMeowshell(
+            "printf 'shell /bin/sh\\nhome  /home/e2e\\nuser  e2e\\npath  /usr/bin\\nterm  \\nlang  \\ntailcat NOT FOUND (exec: \"tailcat\": executable file not found in $PATH)\\nwarning: $SHELL not set, falling back to /bin/sh\\n'\n");
+
+        var env = await TailcatClient.GetEnvironmentAsync(options);
+
+        Assert.Null(env.TailcatBinaryPath);
+        Assert.Equal(["$SHELL not set, falling back to /bin/sh"], env.Warnings);
+    }
+
+    [Fact]
+    public async Task GetEnvironmentThrowsOnFailure()
+    {
+        var options = FakeMeowshell("echo 'boom' >&2\nexit 1\n");
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.GetEnvironmentAsync(options));
+        Assert.Equal(1, ex.ExitCode);
     }
 }

@@ -358,6 +358,33 @@ public static class TailcatClient
     }
 
     /// <summary>
+    /// meowshell's own resolved environment for a session: shell/home/user/path/term/lang and where it found
+    /// the tailcat binary, exactly as it would hand them to a real <see cref="MeowshellServer"/>/<see cref="TailcatSshSession"/>
+    /// session. Useful for diagnosing a broken environment (an Android app sandbox, <c>adb shell</c>, a stripped
+    /// container) up front, rather than from a session that fails mysteriously once it's already running.
+    /// </summary>
+    /// <param name="options">Where the binaries live.</param>
+    /// <exception cref="TailcatException">meowshell exited non-zero.</exception>
+    public static async Task<TailcatEnvironment> GetEnvironmentAsync(TailcatClientOptions options)
+    {
+        var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
+        Directory.CreateDirectory(options.HomeDirectory);
+        var psi = new ProcessStartInfo(meowshell)
+        {
+            WorkingDirectory = options.HomeDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("env");
+        psi.Environment["TAILCAT_BIN"] = tailcat;
+        psi.Environment["HOME"] = options.HomeDirectory;
+        var result = await RunAsync(psi, options.Timeout, "meowshell env").ConfigureAwait(false);
+        if (!result.Success) throw Failure("env", result);
+        return TailcatEnvironment.Parse(result.Stdout);
+    }
+
+    /// <summary>
     /// Android counterpart to the system-scp path above: runs meowshell's own "cp" subcommand, which speaks SFTP
     /// directly (routed over tailcat's own bare client mode, not a system ssh/scp binary an app sandbox lacks)
     /// instead of shelling out to scp.

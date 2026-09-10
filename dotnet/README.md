@@ -178,8 +178,12 @@ when tailcat printed one, and `Success` doesn't throw on its own, since
 e.g. `--until-direct` timing out is meaningful information, not an error),
 `ListFilesAsync` (`tailcat ls`, pure Go SFTP — no `ssh`/`sftp` binary
 involved — returns typed `TailcatFileEntry` records, not raw text), `SshAsync`,
-and `CpAsync`. `GenerateKeyAsync` takes a **`TailcatKeyOptions`** —
-`Name` required:
+`CpAsync`, and `GetEnvironmentAsync` (`meowshell env` — the shell/home/user/
+path/term/lang meowshell resolved for this environment, where it found the
+tailcat binary, and any resolver warnings, as a typed `TailcatEnvironment`;
+useful for diagnosing a broken sandbox up front rather than from a session
+that fails mysteriously once it's already running). `GenerateKeyAsync` takes
+a **`TailcatKeyOptions`** — `Name` required:
 
 | Option | Default | What it does |
 | --- | --- | --- |
