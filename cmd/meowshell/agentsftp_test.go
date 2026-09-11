@@ -112,10 +112,10 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 	session.handleData(id, []byte("this data will not make it"))
 
 	deadline := time.Now().Add(time.Second)
-	for ch.uploadErr == nil && time.Now().Before(deadline) {
+	for ch.getUploadErr() == nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if ch.uploadErr == nil {
+	if ch.getUploadErr() == nil {
 		t.Fatal("channel writer did not record the write failure on the channel (ch.uploadErr is nil)")
 	}
 	msgs := readControlFrames(t, out)
@@ -183,10 +183,10 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 	out := session.out.(*bytes.Buffer)
 	session.handleData(id, []byte("first chunk, fails"))
 	deadline := time.Now().Add(time.Second)
-	for ch.uploadErr == nil && time.Now().Before(deadline) {
+	for ch.getUploadErr() == nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if ch.uploadErr == nil {
+	if ch.getUploadErr() == nil {
 		t.Fatal("first upload write never failed")
 	}
 	firstErrCount := len(readControlFrames(t, out))
