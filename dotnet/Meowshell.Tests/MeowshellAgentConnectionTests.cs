@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using Meowshell;
 
@@ -8,6 +9,62 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     private readonly string _dir = Directory.CreateTempSubdirectory("meowshell-agent-test-").FullName;
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+    private static readonly SemaphoreSlim s_fakeAgentBuildLock = new(1, 1);
+    private static string? s_fakeAgentBin;
+
+    private static string? FindRepoRoot()
+    {
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d is not null; d = d.Parent)
+        {
+            if (Directory.Exists(Path.Combine(d.FullName, "e2e", "fakeagent"))) return d.FullName;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Builds e2e/fakeagent (see that program's own doc comment) once per test
+    /// run and caches the result, or returns null -- for a test to no-op on,
+    /// the same convention MeowshellServerE2ETests.RealBinaries uses -- when
+    /// there's no Go toolchain available to build it with.
+    /// </summary>
+    private static async Task<string?> BuildFakeAgentAsync()
+    {
+        if (s_fakeAgentBin is not null) return s_fakeAgentBin;
+        await s_fakeAgentBuildLock.WaitAsync();
+        try
+        {
+            if (s_fakeAgentBin is not null) return s_fakeAgentBin;
+            var repoRoot = FindRepoRoot();
+            if (repoRoot is null) return null;
+
+            var outPath = Path.Combine(Path.GetTempPath(), "meowshell-fakeagent-test" + (OperatingSystem.IsWindows() ? ".exe" : ""));
+            var psi = new ProcessStartInfo("go")
+            {
+                WorkingDirectory = repoRoot,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("build");
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add(outPath);
+            psi.ArgumentList.Add("./e2e/fakeagent");
+
+            Process process;
+            try { process = Process.Start(psi)!; }
+            catch (Win32Exception) { return null; } // no "go" on PATH
+            await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0) return null;
+
+            s_fakeAgentBin = outPath;
+            return outPath;
+        }
+        finally
+        {
+            s_fakeAgentBuildLock.Release();
+        }
+    }
 
     [Fact]
     public async Task CancellationStopsTheAgentAndRemainsCancellation()
@@ -43,6 +100,145 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
 
         var pid = int.Parse(await File.ReadAllTextAsync(pidFile), System.Globalization.CultureInfo.InvariantCulture);
         Assert.False(IsRunning(pid), "the cancelled connection leaked its agent process");
+    }
+
+    /// <summary>
+    /// Connects to e2e/fakeagent (see its own doc comment) the same way
+    /// every test below needs to, or returns null for the caller to no-op
+    /// on when there's no Go toolchain to build it with.
+    /// </summary>
+    private async Task<(MeowshellAgentConnection Connection, string ResultsPath)?> ConnectToFakeAgentAsync()
+    {
+        var fakeAgent = await BuildFakeAgentAsync();
+        if (fakeAgent is null) return null;
+
+        var bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        var meowshellPath = Path.Combine(bin, naming.FileName("meowshell"));
+        // MeowshellBinaries.Locate requires a "tailcat" to exist alongside
+        // "meowshell" even though this test's destination never causes it to
+        // actually be invoked -- the same fake binary stands in for both.
+        foreach (var name in new[] { naming.FileName("meowshell"), naming.FileName("tailcat") })
+        {
+            var path = Path.Combine(bin, name);
+            File.Copy(fakeAgent, path);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var connection = await MeowshellAgentConnection.ConnectAsync(new TailcatClientOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "home"),
+            Timeout = TimeSpan.FromSeconds(10),
+        }, "example.invalid");
+        return (connection, meowshellPath + ".results");
+    }
+
+    /// <summary>Polls a fake-agent results file for a line, up to a bound generous enough that a miss means the line is never coming, not that this ran on a slow machine.</summary>
+    private static async Task<bool> WaitForResultAsync(string resultsPath, string marker, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(resultsPath) && (await File.ReadAllTextAsync(resultsPath)).Contains(marker)) return true;
+            await Task.Delay(25);
+        }
+        return File.Exists(resultsPath) && (await File.ReadAllTextAsync(resultsPath)).Contains(marker);
+    }
+
+    /// <summary>
+    /// Regression test: OpenChannelAsync used to track the one open_channel
+    /// request in flight through a single pair of success/failure delegate
+    /// fields, cleared as soon as the caller's CancellationToken fired --
+    /// regardless of whether the agent had already started (or finished)
+    /// creating that channel. A channel_opened arriving after that point had
+    /// nothing listening for it and was silently dropped, leaking whatever
+    /// the agent had just opened (a listener, an SFTP file, a shell) for the
+    /// life of the connection. Each open_channel now carries its own request
+    /// ID, correlated the same way SFTP ops already are, so a late response
+    /// can still be recognized and closed instead of leaking.
+    /// </summary>
+    [Fact]
+    public async Task CancelledOpenChannelIsClosedWhenTheAgentsLateReplyArrives()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        // e2e/fakeagent always waits 300ms before replying to open_channel,
+        // specifically so a test doesn't have to race a real (and much
+        // faster, so much harder to reliably beat) open to exercise this.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80", cancellationToken: cancellation.Token));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "CLOSED", TimeSpan.FromSeconds(5)),
+            "the agent's channel_opened response (after the caller had already cancelled) was never followed by a close_channel -- the channel leaked");
+    }
+
+    /// <summary>
+    /// Regression test: UploadAsync's transfer loop (after a successful
+    /// open) had no try/finally around it at all. Cancelling mid-transfer
+    /// (or any other failure there) skipped the close_channel the happy
+    /// path sends explicitly, leaking the remote file handle and SFTP
+    /// channel for the life of the connection. Cancels synchronously from
+    /// inside the progress callback -- guaranteed to land between two
+    /// SendDataAsync calls, never racing wall-clock timing against how fast
+    /// a chunk upload happens to be.
+    /// </summary>
+    [Fact]
+    public async Task CancelledUploadClosesTheRemoteChannel()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        var localPath = Path.Combine(_dir, "upload-source.bin");
+        await File.WriteAllBytesAsync(localPath, new byte[256 * 1024]); // several 64KB chunks
+
+        using var cancellation = new CancellationTokenSource();
+        var progress = new SyncProgress<long>(_ => cancellation.Cancel());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            connection.UploadAsync(localPath, "remote.bin", progress: progress, cancellationToken: cancellation.Token));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "CLOSED", TimeSpan.FromSeconds(5)),
+            "cancelling mid-upload never sent close_channel -- the remote file/channel leaked");
+    }
+
+    /// <summary>
+    /// Regression test: DownloadAsync's finally block already removed the
+    /// local channel entry on cancellation, but never told the agent to
+    /// stop -- so the agent kept reading and sending the rest of the remote
+    /// file into a channel nothing was listening for anymore. Cancelling a
+    /// download must cancel the transfer, not just stop consuming it.
+    /// e2e/fakeagent never sends any data or exit_status for a download
+    /// channel, so once its 300ms open delay has passed, DownloadAsync's
+    /// read loop is necessarily blocked waiting for data that will never
+    /// arrive -- cancelling well after that (a 1s margin) is bounded by a
+    /// known fixed delay, not a race against real transfer speed.
+    /// </summary>
+    [Fact]
+    public async Task CancelledDownloadClosesTheRemoteChannel()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        var localPath = Path.Combine(_dir, "download-dest.bin");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            connection.DownloadAsync("remote.bin", localPath, cancellationToken: cancellation.Token));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "CLOSED", TimeSpan.FromSeconds(5)),
+            "cancelling a stalled download never sent close_channel -- the agent kept reading/sending the remote file");
+    }
+
+    private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 
     private static async Task WaitForFileAsync(string path, TimeSpan timeout)

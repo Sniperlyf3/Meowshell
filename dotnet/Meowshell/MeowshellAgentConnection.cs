@@ -62,9 +62,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private readonly TailcatDiagnostics _diagnostics = new();
     private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _readLoop;
-    private readonly SemaphoreSlim _openChannelLock = new(1, 1);
     private readonly ConcurrentDictionary<uint, IAgentChannelSink> _channels = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<AgentMessage>> _pendingRequests = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<(uint ChannelId, AgentMessage Msg)>> _pendingOpens = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private long _nextRequestId;
     private bool _stopped;
@@ -285,24 +285,30 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var id = await OpenChannelAsync(request,
             (chId, _) => (chId, (IAgentChannelSink)new AgentRequestResponseSink(completion)), cancellationToken).ConfigureAwait(false);
-
-        await using var file = File.OpenRead(localPath);
-        var buffer = new byte[64 * 1024];
-        long sent = 0;
-        int n;
-        while ((n = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            await SendDataAsync(id, buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
-            sent += n;
-            progress?.Report(sent);
-        }
-        await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
         try
         {
+            await using var file = File.OpenRead(localPath);
+            var buffer = new byte[64 * 1024];
+            long sent = 0;
+            int n;
+            while ((n = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                await SendDataAsync(id, buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
+                sent += n;
+                progress?.Report(sent);
+            }
+            await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
             await completion.Task.ConfigureAwait(false);
         }
         finally
         {
+            // Cancellation (or any failure) before the close_channel above
+            // must still tell the agent to stop: otherwise it keeps the
+            // remote file and SFTP channel open for the rest of the
+            // connection's life. Safe to send twice -- a second
+            // close_channel for an already-closed id is a no-op on the
+            // agent side.
+            try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
             _channels.TryRemove(id, out _);
         }
     }
@@ -339,6 +345,13 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }
         finally
         {
+            // On the happy path the agent already closed its side once it
+            // hit EOF, so this is a no-op there. On cancellation (or any
+            // other failure) before that, it stops the agent from reading
+            // and sending the rest of a possibly huge remote file that
+            // nothing here is listening for anymore -- cancelling this call
+            // must actually cancel the transfer, not just stop consuming it.
+            try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
             _channels.TryRemove(id, out _);
         }
         if (preserve)
@@ -407,39 +420,41 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     internal Task CloseForwardAsync(uint id, CancellationToken cancellationToken) =>
         WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken);
 
+    // Each open_channel request carries its own request ID, correlated
+    // against the response the same way SFTP ops already are -- rather than
+    // one global pending-callback slot. That matters because a single slot
+    // is only safe while calls are strictly serialized: if a caller's
+    // CancellationToken fires while the agent's channel_opened/error for
+    // that request is still in flight, clearing the slot on our side
+    // doesn't stop the agent from creating (or having already created) the
+    // channel. A later call already in flight when that stale response
+    // arrives would previously have silently swallowed it (or worse,
+    // matched it to the wrong caller's request); with each request tracked
+    // by ID, a late response either resolves the right caller or, if
+    // nobody is waiting on it anymore, tells us to close the orphaned
+    // channel immediately (see the "channel_opened"/"error" handling in
+    // HandleControlAsync) instead of leaking it for the life of the
+    // connection.
     private async Task<T> OpenChannelAsync<T>(AgentMessage request, Func<uint, AgentMessage, (T Result, IAgentChannelSink? Sink)> makeResult, CancellationToken cancellationToken)
     {
-        await _openChannelLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var requestId = NextRequestId();
+        request.RequestId = requestId;
+        var tcs = new TaskCompletionSource<(uint ChannelId, AgentMessage Msg)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingOpens[requestId] = tcs;
         try
         {
-            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingOpenSuccess = (id, opened) =>
-            {
-                var (result, sink) = makeResult(id, opened);
-                if (sink is not null) _channels[id] = new AgentChannelDataPump(sink);
-                tcs.TrySetResult(result);
-            };
-            _pendingOpenFailure = ex => tcs.TrySetException(ex);
-            try
-            {
-                await WriteControlAsync(0, request, cancellationToken).ConfigureAwait(false);
-                using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-                return await tcs.Task.ConfigureAwait(false);
-            }
-            finally
-            {
-                _pendingOpenSuccess = null;
-                _pendingOpenFailure = null;
-            }
+            await WriteControlAsync(0, request, cancellationToken).ConfigureAwait(false);
+            using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+            var (channelId, opened) = await tcs.Task.ConfigureAwait(false);
+            var (result, sink) = makeResult(channelId, opened);
+            if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
+            return result;
         }
         finally
         {
-            _openChannelLock.Release();
+            _pendingOpens.TryRemove(requestId, out _);
         }
     }
-
-    private Action<uint, AgentMessage>? _pendingOpenSuccess;
-    private Action<Exception>? _pendingOpenFailure;
 
     internal async Task WriteControlAsync(uint channelId, AgentMessage message, CancellationToken cancellationToken)
     {
@@ -501,7 +516,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 _ = Task.Run(() => HandlePromptAsync(msg));
                 return;
             case "channel_opened":
-                _pendingOpenSuccess?.Invoke(channelId, msg);
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openedTcs))
+                {
+                    openedTcs.TrySetResult((channelId, msg));
+                    return;
+                }
+                // Nobody is waiting on this request anymore -- the caller's
+                // CancellationToken fired before this response arrived. The
+                // agent already created the channel on our behalf; without
+                // this, it would leak for the life of the connection.
+                _ = WriteControlAsync(channelId, new AgentMessage { Msg = "close_channel" }, CancellationToken.None);
                 return;
             case "sftp_result":
                 if (msg.RequestId is not null && _pendingRequests.TryRemove(msg.RequestId, out var resultTcs))
@@ -516,16 +540,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     errorTcs.TrySetResult(msg);
                     return;
                 }
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openFailedTcs))
+                {
+                    openFailedTcs.TrySetException(AgentError(msg, "opening a channel"));
+                    return;
+                }
                 if (channelId == 0)
                 {
                     if (!_connected.Task.IsCompleted)
                     {
                         _connected.TrySetException(AgentError(msg, "connecting"));
-                        return;
-                    }
-                    if (MeowshellErrorCodeExtensions.Parse(msg.Code) != MeowshellErrorCode.ConnectionLost && _pendingOpenFailure is { } failure)
-                    {
-                        failure(AgentError(msg, "opening a channel"));
                         return;
                     }
                     FaultEverything(AgentError(msg, "connection"));
@@ -593,7 +617,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private void FaultEverything(Exception ex)
     {
         _connected.TrySetException(ex);
-        _pendingOpenFailure?.Invoke(ex);
+        foreach (var kv in _pendingOpens) kv.Value.TrySetException(ex);
         foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
         foreach (var kv in _channels) kv.Value.OnFault(ex);
     }
@@ -633,7 +657,6 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _process.Dispose();
-        _openChannelLock.Dispose();
         _writeLock.Dispose();
     }
 }
