@@ -317,3 +317,51 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 	}
 	return total, nil
 }
+
+
+func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(ctx context.Context, name string) ([]string, error) {
+		if name != "device.example.com" {
+			t.Fatalf("TXT lookup name = %q", name)
+		}
+		return []string{"other=value", "tailcat=tcQUJDRA"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isTailcat || got != "tcQUJDRA" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, "tcQUJDRA")
+	}
+}
+
+func TestResolveAgentDestinationLeavesOrdinarySSHHostAlone(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		return []string{"unrelated=value"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "ssh.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isTailcat || got != "ssh.example.com" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want ordinary SSH host", got, isTailcat)
+	}
+}
+
+func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		return []string{"tailcat=tcnot-valid!"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com"); err == nil {
+		t.Fatal("malformed tailcat TXT record was accepted")
+	}
+}
