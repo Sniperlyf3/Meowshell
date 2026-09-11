@@ -92,7 +92,7 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 				return
 			}
 			go proxyForwardedConn(conn, func() (net.Conn, error) {
-				return client.Dial("tcp", msg.RemoteAddr)
+				return dialWithTimeout(client.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
 			})
 		}
 	}()
@@ -115,7 +115,7 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 				return
 			}
 			go proxyForwardedConn(conn, func() (net.Conn, error) {
-				return net.Dial("tcp", msg.RemoteAddr)
+				return dialWithTimeout(net.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
 			})
 		}
 	}()
@@ -140,6 +140,37 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 			go serveSOCKS5(conn, client, msg.SocksUsername, msg.SocksPassword)
 		}
 	}()
+}
+
+// dialWithTimeout bounds a dial func that has no timeout of its own --
+// *ssh.Client.Dial (used for forward_local/forward_socks against a plain
+// SSH destination, via forwardClient) and net.Dial (used for
+// forward_remote's target) both block indefinitely against an unresponsive
+// target (e.g. a firewall silently dropping SYNs), unlike tailcat-backed
+// forwarding, which already enforces tcpDialTimeout internally. If the dial
+// does eventually complete after the timeout, the orphaned connection is
+// closed rather than leaked.
+func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network, addr string, timeout time.Duration) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		conn, err := dial(network, addr)
+		ch <- result{conn, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.conn, res.err
+	case <-time.After(timeout):
+		go func() {
+			if res := <-ch; res.conn != nil {
+				res.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("dial %s %s: timed out after %s", network, addr, timeout)
+	}
 }
 
 func (a *agentSession) registerForward(ln net.Listener) uint32 {
@@ -312,7 +343,7 @@ func serveSOCKS5(conn net.Conn, client interface {
 	port := binary.BigEndian.Uint16(portBuf)
 	target := net.JoinHostPort(host, fmt.Sprint(port))
 
-	remote, err := client.Dial("tcp", target)
+	remote, err := dialWithTimeout(client.Dial, "tcp", target, tcpDialTimeout)
 	if err != nil {
 		writeSOCKS5Reply(conn, 0x05)
 		conn.Close()

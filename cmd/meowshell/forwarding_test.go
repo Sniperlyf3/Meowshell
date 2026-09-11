@@ -13,6 +13,33 @@ import (
 	"time"
 )
 
+// TestDialWithTimeoutDoesNotHangForever is a regression test: forward_remote
+// (and forward_local/forward_socks against a plain SSH destination, via
+// forwardClient) used to dial their target with no timeout at all
+// (net.Dial / *ssh.Client.Dial, neither of which has one built in), so an
+// unresponsive target (a firewall silently dropping SYNs) could hang the
+// dial indefinitely.
+func TestDialWithTimeoutDoesNotHangForever(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	blockingDial := func(network, addr string) (net.Conn, error) {
+		<-unblock
+		return nil, fmt.Errorf("dial finished after being unblocked, too late to matter")
+	}
+
+	started := time.Now()
+	conn, err := dialWithTimeout(blockingDial, "tcp", "unresponsive.example:1234", 50*time.Millisecond)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("dialWithTimeout returned no error for a dial that never completed")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("dialWithTimeout blocked for %s past its timeout, want it to return promptly", elapsed)
+	}
+}
+
 func TestListenUnixRefusesToRemoveNonSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sockets are not supported on Windows")
