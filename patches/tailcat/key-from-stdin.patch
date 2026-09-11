@@ -1,0 +1,53 @@
+diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
+index 0000000..0000000 100644
+--- a/cmd/tailcat/tailcat.go
++++ b/cmd/tailcat/tailcat.go
+@@ -92,7 +92,7 @@ func newRootCommand() *ff.Command {
+-	flagKey = rootFS.StringLong("key", "", "'new' for an ephemeral key. If empty, the default saved key is used if it exists ('default' in server mode, 'client-default' in client modes; see genkey), else an ephemeral key. Otherwise the path to a *.private.json or a name like 'foo' to read it from $CONFIG/tailcat/keys/foo.private.json")
++	flagKey = rootFS.StringLong("key", "", "'new' for an ephemeral key, '-' to read a *.private.json from stdin, or a saved key path/name. If empty, the default saved key is used if it exists ('default' in server mode, 'client-default' in client modes; see genkey), else an ephemeral key")
+@@ -790,12 +790,11 @@ func clientKey() key.NodePrivate {
+ 	if *flagKey == "new" {
+ 		return key.NewNode()
+ 	}
+-	path := keyPath(*flagKey)
+-	j, err := os.ReadFile(path)
++	j, path, err := readKeyJSON(*flagKey)
+ 	if err != nil {
+ 		log.Fatal(err)
+ 	}
+ 	var conf tailcat.PrivateKey
+@@ -1320,8 +1319,7 @@ func serve(args []string) error {
+ 		priv = conf.Private
+ 		ci = &conf.Public
+ 		ci.RegionID = -1 // auto-detect
+ 	} else {
+-		path := keyPath(*flagKey)
+-		j, err := os.ReadFile(path)
++		j, path, err := readKeyJSON(*flagKey)
+ 		if err != nil {
+ 			log.Fatal(err)
+ 		}
+@@ -1732,6 +1730,18 @@ func keyIsPath(name string) bool {
+ 	return strings.ContainsAny(name, `/\`)
+ }
+ 
++func readKeyJSON(name string) ([]byte, string, error) {
++	if name == "-" {
++		const maxKeyJSON = 64 << 10
++		j, err := io.ReadAll(io.LimitReader(os.Stdin, maxKeyJSON+1))
++		if err != nil {
++			return nil, "stdin", err
++		}
++		if len(j) > maxKeyJSON {
++			return nil, "stdin", fmt.Errorf("private key JSON from stdin exceeds %d bytes", maxKeyJSON)
++		}
++		return j, "stdin", nil
++	}
++	path := keyPath(name)
++	j, err := os.ReadFile(path)
++	return j, path, err
++}
++
+ func keyPath(name string) string {
+ 	if keyIsPath(name) {
+ 		return name
