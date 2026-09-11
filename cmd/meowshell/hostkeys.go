@@ -80,6 +80,32 @@ func tcpHostKeyCallback(knownHostsPath string, prompt hostKeyPrompter) (ssh.Host
 		if !accept {
 			return fmt.Errorf("host key for %s rejected", hostname)
 		}
+
+		// Another connection may have completed TOFU while this prompt was
+		// visible. Serialize the final re-check + append across processes and
+		// reload known_hosts under the lock. If a different key won the race,
+		// fail closed instead of appending a second trusted key for the host.
+		unlock, lerr := lockKnownHosts(knownHostsPath)
+		if lerr != nil {
+			return lerr
+		}
+		defer unlock()
+
+		freshVerify, lerr := knownhosts.New(knownHostsPath)
+		if lerr != nil {
+			return fmt.Errorf("reloading known_hosts: %w", lerr)
+		}
+		lerr = freshVerify(hostname, remote, key)
+		if lerr == nil {
+			return nil
+		}
+		var freshKeyErr *knownhosts.KeyError
+		if !errors.As(lerr, &freshKeyErr) {
+			return lerr
+		}
+		if len(freshKeyErr.Want) > 0 {
+			return &hostKeyChangedError{hostname: hostname, err: freshKeyErr}
+		}
 		return appendKnownHost(knownHostsPath, hostname, key)
 	}, nil
 }
