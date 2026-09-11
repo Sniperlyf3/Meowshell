@@ -237,6 +237,31 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     }
 
     /// <summary>
+    /// Regression test: DownloadAsync used to open/truncate the final destination
+    /// before the transfer had succeeded. Any remote error after partial data
+    /// permanently destroyed a previously valid local file. Downloads now stage
+    /// into a sibling temporary file and only replace the destination after a
+    /// successful terminal status.
+    /// </summary>
+    [Fact]
+    public async Task FailedDownloadLeavesExistingDestinationUntouched()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var localPath = Path.Combine(_dir, "important-existing.bin");
+        var original = "original-good-data"u8.ToArray();
+        await File.WriteAllBytesAsync(localPath, original);
+
+        await Assert.ThrowsAsync<TailcatException>(() =>
+            connection.DownloadAsync("partial-then-error", localPath));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(localPath));
+        Assert.Empty(Directory.GetFiles(_dir, "important-existing.bin.meowshell-download-*"));
+    }
+
+    /// <summary>
     /// Regression test: nothing ever removed a finished shell/exec channel's
     /// entry from _channels. HandleControlAsync dispatched "exit_status" to
     /// the channel's sink and stopped there; MeowshellAgentShellChannel's own
