@@ -74,11 +74,7 @@ internal sealed class TailcatListener : IAsyncDisposable
             try { listener.Log?.Invoke(e.Data); } catch { }
             try { onLog?.Invoke(e.Data); } catch { }
         };
-        MeowshellProcessControl.Start(process);
-        if (OperatingSystem.IsWindows())
-        {
-            listener._job = JobObject.Wrap(process);
-        }
+        listener._job = MeowshellProcessControl.Start(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         return listener;
