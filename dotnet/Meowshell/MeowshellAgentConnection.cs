@@ -810,17 +810,32 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
 
     private async Task RunAsync()
     {
-        await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        try
         {
-            if (item.IsData)
+            await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
-                catch { }
+                if (item.IsData)
+                {
+                    try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
+                    catch { }
+                }
+                else
+                {
+                    await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
+                }
             }
-            else
-            {
-                await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
-            }
+        }
+        catch (Exception ex)
+        {
+            // _pumpTask (this method) is fire-and-forget -- nothing ever
+            // awaits or observes it -- so an exception escaping here (from
+            // OnControlAsync; OnDataAsync failures are already swallowed
+            // above) would otherwise vanish silently, leaving whatever this
+            // channel's sink represents (an upload, a download, a shell)
+            // hung forever waiting for a completion signal that will now
+            // never arrive. Route it through OnFault so the operation
+            // actually fails instead.
+            try { _inner.OnFault(ex); } catch { }
         }
     }
 

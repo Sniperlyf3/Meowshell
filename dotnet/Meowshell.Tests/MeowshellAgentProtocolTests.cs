@@ -91,3 +91,38 @@ public sealed class MeowshellAgentProtocolTests
             () => MeowshellAgentProtocol.ReadFrameAsync(truncatedStream, CancellationToken.None));
     }
 }
+
+file sealed class ThrowingControlSink : IAgentChannelSink
+{
+    public Exception? Faulted;
+    public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data) => Task.CompletedTask;
+    public Task OnControlAsync(AgentMessage msg) => throw new InvalidOperationException("boom from OnControlAsync");
+    public void OnFault(Exception ex) => Faulted = ex;
+}
+
+public sealed class AgentChannelDataPumpTests
+{
+    // Regression test: AgentChannelDataPump's background pump task is
+    // fire-and-forget (Task.Run, never awaited or observed). Its read loop
+    // already swallowed exceptions from OnDataAsync on purpose, but an
+    // exception from OnControlAsync had nothing catching it at all -- it
+    // just unobserved-faulted the pump task and silently killed the loop,
+    // leaving whatever this channel's sink represents (an upload, a
+    // download, a shell) hung forever waiting for a completion signal that
+    // would now never arrive.
+    [Fact]
+    public async Task ControlHandlerExceptionReachesOnFaultInsteadOfVanishing()
+    {
+        var inner = new ThrowingControlSink();
+        var pump = new AgentChannelDataPump(inner);
+
+        await pump.OnControlAsync(new AgentMessage { Msg = "exit_status" });
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (inner.Faulted is null && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+
+        Assert.NotNull(inner.Faulted);
+        Assert.IsType<InvalidOperationException>(inner.Faulted);
+    }
+}
