@@ -62,7 +62,7 @@ func runTailcat(bin string, argv, environ []string) error {
 	}
 	defer job.Close()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
