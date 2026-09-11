@@ -3,7 +3,7 @@ module github.com/Sniperlyf3/meowshell
 go 1.27.1
 
 require (
-	github.com/pkg/sftp v1.13.6
+	github.com/pkg/sftp v1.13.11
 	github.com/tailscale/tailcat v0.6.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
