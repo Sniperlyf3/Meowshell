@@ -218,7 +218,8 @@ type agentChannel struct {
 	// closing the file cleanly afterward says nothing about the data
 	// actually having landed, and further data frames must stop touching
 	// the file at all.
-	uploadErr error
+	uploadErrMu sync.Mutex
+	uploadErr   error
 
 	listener net.Listener
 }
@@ -648,10 +649,24 @@ func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
 	return errConnectionLost
 }
 
+func (ch *agentChannel) setUploadErr(err error) {
+	ch.uploadErrMu.Lock()
+	defer ch.uploadErrMu.Unlock()
+	if ch.uploadErr == nil {
+		ch.uploadErr = err
+	}
+}
+
+func (ch *agentChannel) getUploadErr() error {
+	ch.uploadErrMu.Lock()
+	defer ch.uploadErrMu.Unlock()
+	return ch.uploadErr
+}
+
 func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err error) {
 	ch.writeFailOnce.Do(func() {
 		if ch.sftpFile != nil && ch.isUpload {
-			ch.uploadErr = err
+			ch.setUploadErr(err)
 		}
 		// Closing the underlying operation is what releases a worker already
 		// blocked inside Write. removeChannel is intentionally idempotent here:
