@@ -500,10 +500,16 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 
 func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 	a.promptsMu.Lock()
+	defer a.promptsMu.Unlock()
 	ch := a.prompts[msg.RequestID]
-	a.promptsMu.Unlock()
 	if ch != nil {
-		ch <- msg
+		// Ignore a duplicate response instead of blocking the only frame reader.
+		// Holding promptsMu also prevents closeAllPrompts from closing ch between
+		// the lookup and send.
+		select {
+		case ch <- msg:
+		default:
+		}
 	}
 }
 

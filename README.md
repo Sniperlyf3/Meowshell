@@ -78,6 +78,13 @@ writes binaries to `dist/`. Android needs the NDK (`ANDROID_NDK_HOME`, r19+)
 for cgo-based DNS resolution; Linux and Windows are pure Go. See
 `./verify-binaries.sh` and `e2e/` for how CI checks the result.
 
+## Security
+
+See [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the current threat model,
+findings, accepted risks, and verification status. The accompanying
+[`REVIEW_MAP.md`](REVIEW_MAP.md) groups every first-party file by runtime
+boundary and records the order and focus of the repository review.
+
 ## License
 
 [MIT](LICENSE) for this repo's own code. The vendored/patched

@@ -35,12 +35,8 @@ internal sealed class TailcatListener : IAsyncDisposable
     {
         process.EnableRaisingEvents = true;
         var listener = new TailcatListener(process, gracePeriod);
-        MeowshellProcessControl.Start(process);
-        if (OperatingSystem.IsWindows())
-        {
-            listener._job = JobObject.Wrap(process);
-        }
-
+        // Subscribe before Start: a malformed command can exit quickly enough
+        // that registering afterwards misses Exited and leaves Completed hung.
         process.Exited += async (_, _) =>
         {
             await process.WaitForExitAsync().ConfigureAwait(false);
@@ -56,6 +52,11 @@ internal sealed class TailcatListener : IAsyncDisposable
             listener.Log?.Invoke(e.Data);
             onLog?.Invoke(e.Data);
         };
+        MeowshellProcessControl.Start(process);
+        if (OperatingSystem.IsWindows())
+        {
+            listener._job = JobObject.Wrap(process);
+        }
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         return listener;

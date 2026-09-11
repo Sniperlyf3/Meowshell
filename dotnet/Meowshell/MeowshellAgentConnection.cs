@@ -135,25 +135,32 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         MeowshellProcessControl.Start(process);
         var connection = new MeowshellAgentConnection(process);
-
-        process.ErrorDataReceived += (_, e) =>
+        try
         {
-            if (e.Data is null) return;
-            connection._diagnostics.Add(e.Data);
-            connection.Log?.Invoke(e.Data);
-        };
-        process.BeginErrorReadLine();
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                connection._diagnostics.Add(e.Data);
+                connection.Log?.Invoke(e.Data);
+            };
+            process.BeginErrorReadLine();
 
-        await connection.SendConfigureAsync(configure ?? new MeowshellAgentConfigureOptions(), proxyUrl, cancellationToken).ConfigureAwait(false);
+            await connection.SendConfigureAsync(configure ?? new MeowshellAgentConfigureOptions(), proxyUrl, cancellationToken).ConfigureAwait(false);
 
-        var settled = await Task.WhenAny(connection._connected.Task, Task.Delay(options.Timeout, cancellationToken)).ConfigureAwait(false);
-        if (settled != connection._connected.Task)
+            var settled = await Task.WhenAny(connection._connected.Task, Task.Delay(options.Timeout, cancellationToken)).ConfigureAwait(false);
+            if (settled != connection._connected.Task)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TailcatException("meowshell agent did not connect in time", 0, connection._diagnostics.Tail(), MeowshellErrorCode.Timeout);
+            }
+            await connection._connected.Task.ConfigureAwait(false);
+            return connection;
+        }
+        catch
         {
             await connection.DisposeAsync().ConfigureAwait(false);
-            throw new TailcatException("meowshell agent did not connect in time", 0, connection._diagnostics.Tail(), MeowshellErrorCode.Timeout);
+            throw;
         }
-        await connection._connected.Task.ConfigureAwait(false);
-        return connection;
     }
 
     private Task SendConfigureAsync(MeowshellAgentConfigureOptions configure, string? proxyUrl, CancellationToken cancellationToken) =>

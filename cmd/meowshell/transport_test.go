@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -124,6 +127,54 @@ func TestDialHTTPConnectProxyRejectsNon200(t *testing.T) {
 	defer cancel()
 	if _, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22"); err == nil {
 		t.Fatal("dialHTTPConnectProxy against a 407 response did not error")
+	}
+}
+
+func TestDialHTTPConnectProxyHonorsCancellationAfterDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		close(accepted)
+		io.Copy(io.Discard, conn)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proxyURL := mustParseURL(t, "http://"+ln.Addr().String())
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22")
+		done <- err
+	}()
+	<-accepted
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("dialHTTPConnectProxy cancellation = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt the proxy response read")
+	}
+}
+
+func TestProxyDialerDoesNotExposeMalformedURLPassword(t *testing.T) {
+	const secret = "super-secret-password"
+	_, err := proxyDialer("http://user:"+secret+"%zz@example.com", "backend.example:22")
+	if err == nil {
+		t.Fatal("proxyDialer accepted a malformed URL")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("proxy parse error exposed the password: %v", err)
 	}
 }
 

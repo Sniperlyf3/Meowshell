@@ -9,6 +9,12 @@
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
     <MeowshellVersion>$(MajorMinor).$(BuildNumber)</MeowshellVersion>
     <Version>$(MeowshellVersion)</Version>
+    <!-- Audit direct and transitive packages on every restore. Treat every
+         advisory severity as a build failure rather than an easy-to-miss log. -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>low</NuGetAuditLevel>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
   </PropertyGroup>
 
 </Project>

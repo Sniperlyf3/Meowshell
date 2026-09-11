@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       tailcat_ref:
-        description: tailcat git ref to build
-        default: main
+        description: tailcat git ref override (blank uses tailcat.ref)
+        default: ""
       android_api_level:
         description: minimum Android API level
         default: "21"
@@ -41,8 +41,9 @@ jobs:
       # checkout for the real cross-compiled build.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
-          SRC_REF: ${{ inputs.tailcat_ref || '91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
@@ -55,6 +56,12 @@ jobs:
         run: |
           go vet ./...
           go test ./...
+
+      - name: Scan Go call paths for known vulnerabilities
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
       - name: Locate the NDK
         run: |
@@ -72,9 +79,14 @@ jobs:
           # tailcat's go.mod asks for a newer Go than setup-go's stable may
           # be; let the toolchain fetch it rather than pinning a version here.
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || '91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
           ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
         run: ./build.sh
+
+      - name: Scan the patched tailcat build input for known vulnerabilities
+        env:
+          GOTOOLCHAIN: auto
+        run: (cd .tailcat-src && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/tailcat)
 
       - name: Verify each binary targets the platform it claims
         run: ./verify-binaries.sh
@@ -119,8 +131,9 @@ jobs:
       - name: Build a host tailcat to act as the client
         env:
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || '91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
@@ -233,6 +246,11 @@ jobs:
         # projects that need nothing from it -- which is every project
         # until the Pack step below has run once.
         run: mkdir -p nupkg
+
+      - name: Audit NuGet dependencies
+        run: |
+          dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
+          dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
 
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
@@ -376,8 +394,9 @@ jobs:
         # address -- by having a real client dial in and run commands.
         env:
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || '91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
