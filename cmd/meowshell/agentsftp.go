@@ -124,14 +124,17 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("creating %s: %w", msg.Path, err))
 			return
 		}
-		id := a.nextID.Add(1)
 		ch := &agentChannel{
 			sftpFile: f, ctx: ctx, cancel: cancel, isUpload: true,
 			uploadPath: msg.Path, uploadPreserve: msg.Preserve, uploadMode: msg.Mode, uploadModTime: msg.ModTime,
 		}
-		a.chansMu.Lock()
-		a.chans[id] = ch
-		a.chansMu.Unlock()
+		id, err := a.registerChannel(ch)
+		if err != nil {
+			cancel()
+			f.Close()
+			a.writeOpenError(msg.RequestID, errUnknown, err)
+			return
+		}
 		a.startChannelWriter(id, ch)
 		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID})
 
@@ -148,11 +151,14 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("opening %s: %w", msg.Path, err))
 			return
 		}
-		id := a.nextID.Add(1)
 		ch := &agentChannel{sftpFile: f, ctx: ctx, cancel: cancel}
-		a.chansMu.Lock()
-		a.chans[id] = ch
-		a.chansMu.Unlock()
+		id, err := a.registerChannel(ch)
+		if err != nil {
+			cancel()
+			f.Close()
+			a.writeOpenError(msg.RequestID, errUnknown, err)
+			return
+		}
 		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, Size: fi.Size()})
 		go a.pumpSFTPDownload(id, f, ctx)
 
