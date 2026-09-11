@@ -217,8 +217,8 @@ func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 	// itself happened not to error would contradict the "error" already
 	// sent for that write, and would tell the caller data that never made
 	// it to the file landed successfully.
-	if ch.uploadErr != nil {
-		a.writeError(channelID, classifySFTPError(ch.uploadErr), ch.uploadErr)
+	if uploadErr := ch.getUploadErr(); uploadErr != nil {
+		a.writeError(channelID, classifySFTPError(uploadErr), uploadErr)
 		return
 	}
 	if closeErr != nil {
