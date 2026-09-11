@@ -111,7 +111,7 @@ func fileInfoToEntry(fi os.FileInfo) sftpEntry {
 func (a *agentSession) openSFTPChannel(msg controlMessage) {
 	sf, err := a.sftpClientFor()
 	if err != nil {
-		a.writeError(0, errUnknown, fmt.Errorf("opening SFTP: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening SFTP: %w", err))
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,7 +121,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 		f, err := sf.Create(msg.Path)
 		if err != nil {
 			cancel()
-			a.writeError(0, classifySFTPError(err), fmt.Errorf("creating %s: %w", msg.Path, err))
+			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("creating %s: %w", msg.Path, err))
 			return
 		}
 		id := a.nextID.Add(1)
@@ -132,19 +132,19 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 		a.chansMu.Lock()
 		a.chans[id] = ch
 		a.chansMu.Unlock()
-		a.writeControl(id, controlMessage{Msg: "channel_opened"})
+		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID})
 
 	case "sftp_download":
 		fi, err := sf.Stat(msg.Path)
 		if err != nil {
 			cancel()
-			a.writeError(0, classifySFTPError(err), fmt.Errorf("stat %s: %w", msg.Path, err))
+			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("stat %s: %w", msg.Path, err))
 			return
 		}
 		f, err := sf.Open(msg.Path)
 		if err != nil {
 			cancel()
-			a.writeError(0, classifySFTPError(err), fmt.Errorf("opening %s: %w", msg.Path, err))
+			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("opening %s: %w", msg.Path, err))
 			return
 		}
 		id := a.nextID.Add(1)
@@ -152,12 +152,12 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 		a.chansMu.Lock()
 		a.chans[id] = ch
 		a.chansMu.Unlock()
-		a.writeControl(id, controlMessage{Msg: "channel_opened", Size: fi.Size()})
+		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, Size: fi.Size()})
 		go a.pumpSFTPDownload(id, f, ctx)
 
 	default:
 		cancel()
-		a.writeError(0, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
+		a.writeOpenError(msg.RequestID, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
 	}
 }
 
@@ -204,20 +204,35 @@ func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 	if ch.cancel != nil {
 		defer ch.cancel()
 	}
-	if err := ch.sftpFile.Close(); err != nil {
-		a.writeError(channelID, classifySFTPError(err), err)
+	closeErr := ch.sftpFile.Close()
+	// A write earlier in the transfer is the terminal failure regardless of
+	// how Close() goes: reporting exit_status 0 here just because Close()
+	// itself happened not to error would contradict the "error" already
+	// sent for that write, and would tell the caller data that never made
+	// it to the file landed successfully.
+	if ch.uploadErr != nil {
+		a.writeError(channelID, classifySFTPError(ch.uploadErr), ch.uploadErr)
+		return
+	}
+	if closeErr != nil {
+		a.writeError(channelID, classifySFTPError(closeErr), closeErr)
 		return
 	}
 	if ch.uploadPreserve {
-		if sf, err := a.sftpClientFor(); err == nil {
-			if err := sf.Chmod(ch.uploadPath, os.FileMode(ch.uploadMode)); err != nil {
-				a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode: %w", err))
-			}
-			if ch.uploadModTime != 0 {
-				mt := time.Unix(ch.uploadModTime, 0)
-				if err := sf.Chtimes(ch.uploadPath, mt, mt); err != nil {
-					a.writeError(channelID, errUnknown, fmt.Errorf("preserving mtime: %w", err))
-				}
+		sf, err := a.sftpClientFor()
+		if err != nil {
+			a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode/mtime: %w", err))
+			return
+		}
+		if err := sf.Chmod(ch.uploadPath, os.FileMode(ch.uploadMode)); err != nil {
+			a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode: %w", err))
+			return
+		}
+		if ch.uploadModTime != 0 {
+			mt := time.Unix(ch.uploadModTime, 0)
+			if err := sf.Chtimes(ch.uploadPath, mt, mt); err != nil {
+				a.writeError(channelID, errUnknown, fmt.Errorf("preserving mtime: %w", err))
+				return
 			}
 		}
 	}

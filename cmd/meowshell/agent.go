@@ -97,14 +97,22 @@ func agentCmd(args []string) error {
 		session.writeError(0, errProtocolError, err)
 		return err
 	}
+
+	// serveFrames must be running before buildAuthMethods: an encrypted
+	// supplied private key makes buildAuthMethods call session.prompt for
+	// its passphrase, which blocks on a prompt_response that only
+	// serveFrames (reading stdin) can ever deliver. Building auth methods
+	// first, as this used to, deadlocks every encrypted-key connection --
+	// the .NET side sends prompt_response, but nothing here is reading
+	// stdin yet to receive it.
+	frameErrCh := make(chan error, 1)
+	go func() { frameErrCh <- session.serveFrames() }()
+
 	auth, err := session.buildAuthMethods(cfg)
 	if err != nil {
 		session.writeError(0, errAuthFailed, err)
 		return err
 	}
-
-	frameErrCh := make(chan error, 1)
-	go func() { frameErrCh <- session.serveFrames() }()
 
 	err = session.connect(context.Background(), connectOptions{
 		destination:    dest,
@@ -183,6 +191,12 @@ type agentChannel struct {
 	uploadPreserve bool
 	uploadMode     uint32
 	uploadModTime  int64
+	// uploadErr, once set, is terminal: a write to sftpFile failed, so
+	// finalizeUpload must report that failure instead of exit_status 0 --
+	// closing the file cleanly afterward says nothing about the data
+	// actually having landed, and further data frames must stop touching
+	// the file at all.
+	uploadErr error
 
 	listener net.Listener
 }
@@ -448,6 +462,16 @@ func (a *agentSession) writeError(channelID uint32, code errorCode, err error) e
 	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error()})
 }
 
+// writeOpenError reports a failure to open a channel, before any channel ID
+// exists to key it by -- correlated instead by the open_channel request's
+// own RequestID, echoed back the same way channel_opened is (see
+// openChannel and its handlers). The caller may already have stopped
+// waiting on requestID by the time this arrives, in which case it's simply
+// dropped: an open failure has nothing left to leak.
+func (a *agentSession) writeOpenError(requestID string, code errorCode, err error) error {
+	return a.writeControl(0, controlMessage{Msg: "error", RequestID: requestID, Code: code, Message: err.Error()})
+}
+
 func (a *agentSession) serveFrames() error {
 	defer a.closeAllChannels()
 	defer a.closeAllPrompts()
@@ -521,8 +545,14 @@ func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	switch {
 	case ch.stdin != nil:
 		ch.stdin.Write(payload)
-	case ch.sftpFile != nil:
+	case ch.sftpFile != nil && ch.isUpload:
+		if ch.uploadErr != nil {
+			// Already failed: don't keep writing to (or erroring about) a
+			// file finalizeUpload is going to report as failed regardless.
+			return
+		}
 		if _, err := ch.sftpFile.Write(payload); err != nil {
+			ch.uploadErr = err
 			a.writeError(channelID, classifySFTPError(err), err)
 		}
 	}
@@ -549,7 +579,7 @@ func (a *agentSession) openChannel(msg controlMessage) {
 func (a *agentSession) openShellChannel(msg controlMessage) {
 	session, err := a.client().NewSession()
 	if err != nil {
-		a.writeError(0, errUnknown, fmt.Errorf("opening session: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening session: %w", err))
 		return
 	}
 
@@ -571,7 +601,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		}
 		if err := session.RequestPty(term, rows, cols, ssh.TerminalModes{}); err != nil {
 			session.Close()
-			a.writeError(0, errUnknown, fmt.Errorf("requesting a pseudo-terminal: %w", err))
+			a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("requesting a pseudo-terminal: %w", err))
 			return
 		}
 	}
@@ -579,19 +609,19 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stdin: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stdin: %w", err))
 		return
 	}
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stdout: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stdout: %w", err))
 		return
 	}
 	stderr, err := session.StderrPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stderr: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stderr: %w", err))
 		return
 	}
 
@@ -601,7 +631,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	a.chans[id] = ch
 	a.chansMu.Unlock()
 
-	if err := a.writeControl(id, controlMessage{Msg: "channel_opened"}); err != nil {
+	if err := a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID}); err != nil {
 		a.removeChannel(id)
 		session.Close()
 		return

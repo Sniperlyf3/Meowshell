@@ -159,3 +159,81 @@ func TestAgentSuppliedPrivateKeyAuth(t *testing.T) {
 		}
 	})
 }
+
+func newEncryptedTestKeyPair(t *testing.T, passphrase string) (encryptedPEM []byte, public ssh.PublicKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "", []byte(passphrase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(block), sshPub
+}
+
+// TestAgentEncryptedSuppliedPrivateKeyAuth is a regression test for a startup
+// deadlock: buildAuthMethods (called for an encrypted supplied key) prompts
+// for a passphrase and blocks waiting for the response, but that response
+// can only ever arrive via serveFrames reading stdin. If serveFrames isn't
+// already running by the time buildAuthMethods can block like that -- it
+// used to only start afterward -- no encrypted-key connection can ever
+// complete. mustReadFrame's 30s deadline (see readFrameWithDeadline) turns a
+// regression here into a clean failure instead of a hung test.
+func TestAgentEncryptedSuppliedPrivateKeyAuth(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	const passphrase = "correct-passphrase"
+	encryptedPEM, publicKey := newEncryptedTestKeyPair(t, passphrase)
+
+	addr, _ := startAuthTestSSHServer(t, func(cfg *ssh.ServerConfig) {
+		cfg.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if bytes.Equal(key.Marshal(), publicKey.Marshal()) {
+				return nil, nil
+			}
+			return nil, errors.New("unknown public key")
+		}
+	})
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	t.Run("the right passphrase decrypts the key and the connection completes", func(t *testing.T) {
+		cmd, stdin, out := startAgentConfigured(t, meowshellBin, knownHosts, "testuser@"+addr,
+			controlMessage{Msg: "configure", Keys: [][]byte{encryptedPEM}})
+		defer stopAgent(t, cmd, stdin)
+
+		f := mustReadFrame(t, out)
+		msg := decodeControl(t, f)
+		if msg.Msg != "prompt_request" || msg.PromptKind != "passphrase" {
+			t.Fatalf("first message = %+v, want a passphrase prompt_request", msg)
+		}
+		send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Answer: passphrase})
+
+		acceptHostKeyPrompt(t, stdin, out)
+		expectConnected(t, out)
+	})
+
+	t.Run("a wrong passphrase is refused, not hung", func(t *testing.T) {
+		cmd, stdin, out := startAgentConfigured(t, meowshellBin, knownHosts, "testuser@"+addr,
+			controlMessage{Msg: "configure", Keys: [][]byte{encryptedPEM}})
+		defer stopAgent(t, cmd, stdin)
+
+		for attempt := 0; attempt < 3; attempt++ {
+			f := mustReadFrame(t, out)
+			msg := decodeControl(t, f)
+			if msg.Msg != "prompt_request" || msg.PromptKind != "passphrase" {
+				t.Fatalf("message = %+v, want a passphrase prompt_request", msg)
+			}
+			send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Answer: "wrong-passphrase"})
+		}
+
+		f := mustReadFrame(t, out)
+		msg := decodeControl(t, f)
+		if msg.Msg != "error" || msg.Code != errAuthFailed {
+			t.Fatalf("message = %+v, want an error with code %q", msg, errAuthFailed)
+		}
+	})
+}
