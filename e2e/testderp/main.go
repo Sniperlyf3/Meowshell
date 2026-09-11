@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -31,13 +32,15 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	statusFile := flag.String("status-file", "", "also write the TAILCAT_DERPMAP_URL= line to this file once ready")
+	flag.Parse()
+	if err := run(*statusFile); err != nil {
 		fmt.Fprintf(os.Stderr, "testderp: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(statusFile string) error {
 	d := derpserver.New(key.NewNode(), log.Printf)
 	defer d.Close()
 
@@ -90,7 +93,13 @@ func run() error {
 	defer mapSrv.Close()
 
 	mapURL := fmt.Sprintf("http://%s/derpmap.json", mapLn.Addr())
-	fmt.Printf("TAILCAT_DERPMAP_URL=%s\n", mapURL)
+	statusLine := fmt.Sprintf("TAILCAT_DERPMAP_URL=%s\n", mapURL)
+	fmt.Print(statusLine)
+	if statusFile != "" {
+		if err := os.WriteFile(statusFile, []byte(statusLine), 0o644); err != nil {
+			return fmt.Errorf("writing status file: %w", err)
+		}
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
