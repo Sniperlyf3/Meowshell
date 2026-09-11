@@ -1,4 +1,5 @@
 #nullable enable
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -59,14 +60,34 @@ internal sealed class JobObject : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AssignProcessToJobObject(SafeHandle hJob, SafeHandle hProcess);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(SafeHandle processHandle, SafeHandle jobHandle, out bool result);
+
     private readonly SafeFileHandle _handle;
 
-    private JobObject(SafeFileHandle handle) => _handle = handle;
+    public string? Name { get; }
 
-    public static JobObject? Wrap(Process process)
+    private JobObject(SafeFileHandle handle, string? name)
     {
-        var handle = CreateJobObjectW(0, null);
-        if (handle.IsInvalid) return null;
+        _handle = handle;
+        Name = name;
+    }
+
+    public static JobObject CreateForChild()
+    {
+        // Named before Process.Start so the child can join itself at the first
+        // line of main, eliminating the Start()->AssignProcessToJobObject race
+        // where it could otherwise spawn a grandchild before the parent got to
+        // attach it.
+        var name = $@"Local\Meowshell-{Guid.NewGuid():N}";
+        return Create(name);
+    }
+
+    private static JobObject Create(string? name)
+    {
+        var handle = CreateJobObjectW(0, name);
+        if (handle.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "creating Windows Job Object");
 
         var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
         {
@@ -76,13 +97,50 @@ internal sealed class JobObject : IDisposable
             },
         };
         var infoSize = (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-        if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, ref info, infoSize)
-            || !AssignProcessToJobObject(handle, process.SafeHandle))
+        if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, ref info, infoSize))
         {
+            var error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            return null;
+            throw new Win32Exception(error, "configuring Windows Job Object");
         }
-        return new JobObject(handle);
+        return new JobObject(handle, name);
+    }
+
+    public void EnsureAssigned(Process process)
+    {
+        if (IsAssigned(process)) return;
+
+        if (!AssignProcessToJobObject(_handle, process.SafeHandle))
+        {
+            var error = Marshal.GetLastWin32Error();
+            // The child may have raced us only in the safe direction and
+            // already joined this exact named job from main(). Re-check before
+            // treating the native failure as fatal.
+            if (IsAssigned(process)) return;
+            throw new Win32Exception(error, "assigning child process to Windows Job Object");
+        }
+    }
+
+    internal bool IsAssigned(Process process)
+    {
+        if (!IsProcessInJob(process.SafeHandle, _handle, out var result))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "querying Windows Job Object membership");
+        return result;
+    }
+
+    public static JobObject Wrap(Process process)
+    {
+        var job = Create(name: null);
+        try
+        {
+            job.EnsureAssigned(process);
+            return job;
+        }
+        catch
+        {
+            job.Dispose();
+            throw;
+        }
     }
 
     public void Dispose() => _handle.Dispose();
