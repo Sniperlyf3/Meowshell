@@ -152,6 +152,10 @@ func classifyConnectError(err error) errorCode {
 	if errors.As(err, &hkChanged) {
 		return errHostKeyChanged
 	}
+	var keystoreSign *keystoreSignError
+	if errors.As(err, &keystoreSign) {
+		return errAuthFailed
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return errTimeout
