@@ -192,16 +192,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: tailcat-binaries
           path: dist
+
+      - name: Start a local DERP relay for the E2E tests
+        run: ./e2e/start-testderp.sh
 
       - name: End-to-end test on this host
         env:
           TAILCAT: dist/tailcat_linux_${{ matrix.arch }}
           MEOWSHELL: dist/meowshell_linux_${{ matrix.arch }}
         run: ./e2e/host-e2e.sh
+
+      - name: Stop the local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
   # The only place the Windows binaries are executed. meowshell is a
   # launcher there, so this covers the launcher, the session, and the key
@@ -213,14 +224,31 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: tailcat-binaries
           path: dist
 
+      - name: Start a local DERP relay for the E2E tests
+        shell: pwsh
+        run: ./e2e/start-testderp.ps1
+
       - name: End-to-end test on Windows
         shell: pwsh
         run: ./e2e/windows-e2e.ps1
+
+      - name: Stop the local DERP relay
+        if: always()
+        shell: pwsh
+        run: |
+          $pidFile = "$env:RUNNER_TEMP\testderp.pid"
+          if (Test-Path $pidFile) {
+            Stop-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
+          }
 
   # The .NET integration is independent of the Android binaries, so it builds
   # in parallel rather than waiting on them.
@@ -234,6 +262,10 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "8.0.x"
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -255,11 +287,17 @@ jobs:
           dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
           dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
 
+      - name: Start a local DERP relay for the E2E tests
+        run: ./e2e/start-testderp.sh
+
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
         # no-op locally when the variables are unset (see
-        # MeowshellServerE2ETests.RealBinaries).
+        # MeowshellServerE2ETests.RealBinaries). TAILCAT_DERPMAP_URL (set by
+        # the relay step above) reaches the real tailcat processes these
+        # tests spawn via plain environment inheritance -- MeowshellServer
+        # and MeowshellAgentConnection never touch it themselves.
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
@@ -275,6 +313,10 @@ jobs:
           name: dotnet-test-results
           path: test-results/
           if-no-files-found: warn
+
+      - name: Stop the local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.
