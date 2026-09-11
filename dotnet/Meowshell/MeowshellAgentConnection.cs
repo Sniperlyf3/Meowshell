@@ -63,6 +63,7 @@ public sealed record MeowshellSftpEntry(string Name, long Size, uint Mode, DateT
 public sealed class MeowshellAgentConnection : IAsyncDisposable
 {
     private readonly Process _process;
+    private readonly JobObject? _job;
     private readonly Stream _stdin;
     private readonly Stream _stdout;
     private readonly TailcatDiagnostics _diagnostics = new();
@@ -99,9 +100,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <summary>A Keystore-backed key needs to sign something, under the algorithm in <see cref="MeowshellSignRequest.Algorithm"/>. No handler refuses the signature.</summary>
     public event Func<MeowshellSignRequest, CancellationToken, Task<byte[]>>? SignRequested;
 
-    private MeowshellAgentConnection(Process process)
+    private MeowshellAgentConnection(Process process, JobObject? job)
     {
         _process = process;
+        _job = job;
         _stdin = process.StandardInput.BaseStream;
         _stdout = process.StandardOutput.BaseStream;
         _readLoop = Task.Run(RunReadLoopAsync);
@@ -145,8 +147,8 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         psi.Environment["HOME"] = options.HomeDirectory;
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        MeowshellProcessControl.Start(process);
-        var connection = new MeowshellAgentConnection(process);
+        var job = MeowshellProcessControl.Start(process);
+        var connection = new MeowshellAgentConnection(process, job);
         try
         {
             process.ErrorDataReceived += (_, e) =>
@@ -802,6 +804,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _process.Dispose();
+        if (OperatingSystem.IsWindows()) _job?.Dispose();
         _writeLock.Dispose();
         _lifetimeCts.Dispose();
     }
