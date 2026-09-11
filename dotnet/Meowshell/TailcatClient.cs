@@ -130,7 +130,7 @@ public static class TailcatClient
     private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
     {
         using var process = new Process { StartInfo = psi };
-        MeowshellProcessControl.Start(process);
+        using var job = MeowshellProcessControl.Start(process);
         using var cts = new CancellationTokenSource(timeout);
         var limitFlag = new OutputLimitFlag();
         var stdoutTask = ReadBoundedAsync(process.StandardOutput, limitFlag, cts, cts.Token);
