@@ -511,6 +511,20 @@ public sealed class TailcatClientTests : IDisposable
         await Assert.ThrowsAsync<TimeoutException>(() => TailcatClient.ResolveAsync(timed, "tcADDR"));
     }
 
+    // Regression test: RunAsync used to buffer stdout/stderr with an
+    // unbounded ReadToEndAsync, so a misbehaving tailcat binary (or a
+    // destination able to influence output, e.g. what a hostile server
+    // returns to "ls") could grow memory without any cap. 20MB comfortably
+    // exceeds the 16MiB limit while staying fast to generate and pipe.
+    [Fact]
+    public async Task ThrowsAndKillsTheProcessWhenOutputExceedsTheSizeLimit()
+    {
+        var (options, _) = Fake("yes 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | head -c 20000000\n");
+        var timed = options with { Timeout = TimeSpan.FromSeconds(30) };
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.ResolveAsync(timed, "tcADDR"));
+        Assert.Contains("bytes of output", ex.Message);
+    }
+
     [Fact]
     public async Task DerpMapUrlAndVerboseArePassedBeforeTheSubcommand()
     {

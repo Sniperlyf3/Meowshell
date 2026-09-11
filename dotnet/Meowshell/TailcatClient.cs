@@ -84,13 +84,57 @@ public static class TailcatClient
         return RunAsync(psi, options.Timeout, $"tailcat {verb}");
     }
 
+    // Bounds how much of a one-shot command's stdout/stderr this buffers in
+    // memory. ReadToEndAsync has no such cap on its own, so a misbehaving
+    // tailcat binary, or a destination that gets to influence output (e.g.
+    // what a hostile server returns to "ls"), could otherwise grow memory
+    // without bound. Well above any realistic legitimate output (address
+    // lists, JSON metadata, directory listings) while still bounding worst
+    // case.
+    private const int MaxOutputBytes = 16 * 1024 * 1024;
+
+    private sealed class OutputLimitFlag
+    {
+        public volatile bool Exceeded;
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, OutputLimitFlag limitFlag, CancellationTokenSource haltSource, CancellationToken cancellationToken)
+    {
+        var buffer = new char[8192];
+        var sb = new System.Text.StringBuilder();
+        long total = 0;
+        while (true)
+        {
+            int n;
+            try
+            {
+                n = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return sb.ToString();
+            }
+            if (n == 0) break;
+            total += n;
+            if (total > MaxOutputBytes)
+            {
+                limitFlag.Exceeded = true;
+                haltSource.Cancel();
+                return sb.ToString();
+            }
+            sb.Append(buffer, 0, n);
+        }
+        return sb.ToString();
+    }
+
     private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
     {
         using var process = new Process { StartInfo = psi };
         MeowshellProcessControl.Start(process);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
         using var cts = new CancellationTokenSource(timeout);
+        var limitFlag = new OutputLimitFlag();
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput, limitFlag, cts, cts.Token);
+        var stderrTask = ReadBoundedAsync(process.StandardError, limitFlag, cts, cts.Token);
         try
         {
             await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
@@ -112,6 +156,8 @@ public static class TailcatClient
                 }
             }
             catch { }
+            if (limitFlag.Exceeded)
+                throw new TailcatException($"{commandForTimeoutMessage} produced more than {MaxOutputBytes:N0} bytes of output", exitCode: -1, "");
             throw new TimeoutException($"{commandForTimeoutMessage} did not finish within {timeout}");
         }
         return new TailcatResult(
