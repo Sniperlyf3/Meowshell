@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -99,6 +100,7 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 	const id = uint32(1)
 	ch := &agentChannel{sftpFile: f, isUpload: true, uploadPath: "up.bin"}
 	session.chans[id] = ch
+	session.startChannelWriter(id, ch)
 
 	// Sever the transport so the next client-initiated SFTP request (the
 	// upcoming Write) fails deterministically, standing in for any real
@@ -109,8 +111,12 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 	out := session.out.(*bytes.Buffer)
 	session.handleData(id, []byte("this data will not make it"))
 
+	deadline := time.Now().Add(time.Second)
+	for ch.uploadErr == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if ch.uploadErr == nil {
-		t.Fatal("handleData did not record the write failure on the channel (ch.uploadErr is nil)")
+		t.Fatal("channel writer did not record the write failure on the channel (ch.uploadErr is nil)")
 	}
 	msgs := readControlFrames(t, out)
 	if len(msgs) != 1 || msgs[0].Msg != "error" {
@@ -144,7 +150,7 @@ func TestFinalizeUploadReportsRecordedWriteFailureNotSuccess(t *testing.T) {
 	session.chans[id] = ch
 
 	out := session.out.(*bytes.Buffer)
-	session.closeChannel(id)
+	session.finalizeUpload(id, ch)
 
 	msgs := readControlFrames(t, out)
 	if len(msgs) != 1 {
@@ -170,13 +176,23 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 	const id = uint32(1)
 	ch := &agentChannel{sftpFile: f, isUpload: true, uploadPath: "up2.bin"}
 	session.chans[id] = ch
+	session.startChannelWriter(id, ch)
 
 	breakTransport()
 
 	out := session.out.(*bytes.Buffer)
 	session.handleData(id, []byte("first chunk, fails"))
+	deadline := time.Now().Add(time.Second)
+	for ch.uploadErr == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ch.uploadErr == nil {
+		t.Fatal("first upload write never failed")
+	}
 	firstErrCount := len(readControlFrames(t, out))
 
+	// failChannelWrite removes the failed channel, so any later frame for the
+	// stale ID is ignored by handleData instead of reaching the broken file.
 	session.handleData(id, []byte("second chunk, must be ignored"))
 	secondErrCount := len(readControlFrames(t, out))
 
