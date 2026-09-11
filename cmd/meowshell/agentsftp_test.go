@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,4 +201,116 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 		t.Fatalf("a data frame after the channel's terminal write error produced %d more control message(s); want it silently ignored",
 			secondErrCount-firstErrCount)
 	}
+}
+
+
+func readRemoteFile(t *testing.T, client *sftp.Client, path string) []byte {
+	t.Helper()
+	f, err := client.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func openedChannelID(t *testing.T, out *bytes.Buffer) uint32 {
+	t.Helper()
+	f, err := readFrame(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg controlMessage
+	if err := json.Unmarshal(f.Payload, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Msg != "channel_opened" {
+		t.Fatalf("first control message = %+v, want channel_opened", msg)
+	}
+	return f.ChannelID
+}
+
+// TestSuccessfulUploadAtomicallyReplacesDestination verifies that upload data
+// lands in a sibling staging file and the existing destination is replaced
+// only at finalization via the server's POSIX rename extension.
+func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	old, err := client.Create("atomic.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Write([]byte("old-good-data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := session.out.(*bytes.Buffer)
+	session.openSFTPChannel(controlMessage{Kind: "sftp_upload", Path: "atomic.txt", RequestID: "u1"})
+	id := openedChannelID(t, out)
+	session.handleData(id, []byte("new-complete-data"))
+	session.closeChannel(id, controlMessage{})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if string(readRemoteFile(t, client, "atomic.txt")) == "new-complete-data" {
+			msgs := readControlFrames(t, out)
+			for _, msg := range msgs {
+				if msg.Msg == "exit_status" && msg.ExitCode == 0 {
+					return
+				}
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("upload never committed successfully; destination = %q, messages = %+v", readRemoteFile(t, client, "atomic.txt"), readControlFrames(t, out))
+}
+
+// TestCancelledUploadPreservesExistingDestination is the integrity regression:
+// close_channel with Cancelled set must discard the staging file instead of
+// finalizing a partial upload over a previously valid remote file.
+func TestCancelledUploadPreservesExistingDestination(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	old, err := client.Create("keep.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Write([]byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := session.out.(*bytes.Buffer)
+	session.openSFTPChannel(controlMessage{Kind: "sftp_upload", Path: "keep.txt", RequestID: "u2"})
+	id := openedChannelID(t, out)
+	session.handleData(id, []byte("partial"))
+	session.closeChannel(id, controlMessage{Cancelled: true})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if string(readRemoteFile(t, client, "keep.txt")) == "original" {
+			entries, err := client.ReadDir(".")
+			if err != nil {
+				t.Fatal(err)
+			}
+			leftover := false
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), ".meowshell-upload-") {
+					leftover = true
+				}
+			}
+			if !leftover {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("cancelled upload changed destination or left staging file behind")
 }
