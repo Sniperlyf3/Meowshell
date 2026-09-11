@@ -71,9 +71,14 @@ func agentCmd(args []string) error {
 		return fmt.Errorf("agent needs exactly one destination")
 	}
 	dest := fs.Arg(0)
+	resolvedDest, isTailcat, err := resolveAgentDestination(context.Background(), dest)
+	if err != nil {
+		return err
+	}
+	dest = resolvedDest
 
 	var bin string
-	if looksLikeTailcatAddress(dest) {
+	if isTailcat {
 		b, err := findTailcat(*tailcatBin)
 		if err != nil {
 			return err
