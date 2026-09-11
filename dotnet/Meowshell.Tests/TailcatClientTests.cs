@@ -403,6 +403,17 @@ public sealed class TailcatClientTests : IDisposable
             () => TailcatClient.ListFilesAsync(options, TailcatPath.Local("not-remote")));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("tc")]
+    [InlineData("not-an-address")]
+    [InlineData("tcgarbage!")]
+    [InlineData("tcA")]
+    public void TailcatAddressRejectsMalformedValues(string value)
+    {
+        Assert.Throws<FormatException>(() => new TailcatAddress(value));
+    }
+
     [Fact]
     public void TailcatPathFormatsALocalPathAsIs()
     {
