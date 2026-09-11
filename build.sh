@@ -47,6 +47,7 @@ git -C "$SRC_DIR" clean -fd
 # changed the surrounding code and this needs re-checking, so fail loudly
 # rather than silently shipping the panic.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/pickregion-nil-ifstate.patch"
+git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/key-from-stdin.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,
 # separately from the PickBestRegion path above) needs a working interface
