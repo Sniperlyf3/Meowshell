@@ -1,6 +1,6 @@
 # Meowshell
 
-[![CI](https://github.com/Sniperlyf3/meowshell/actions/workflows/ci.yml/badge.svg)](https://github.com/Sniperlyf3/meowshell/actions/workflows/ci.yml)
+[![CI](https://github.com/Sniperlyf3/Tailcat-Android/actions/workflows/ci.yml/badge.svg)](https://github.com/Sniperlyf3/Tailcat-Android/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/Meowshell.svg)](https://www.nuget.org/packages/Meowshell/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
