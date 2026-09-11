@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -118,15 +119,16 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 
 	switch msg.Kind {
 	case "sftp_upload":
-		f, err := sf.Create(msg.Path)
+		f, tempPath, err := createUploadTemp(sf, msg.Path)
 		if err != nil {
 			cancel()
-			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("creating %s: %w", msg.Path, err))
+			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("creating upload staging file for %s: %w", msg.Path, err))
 			return
 		}
 		ch := &agentChannel{
 			sftpFile: f, ctx: ctx, cancel: cancel, isUpload: true,
-			uploadPath: msg.Path, uploadPreserve: msg.Preserve, uploadMode: msg.Mode, uploadModTime: msg.ModTime,
+			uploadPath: msg.Path, uploadTempPath: tempPath,
+			uploadPreserve: msg.Preserve, uploadMode: msg.Mode, uploadModTime: msg.ModTime,
 		}
 		id, err := a.registerChannel(ch)
 		if err != nil {
@@ -166,6 +168,45 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 		cancel()
 		a.writeOpenError(msg.RequestID, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
 	}
+}
+
+func createUploadTemp(sf *sftp.Client, finalPath string) (*sftp.File, string, error) {
+	for i := 0; i < 8; i++ {
+		var nonce [12]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, "", err
+		}
+		tempPath := fmt.Sprintf("%s.meowshell-upload-%x", finalPath, nonce[:])
+		f, err := sf.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err == nil {
+			return f, tempPath, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("could not allocate a unique upload staging path")
+}
+
+func (a *agentSession) cleanupUploadTemp(ch *agentChannel) {
+	if ch == nil || ch.uploadTempPath == "" {
+		return
+	}
+	if sf, err := a.sftpClientFor(); err == nil {
+		_ = sf.Remove(ch.uploadTempPath)
+	}
+}
+
+func commitUpload(sf *sftp.Client, tempPath, finalPath string) error {
+	if _, ok := sf.HasExtension("posix-rename@openssh.com"); ok {
+		return sf.PosixRename(tempPath, finalPath)
+	}
+	if _, err := sf.Lstat(finalPath); err == nil {
+		return fmt.Errorf("server does not support atomic replacement of existing files")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return sf.Rename(tempPath, finalPath)
 }
 
 const sftpProgressInterval = 200 * time.Millisecond
@@ -212,36 +253,43 @@ func (a *agentSession) finalizeUpload(channelID uint32, ch *agentChannel) {
 		defer ch.cancel()
 	}
 	closeErr := ch.sftpFile.Close()
-	// A write earlier in the transfer is the terminal failure regardless of
-	// how Close() goes: reporting exit_status 0 here just because Close()
-	// itself happened not to error would contradict the "error" already
-	// sent for that write, and would tell the caller data that never made
-	// it to the file landed successfully.
 	if uploadErr := ch.getUploadErr(); uploadErr != nil {
+		a.cleanupUploadTemp(ch)
 		a.writeError(channelID, classifySFTPError(uploadErr), uploadErr)
 		return
 	}
 	if closeErr != nil {
+		a.cleanupUploadTemp(ch)
 		a.writeError(channelID, classifySFTPError(closeErr), closeErr)
 		return
 	}
+
+	sf, err := a.sftpClientFor()
+	if err != nil {
+		a.cleanupUploadTemp(ch)
+		a.writeError(channelID, errUnknown, fmt.Errorf("finalizing upload: %w", err))
+		return
+	}
 	if ch.uploadPreserve {
-		sf, err := a.sftpClientFor()
-		if err != nil {
-			a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode/mtime: %w", err))
-			return
-		}
-		if err := sf.Chmod(ch.uploadPath, os.FileMode(ch.uploadMode)); err != nil {
+		if err := sf.Chmod(ch.uploadTempPath, os.FileMode(ch.uploadMode)); err != nil {
+			a.cleanupUploadTemp(ch)
 			a.writeError(channelID, errUnknown, fmt.Errorf("preserving mode: %w", err))
 			return
 		}
 		if ch.uploadModTime != 0 {
 			mt := time.Unix(ch.uploadModTime, 0)
-			if err := sf.Chtimes(ch.uploadPath, mt, mt); err != nil {
+			if err := sf.Chtimes(ch.uploadTempPath, mt, mt); err != nil {
+				a.cleanupUploadTemp(ch)
 				a.writeError(channelID, errUnknown, fmt.Errorf("preserving mtime: %w", err))
 				return
 			}
 		}
 	}
+	if err := commitUpload(sf, ch.uploadTempPath, ch.uploadPath); err != nil {
+		a.cleanupUploadTemp(ch)
+		a.writeError(channelID, classifySFTPError(err), fmt.Errorf("committing upload: %w", err))
+		return
+	}
+	ch.uploadTempPath = ""
 	a.writeControl(channelID, controlMessage{Msg: "exit_status", ExitCode: 0})
 }
