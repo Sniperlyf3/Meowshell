@@ -15,7 +15,7 @@ internal static class MeowshellProcessControl
         if (OperatingSystem.IsWindows())
         {
             job = JobObject.CreateForChild();
-            process.StartInfo.Environment[ParentJobEnvironmentVariable] = job.Name;
+            process.StartInfo.Environment[ParentJobEnvironmentVariable] = job.Name!;
         }
 
         try
