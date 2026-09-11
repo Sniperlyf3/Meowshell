@@ -67,6 +67,14 @@ func TestFilepathRelFromSlash(t *testing.T) {
 		{".", ".", ".", false},
 		{".", "a.jpg", "a.jpg", false},
 		{".", "sub/b.jpg", "sub/b.jpg", false},
+		// Regression cases: base=="." used to return target completely
+		// unchecked, so a walker entry (however it came to look like this --
+		// a hostile server, a symlink, a bug) escaping via ".." was let
+		// straight through to a caller's filepath.Join(localPath, rel).
+		{".", "..", "", true},
+		{".", "../etc/passwd", "", true},
+		{".", "/etc/passwd", "", true},
+		{"photos", "../etc/passwd", "", true},
 	} {
 		got, err := filepathRelFromSlash(tt.base, tt.target)
 		if tt.wantErr {

@@ -153,9 +153,16 @@ func uploadFile(sf *sftp.Client, localPath, remotePath string, preserve bool) er
 	if err != nil {
 		return fmt.Errorf("creating %s on the server: %w", remotePath, err)
 	}
-	defer dst.Close()
 	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
 		return err
+	}
+	// Checked explicitly, not deferred: some SFTP servers only surface a
+	// write/flush failure here, on Close, well after io.Copy itself
+	// reported success -- a deferred Close swallowing that would mean cp
+	// reports success for an upload the server never actually completed.
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("finishing upload of %s: %w", remotePath, err)
 	}
 	if !preserve {
 		return nil
@@ -220,9 +227,17 @@ func downloadFile(sf *sftp.Client, remotePath, localPath string, fi os.FileInfo,
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
 	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
 		return err
+	}
+	// Checked explicitly, not deferred, for the same reason as uploadFile's
+	// Close below: a filesystem can fail a write on flush/Close after
+	// io.Copy already reported success (a full disk, most commonly), and a
+	// deferred Close would silently swallow that into a false "downloaded
+	// successfully".
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("finishing download of %s: %w", localPath, err)
 	}
 	if !preserve {
 		return nil
@@ -238,12 +253,23 @@ func filepathRelFromSlash(base, target string) (string, error) {
 	if target == base {
 		return ".", nil
 	}
-	if base == "." {
-		return filepath.FromSlash(target), nil
+	rel := target
+	if base != "." {
+		var ok bool
+		rel, ok = strings.CutPrefix(target, base+"/")
+		if !ok {
+			return "", fmt.Errorf("%s is not under %s", target, base)
+		}
 	}
-	rel := strings.TrimPrefix(target, base+"/")
-	if rel == target {
-		return "", fmt.Errorf("%s is not under %s", target, base)
+	// base == "." used to return target here completely unchecked: a
+	// recursive download walks entries an SFTP server itself names, and
+	// nothing upstream guarantees rel can't come back containing ".."
+	// (however that happened -- a hostile server, a symlink, a walker bug)
+	// well enough to let the caller's filepath.Join(localPath, rel) escape
+	// localPath. Reject that outright rather than trust it, regardless of
+	// which branch above produced rel.
+	if rel == ".." || strings.HasPrefix(rel, "../") || path.IsAbs(rel) {
+		return "", fmt.Errorf("%s escapes %s", target, base)
 	}
 	return filepath.FromSlash(rel), nil
 }

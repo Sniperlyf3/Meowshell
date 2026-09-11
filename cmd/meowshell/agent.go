@@ -544,7 +544,15 @@ func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	}
 	switch {
 	case ch.stdin != nil:
-		ch.stdin.Write(payload)
+		// A failure here isn't reported as a channel error: the session's
+		// own exit (session.Wait(), in waitChannel) is what determines the
+		// channel's real outcome, and normally arrives on its own shortly
+		// after stdin breaks. Logged rather than silently dropped so it's
+		// at least visible in diagnostics if the exit itself is delayed or
+		// doesn't explain what happened.
+		if _, err := ch.stdin.Write(payload); err != nil {
+			fmt.Fprintf(os.Stderr, "meowshell: writing to channel %d's remote stdin: %v\n", channelID, err)
+		}
 	case ch.sftpFile != nil && ch.isUpload:
 		if ch.uploadErr != nil {
 			// Already failed: don't keep writing to (or erroring about) a
@@ -568,12 +576,18 @@ func (a *agentSession) openChannel(msg controlMessage) {
 	switch msg.Kind {
 	case "sftp_upload", "sftp_download":
 		a.openSFTPChannel(msg)
-		return
 	case "forward_local", "forward_remote", "forward_socks":
 		a.openForwardChannel(msg)
-		return
+	case "shell", "exec":
+		a.openShellChannel(msg)
+	default:
+		// Fail closed: an unrecognized kind (a protocol bug, version skew,
+		// or a typo) used to fall through to opening an interactive shell,
+		// the same as a legitimate "shell" request -- silently doing the
+		// most privileged thing available instead of refusing what it
+		// doesn't understand.
+		a.writeOpenError(msg.RequestID, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
 	}
-	a.openShellChannel(msg)
 }
 
 func (a *agentSession) openShellChannel(msg controlMessage) {
