@@ -66,7 +66,7 @@ diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
 index 0000000..0000000 100644
 --- a/cmd/tailcat/tailcat.go
 +++ b/cmd/tailcat/tailcat.go
-@@ -1847,6 +1847,10 @@ func main() {
+@@ -645,6 +645,10 @@ func main() {
 +	if err := joinParentJobFromEnv(); err != nil {
 +		log.Fatalf("tailcat: %v", err)
 +	}
