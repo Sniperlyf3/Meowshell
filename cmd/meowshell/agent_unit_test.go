@@ -181,3 +181,35 @@ func TestSlowSFTPOperationDoesNotBlockFrameReader(t *testing.T) {
 		t.Fatal("serveFrames did not finish")
 	}
 }
+
+
+// TestRegisterChannelSkipsZeroAndActiveIDs is a regression test for uint32
+// channel-ID wraparound. ID 0 is reserved for connection control, and wrapping
+// must never overwrite a still-active channel.
+func TestRegisterChannelSkipsZeroAndActiveIDs(t *testing.T) {
+	session := newAgentSession(nil, io.Discard)
+	existing := &agentChannel{}
+	session.chans[1] = existing
+	session.nextID.Store(^uint32(0) - 1)
+
+	first := &agentChannel{}
+	id, err := session.registerChannel(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != ^uint32(0) {
+		t.Fatalf("first wrapped allocation = %d, want %d", id, ^uint32(0))
+	}
+
+	second := &agentChannel{}
+	id, err = session.registerChannel(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 2 {
+		t.Fatalf("allocation after wrap = %d, want 2 (skip reserved 0 and active 1)", id)
+	}
+	if session.chans[1] != existing {
+		t.Fatal("active channel 1 was overwritten during ID wrap")
+	}
+}
