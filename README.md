@@ -28,16 +28,47 @@ Console.WriteLine(server.Address); // tailcat ssh <address>, from anywhere
 for when the address itself is the only credential you want — pair it with
 `AllowClientKeys` so a leaked address alone isn't enough to get a shell.
 
-That one call is the common case, but the same package is a complete C#
-wrapper around tailcat: an SFTP file service and forced-command sessions
-alongside the shell, a SOCKS5 proxy, TCP port forwarding, native interactive
-sessions and file transfer as a *client* too (no system `ssh`/`scp` needed,
-so this also works from inside an Android app), and one-shot operations for
-key management, address inspection, and connectivity checks. A persistent
-`MeowshellAgentConnection` goes further still: one login multiplexing a
-shell, the full SFTP verb set, and port forwarding together, and the only
-one of these that also reaches a general (non-tailcat) SSH host, with real
-host-key verification and password/certificate/Keystore-backed auth. See
+That one call is the common case. The same package is a lot more than a
+shell:
+
+- **No system `ssh`/`scp`/`sftp` anywhere.** Every client operation —
+  interactive sessions, SFTP, file transfer — is a native Go implementation
+  under the hood, not a wrapper around a binary your platform may not even
+  have. That's what makes any of this possible from inside an Android app
+  sandbox in the first place.
+- **One login, everything multiplexed.** `MeowshellAgentConnection` opens a
+  single connection and shares it across a shell, the full SFTP verb set
+  (`Upload`/`Download`/`Mkdir`/`Rename`/`Chmod`/`Symlink`/...), and
+  `-L`/`-R`/`-D` port forwarding — instead of a fresh process and handshake
+  per operation.
+- **It's also a real SSH client, not just a tailcat one.** That same
+  connection type reaches a general SSH host by hostname, with real
+  host-key verification (`known_hosts`, trust-on-first-use), `ProxyJump`
+  chaining, and password/keyboard-interactive/certificate auth — including
+  keys backed by Android's Keystore, where the private key never leaves
+  secure hardware and never touches your process memory.
+- **A SOCKS5 proxy and TCP port forwarding**, loopback-restricted by
+  default with optional token auth, and available over a Unix domain
+  socket instead of TCP on platforms where "every other app on the device
+  can reach your loopback port" is a real threat model, not a hypothetical.
+- **Typed results and real errors, not scraped stdout.** Addresses, ping
+  results, file listings, and environment diagnostics all come back as
+  real C# types; every failure is one `TailcatException` carrying the
+  actual diagnostics, not a bare non-zero exit code to guess at.
+- **Orphan-proof by construction.** Every long-lived session arms
+  parent-death protection (a Job Object on Windows, `PDEATHSIG` on
+  Linux/Android) before it ever starts listening, so a crashed, OOM-killed,
+  or force-stopped host process can't leave an unauthenticated shell
+  running behind it — the exact failure mode that matters most on Android,
+  where the OS kills app processes far more readily than a desktop or a
+  server ever would.
+- **A shell isn't the only thing you can serve, either.** Forced-command
+  sessions, an SFTP-only file service, and an "exit node" mode that lets an
+  authorized client reach *any* port the host machine can dial are all one
+  option away — combine or use standalone.
+
+Also one-shot operations for key management, address parsing/resolution,
+and connectivity checks (`tailcat ping`, `genkey`, `printpub`). See
 [`dotnet/README.md`](dotnet/README.md) for the full surface, every option,
 and the one thing (a console-attached `ssh` client, as opposed to a
 programmatic session) an Android app sandbox can't run.
@@ -80,7 +111,10 @@ for cgo-based DNS resolution; Linux and Windows are pure Go. See
 
 ## Security
 
-See [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the current threat model,
+This isn't an unreviewed pile of process-spawning code: a full security
+review found and fixed eleven real issues, from an unencrypted HTTPS proxy
+path to release builds tracking a mutable upstream branch. See
+[`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for the current threat model,
 findings, accepted risks, and verification status. The accompanying
 [`REVIEW_MAP.md`](REVIEW_MAP.md) groups every first-party file by runtime
 boundary and records the order and focus of the repository review.
