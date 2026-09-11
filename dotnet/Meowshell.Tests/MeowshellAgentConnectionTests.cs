@@ -26,18 +26,32 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            MeowshellAgentConnection.ConnectAsync(new TailcatClientOptions
-            {
-                BinaryDirectory = bin,
-                HomeDirectory = Path.Combine(_dir, "home"),
-                Timeout = TimeSpan.FromSeconds(10),
-            }, "example.invalid", cancellationToken: cancellation.Token));
+        using var cancellation = new CancellationTokenSource();
+        var connecting = MeowshellAgentConnection.ConnectAsync(new TailcatClientOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "home"),
+            Timeout = TimeSpan.FromSeconds(10),
+        }, "example.invalid", cancellationToken: cancellation.Token);
 
-        Assert.True(File.Exists(pidFile), "the agent stand-in never started");
+        // Synchronize with the child instead of cancelling after an arbitrary
+        // delay: process startup can legitimately exceed 250 ms on a busy CI
+        // runner, which made this regression test test scheduler speed.
+        await WaitForFileAsync(pidFile, TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => connecting);
+
         var pid = int.Parse(await File.ReadAllTextAsync(pidFile), System.Globalization.CultureInfo.InvariantCulture);
         Assert.False(IsRunning(pid), "the cancelled connection leaked its agent process");
+    }
+
+    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        while (!File.Exists(path))
+        {
+            await Task.Delay(10, cancellation.Token);
+        }
     }
 
     private static bool IsRunning(int pid)
