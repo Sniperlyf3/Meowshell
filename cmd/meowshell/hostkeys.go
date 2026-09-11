@@ -37,6 +37,13 @@ func tcpHostKeyCallback(knownHostsPath string, prompt hostKeyPrompter) (ssh.Host
 	if err := validateKnownHostsDir(dir); err != nil {
 		return nil, err
 	}
+	if _, err := os.Lstat(knownHostsPath); err == nil {
+		if err := validateKnownHostsFile(knownHostsPath); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("checking known_hosts file: %w", err)
+	}
 	f, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("creating known_hosts file: %w", err)
