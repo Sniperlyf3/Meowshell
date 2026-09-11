@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -113,6 +114,17 @@ func copyOne(sf *sftp.Client, src, target string, recursive, preserve, multiSour
 	}
 }
 
+// dirMeta records a directory's metadata to apply after a recursive copy's
+// walk has finished, rather than immediately when the directory is created:
+// writing further entries into a directory (files or subdirectories) updates
+// its modification time, so setting it eagerly would just get clobbered by
+// the copy's own later writes into that same directory.
+type dirMeta struct {
+	path    string
+	modTime time.Time
+	mode    fs.FileMode
+}
+
 func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve bool) error {
 	fi, err := os.Stat(localPath)
 	if err != nil {
@@ -124,7 +136,8 @@ func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve b
 	if !recursive {
 		return fmt.Errorf("%s is a directory (use -r to copy recursively)", localPath)
 	}
-	return filepath.WalkDir(localPath, func(p string, d fs.DirEntry, err error) error {
+	var dirs []dirMeta
+	if err := filepath.WalkDir(localPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -137,10 +150,35 @@ func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve b
 			dst = path.Join(remotePath, filepath.ToSlash(rel))
 		}
 		if d.IsDir() {
-			return sf.MkdirAll(dst)
+			if err := sf.MkdirAll(dst); err != nil {
+				return err
+			}
+			if preserve {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				dirs = append(dirs, dirMeta{path: dst, modTime: info.ModTime(), mode: info.Mode().Perm()})
+			}
+			return nil
 		}
 		return uploadFile(sf, p, dst, preserve)
-	})
+	}); err != nil {
+		return err
+	}
+	// Deepest directories first: harmless either way (a directory's mtime
+	// only reflects entries added directly inside it, not its descendants),
+	// but matches the safer convention other recursive-copy tools use.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		d := dirs[i]
+		if err := sf.Chtimes(d.path, d.modTime, d.modTime); err != nil {
+			return err
+		}
+		if err := sf.Chmod(d.path, d.mode); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func uploadFile(sf *sftp.Client, localPath, remotePath string, preserve bool) error {
@@ -191,6 +229,7 @@ func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve
 	if !recursive {
 		return fmt.Errorf("%s is a directory (use -r to copy recursively)", remotePath)
 	}
+	var dirs []dirMeta
 	walker := sf.Walk(remotePath)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
@@ -208,9 +247,24 @@ func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve
 			if err := os.MkdirAll(dst, 0o755); err != nil {
 				return err
 			}
+			if preserve {
+				dirs = append(dirs, dirMeta{path: dst, modTime: walker.Stat().ModTime(), mode: walker.Stat().Mode().Perm()})
+			}
 			continue
 		}
 		if err := downloadFile(sf, walker.Path(), dst, walker.Stat(), preserve); err != nil {
+			return err
+		}
+	}
+	if !preserve {
+		return nil
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		d := dirs[i]
+		if err := os.Chtimes(d.path, d.modTime, d.modTime); err != nil {
+			return err
+		}
+		if err := os.Chmod(d.path, d.mode); err != nil {
 			return err
 		}
 	}

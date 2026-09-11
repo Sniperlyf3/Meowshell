@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitRemoteArg(t *testing.T) {
@@ -90,6 +93,85 @@ func TestFilepathRelFromSlash(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("filepathRelFromSlash(%q, %q) = %q; want %q", tt.base, tt.target, got, tt.want)
 		}
+	}
+}
+
+// TestUploadPreservesDirectoryModTime is a regression test: recursive
+// upload with -p (preserve) only ever preserved file metadata -- a
+// directory's mtime/mode was never touched, so a preserved copy's
+// directories all showed the copy time instead of the source's real one.
+// Applying it eagerly (right after MkdirAll) wouldn't have worked either:
+// uploading further files into that directory afterward updates its mtime
+// again, clobbering whatever was just set -- so the fix collects directory
+// metadata during the walk and applies it only once the whole upload is
+// done. The nested file here (not just an empty directory) is what makes
+// that ordering matter for this test.
+func TestUploadPreservesDirectoryModTime(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	_ = session
+
+	srcRoot := t.TempDir()
+	subDir := filepath.Join(srcRoot, "sub")
+	if err := os.Mkdir(subDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "f.txt"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantModTime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(subDir, wantModTime, wantModTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := upload(client, srcRoot, "dest", true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := client.Stat("dest/sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(wantModTime) {
+		t.Errorf("uploaded directory mtime = %v, want %v (the source's, not whenever the last file was written into it)", fi.ModTime(), wantModTime)
+	}
+}
+
+// TestDownloadPreservesDirectoryModTime is the download-side equivalent of
+// TestUploadPreservesDirectoryModTime, same reasoning.
+func TestDownloadPreservesDirectoryModTime(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	_ = session
+
+	if err := client.MkdirAll("remote/sub"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := client.Create("remote/sub/f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantModTime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := client.Chtimes("remote/sub", wantModTime, wantModTime); err != nil {
+		t.Fatal(err)
+	}
+
+	localRoot := t.TempDir()
+	dst := filepath.Join(localRoot, "dest")
+	if err := download(client, "remote", dst, true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := os.Stat(filepath.Join(dst, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(wantModTime) {
+		t.Errorf("downloaded directory mtime = %v, want %v (the source's, not whenever the last file was written into it)", fi.ModTime(), wantModTime)
 	}
 }
 
