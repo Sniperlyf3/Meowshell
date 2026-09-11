@@ -18,14 +18,6 @@ on:
 permissions:
   contents: read
 
-# A branch push with an open PR triggers both push and pull_request. Those runs
-# used to hammer the same public relay simultaneously with duplicate E2E suites,
-# and both could fail even though either run passed alone. Keep only the newest
-# run for a branch; tags retain their own ref_name and are not grouped together.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
