@@ -5,6 +5,7 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
+[Collection(RelayE2ECollection.Name)]
 public sealed class MeowshellListenersE2ETests : IDisposable
 {
     private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";

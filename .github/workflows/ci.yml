@@ -18,6 +18,14 @@ on:
 permissions:
   contents: read
 
+# A branch push with an open PR triggers both push and pull_request. Those runs
+# used to hammer the same public relay simultaneously with duplicate E2E suites,
+# and both could fail even though either run passed alone. Keep only the newest
+# run for a branch; tags retain their own ref_name and are not grouped together.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -178,6 +186,9 @@ jobs:
     needs: build
     strategy:
       fail-fast: false
+      # Both architectures use the same public relay service. Running them one
+      # at a time avoids manufacturing a relay-load race in the test harness.
+      max-parallel: 1
       matrix:
         include:
           - runner: ubuntu-latest
@@ -260,7 +271,18 @@ jobs:
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-        run: dotnet test dotnet/Meowshell.sln -c Release --nologo
+        run: >-
+          dotnet test dotnet/Meowshell.sln -c Release --nologo
+          --logger "trx;LogFileName=meowshell-tests.trx"
+          --results-directory test-results
+
+      - name: Upload .NET test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dotnet-test-results
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.

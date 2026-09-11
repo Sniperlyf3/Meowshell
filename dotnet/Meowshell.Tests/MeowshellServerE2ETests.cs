@@ -4,6 +4,7 @@ using Meowshell;
 
 namespace Meowshell.Tests;
 
+[Collection(RelayE2ECollection.Name)]
 public sealed class MeowshellServerE2ETests : IDisposable
 {
     private static readonly Regex AddressPattern = new(@"\btc[A-Za-z0-9_-]{10,}", RegexOptions.Compiled);
