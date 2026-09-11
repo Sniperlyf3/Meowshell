@@ -610,7 +610,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             try { _process.StandardInput.Close(); } catch { }
             using var grace = new CancellationTokenSource(StopGracePeriod);
             try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { MeowshellProcessControl.TryKill(_process); }
+            catch (OperationCanceledException)
+            {
+                // Kill() only requests termination -- it does not wait for the
+                // OS to actually reap the child, so a caller checking liveness
+                // right after StopAsync returns could still see it as running
+                // (a lingering zombie) if we returned here without waiting.
+                MeowshellProcessControl.TryKill(_process);
+                using var killGrace = new CancellationTokenSource(StopGracePeriod);
+                try { await _process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+            }
         }
         // Release bounded channel pumps before waiting for the read loop. A
         // consumer that stopped reading may have backpressured that loop; faulting

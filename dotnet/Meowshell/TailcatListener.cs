@@ -87,7 +87,13 @@ internal sealed class TailcatListener : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
+                    // Kill() only requests termination -- it does not wait for
+                    // the OS to actually reap the child, so a caller checking
+                    // liveness right after StopAsync returns could still see
+                    // it as running (a lingering zombie) without this wait.
                     MeowshellProcessControl.TryKill(Process);
+                    using var killGrace = new CancellationTokenSource(_gracePeriod);
+                    try { await Process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
                 }
             }
             _exited.TrySetResult();
