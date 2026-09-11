@@ -367,6 +367,16 @@ public sealed class TailcatClientTests : IDisposable
     }
 
     [Fact]
+    public async Task ListFilesRejectsAnOverflowingSizeAsATailcatException()
+    {
+        var (options, _) = Fake("printf -- '-rw-r--r-- 999999999999999999999999999 Sep  9 10:56 huge.txt\\n'\n");
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true));
+        Assert.Equal(0, ex.ExitCode);
+        Assert.Contains("64-bit", ex.Message);
+    }
+
+    [Fact]
     public async Task ListFilesThrowsOnFailure()
     {
         var (options, argsFile) = Fake("echo 'no such file' >&2\nexit 1\n");
