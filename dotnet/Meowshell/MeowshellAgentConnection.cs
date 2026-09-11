@@ -63,9 +63,15 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _readLoop;
     private readonly ConcurrentDictionary<uint, IAgentChannelSink> _channels = new();
+
+    /// <summary>Test-only: how many channels are currently tracked. Not a public API -- a finished channel not being usable is the real, externally observable contract; this just lets a test also assert it isn't still referenced internally.</summary>
+    internal int ChannelCountForTests => _channels.Count;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<AgentMessage>> _pendingRequests = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<(uint ChannelId, AgentMessage Msg)>> _pendingOpens = new();
+    private readonly ConcurrentDictionary<string, PendingOpen> _pendingOpens = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly SemaphoreSlim _stopLock = new(1, 1);
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly ConcurrentDictionary<Task, byte> _promptTasks = new();
     private long _nextRequestId;
     private bool _stopped;
 
@@ -417,8 +423,24 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }, cancellationToken);
     }
 
-    internal Task CloseForwardAsync(uint id, CancellationToken cancellationToken) =>
-        WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken);
+    internal async Task CloseForwardAsync(uint id, CancellationToken cancellationToken)
+    {
+        // Unlike a shell/exec channel, the agent never sends anything back
+        // when a forward's listener closes -- there is no "exit_status" to
+        // key cleanup off of (see HandleControlAsync). This explicit close
+        // request is the only terminal signal that exists at all, so it has
+        // to also be what removes the local entry: without it, every
+        // forward ever opened on a connection stays in _channels for the
+        // connection's whole lifetime, not just until it's closed.
+        try
+        {
+            await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _channels.TryRemove(id, out _);
+        }
+    }
 
     // Each open_channel request carries its own request ID, correlated
     // against the response the same way SFTP ops already are -- rather than
@@ -435,20 +457,39 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     // channel immediately (see the "channel_opened"/"error" handling in
     // HandleControlAsync) instead of leaking it for the life of the
     // connection.
+    //
+    // OnOpened/OnFailed run synchronously, directly inside HandleControlAsync
+    // as it processes "channel_opened"/"error" -- not as a continuation the
+    // awaiting caller's own task resumes on, which (with the TCS below using
+    // RunContinuationsAsynchronously, as every other completion signal in
+    // this class does) could run arbitrarily later, after the read loop has
+    // already moved on to the next frame. That gap is real: a remote command
+    // that exits essentially immediately can have its exit_status right
+    // behind channel_opened in the same read, and if the new channel isn't
+    // in _channels yet by the time that arrives, it's silently dropped --
+    // the caller's Completed never resolves. Registering the channel here,
+    // as part of handling channel_opened itself, guarantees it's visible to
+    // the very next frame the read loop processes.
+    private readonly record struct PendingOpen(Action<uint, AgentMessage> OnOpened, Action<Exception> OnFailed);
+
     private async Task<T> OpenChannelAsync<T>(AgentMessage request, Func<uint, AgentMessage, (T Result, IAgentChannelSink? Sink)> makeResult, CancellationToken cancellationToken)
     {
         var requestId = NextRequestId();
         request.RequestId = requestId;
-        var tcs = new TaskCompletionSource<(uint ChannelId, AgentMessage Msg)>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingOpens[requestId] = tcs;
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingOpens[requestId] = new PendingOpen(
+            OnOpened: (channelId, opened) =>
+            {
+                var (result, sink) = makeResult(channelId, opened);
+                if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
+                tcs.TrySetResult(result);
+            },
+            OnFailed: ex => tcs.TrySetException(ex));
         try
         {
             await WriteControlAsync(0, request, cancellationToken).ConfigureAwait(false);
             using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-            var (channelId, opened) = await tcs.Task.ConfigureAwait(false);
-            var (result, sink) = makeResult(channelId, opened);
-            if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
-            return result;
+            return await tcs.Task.ConfigureAwait(false);
         }
         finally
         {
@@ -513,12 +554,14 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 _connected.TrySetResult();
                 return;
             case "prompt_request":
-                _ = Task.Run(() => HandlePromptAsync(msg));
+                var promptTask = Task.Run(() => HandlePromptAsync(msg));
+                _promptTasks[promptTask] = 0;
+                _ = promptTask.ContinueWith(t => _promptTasks.TryRemove(t, out _), TaskScheduler.Default);
                 return;
             case "channel_opened":
-                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openedTcs))
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openedCallbacks))
                 {
-                    openedTcs.TrySetResult((channelId, msg));
+                    openedCallbacks.OnOpened(channelId, msg);
                     return;
                 }
                 // Nobody is waiting on this request anymore -- the caller's
@@ -540,9 +583,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     errorTcs.TrySetResult(msg);
                     return;
                 }
-                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openFailedTcs))
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openFailedCallbacks))
                 {
-                    openFailedTcs.TrySetException(AgentError(msg, "opening a channel"));
+                    openFailedCallbacks.OnFailed(AgentError(msg, "opening a channel"));
                     return;
                 }
                 if (channelId == 0)
@@ -560,6 +603,23 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
         if (_channels.TryGetValue(channelId, out var sink))
             await sink.OnControlAsync(msg).ConfigureAwait(false);
+
+        // "exit_status" is the one message the agent guarantees to send
+        // exactly once, terminally, for a channel that finished running --
+        // safe to remove on unconditionally (harmless if Upload/DownloadAsync
+        // already did, in their own finally blocks). A per-channel "error" is
+        // deliberately NOT treated the same way here: the agent can send one
+        // for a still-alive shell channel (e.g. a failed agent-forwarding
+        // setup, logged but not fatal to the session) as well as for a
+        // genuinely dead one, and the wire protocol doesn't distinguish the
+        // two -- removing on every "error" would silently drop all further
+        // data/control traffic for a channel that's actually still running.
+        // Without this, _channels only ever grows for the life of the
+        // connection: nothing else ever removes a shell/exec entry once
+        // opened, which is a real, unbounded leak on a long-lived connection
+        // that opens many short commands.
+        if (msg.Msg == "exit_status")
+            _channels.TryRemove(channelId, out _);
     }
 
     private async Task HandlePromptAsync(AgentMessage msg)
@@ -571,31 +631,31 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             {
                 case "host_key":
                     if (HostKeyPromptRequested is { } hostKeyHandler)
-                        response.Accept = await hostKeyHandler(new MeowshellHostKeyPrompt(msg.Remote ?? "", msg.Fingerprint ?? ""), CancellationToken.None).ConfigureAwait(false);
+                        response.Accept = await hostKeyHandler(new MeowshellHostKeyPrompt(msg.Remote ?? "", msg.Fingerprint ?? ""), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "password":
                     if (PasswordRequested is { } passwordHandler)
-                        response.Answer = await passwordHandler(msg.Remote ?? "", CancellationToken.None).ConfigureAwait(false);
+                        response.Answer = await passwordHandler(msg.Remote ?? "", _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "passphrase":
                     if (PassphraseRequested is { } passphraseHandler)
-                        response.Answer = await passphraseHandler(CancellationToken.None).ConfigureAwait(false);
+                        response.Answer = await passphraseHandler(_lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "keyboard_interactive":
                     if (KeyboardInteractiveRequested is { } kbdHandler)
-                        response.Answers = await kbdHandler(new MeowshellKeyboardInteractivePrompt(msg.Remote ?? "", msg.Instruction ?? "", msg.Questions ?? [], msg.Echos ?? []), CancellationToken.None).ConfigureAwait(false);
+                        response.Answers = await kbdHandler(new MeowshellKeyboardInteractivePrompt(msg.Remote ?? "", msg.Instruction ?? "", msg.Questions ?? [], msg.Echos ?? []), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "sign":
                     if (SignRequested is { } signHandler)
-                        response.Signature = await signHandler(new MeowshellSignRequest(msg.KeyId ?? "", msg.Algorithm ?? "", msg.SignData ?? []), CancellationToken.None).ConfigureAwait(false);
+                        response.Signature = await signHandler(new MeowshellSignRequest(msg.KeyId ?? "", msg.Algorithm ?? "", msg.SignData ?? []), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
@@ -617,39 +677,75 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private void FaultEverything(Exception ex)
     {
         _connected.TrySetException(ex);
-        foreach (var kv in _pendingOpens) kv.Value.TrySetException(ex);
+        foreach (var kv in _pendingOpens) kv.Value.OnFailed(ex);
         foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
         foreach (var kv in _channels) kv.Value.OnFault(ex);
     }
 
     private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(3);
 
-    /// <summary>Ends the connection: closes stdin, then kills the process outright if it has not exited within a few seconds. Safe to call repeatedly.</summary>
+    /// <summary>Ends the connection: closes stdin, then kills the process outright if it has not exited within a few seconds. Safe to call repeatedly, including concurrently.</summary>
     public async Task StopAsync()
     {
-        if (_stopped) return;
-        _stopped = true;
-        if (!_process.HasExited)
+        // _stopLock (not just the _stopped bool it guards) makes this safe
+        // under concurrent callers: an unsynchronized check-then-set let two
+        // overlapping StopAsync/DisposeAsync calls both pass the check
+        // before either set it, each independently closing streams and
+        // racing DisposeAsync's later _process.Dispose()/_writeLock.Dispose()
+        // -- the same pattern TailcatListener.StopAsync already uses.
+        await _stopLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            try { _process.StandardInput.Close(); } catch { }
-            using var grace = new CancellationTokenSource(StopGracePeriod);
-            try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException)
+            if (_stopped) return;
+            _stopped = true;
+
+            // Cancel first, before anything else blocks on shutdown: a
+            // PassphraseRequested/HostKeyPromptRequested/... handler stuck
+            // waiting on a UI that never completes should hear about
+            // cancellation as early as possible, not only once this method
+            // has already finished tearing down the process.
+            _lifetimeCts.Cancel();
+
+            if (!_process.HasExited)
             {
-                // Kill() only requests termination -- it does not wait for the
-                // OS to actually reap the child, so a caller checking liveness
-                // right after StopAsync returns could still see it as running
-                // (a lingering zombie) if we returned here without waiting.
-                MeowshellProcessControl.TryKill(_process);
-                using var killGrace = new CancellationTokenSource(StopGracePeriod);
-                try { await _process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                try { _process.StandardInput.Close(); } catch { }
+                using var grace = new CancellationTokenSource(StopGracePeriod);
+                try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException)
+                {
+                    // Kill() only requests termination -- it does not wait for the
+                    // OS to actually reap the child, so a caller checking liveness
+                    // right after StopAsync returns could still see it as running
+                    // (a lingering zombie) if we returned here without waiting.
+                    MeowshellProcessControl.TryKill(_process);
+                    using var killGrace = new CancellationTokenSource(StopGracePeriod);
+                    try { await _process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                }
+            }
+            // Release bounded channel pumps before waiting for the read loop. A
+            // consumer that stopped reading may have backpressured that loop; faulting
+            // its sink completes the pipe and lets shutdown make progress.
+            FaultEverything(new OperationCanceledException("meowshell agent connection stopped"));
+            try { await _readLoop.ConfigureAwait(false); } catch { }
+
+            // Best-effort: give already-cancelled prompt tasks a bounded
+            // window to actually finish (a well-behaved handler observing
+            // _lifetimeCts should return almost immediately) so StopAsync
+            // returning means the connection's own background work is
+            // quiescent, not just that it's been asked to stop. A handler
+            // that ignores cancellation entirely can still outlive this --
+            // there is no way to force an application callback to return --
+            // but it no longer holds up shutdown indefinitely.
+            var pending = _promptTasks.Keys.ToArray();
+            if (pending.Length > 0)
+            {
+                try { await Task.WhenAll(pending).WaitAsync(StopGracePeriod).ConfigureAwait(false); } catch { }
             }
         }
-        // Release bounded channel pumps before waiting for the read loop. A
-        // consumer that stopped reading may have backpressured that loop; faulting
-        // its sink completes the pipe and lets shutdown make progress.
-        FaultEverything(new OperationCanceledException("meowshell agent connection stopped"));
-        try { await _readLoop.ConfigureAwait(false); } catch { }
+        finally
+        {
+            _stopLock.Release();
+        }
     }
 
     /// <summary>Ends the connection and releases everything it holds.</summary>
@@ -658,6 +754,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         await StopAsync().ConfigureAwait(false);
         _process.Dispose();
         _writeLock.Dispose();
+        _lifetimeCts.Dispose();
     }
 }
 

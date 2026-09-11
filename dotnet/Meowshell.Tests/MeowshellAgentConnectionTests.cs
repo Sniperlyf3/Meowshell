@@ -236,6 +236,65 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             "cancelling a stalled download never sent close_channel -- the agent kept reading/sending the remote file");
     }
 
+    /// <summary>
+    /// Regression test: nothing ever removed a finished shell/exec channel's
+    /// entry from _channels. HandleControlAsync dispatched "exit_status" to
+    /// the channel's sink and stopped there; MeowshellAgentShellChannel's own
+    /// DisposeAsync only sends close_channel, it never touched _channels
+    /// either. On a long-lived connection that opens many short commands
+    /// (a persistent daemon's whole reason to exist), that's unbounded
+    /// growth -- every completed channel stays referenced for the rest of
+    /// the connection's life. e2e/fakeagent sends channel_opened followed
+    /// immediately by exit_status for any kind other than sftp_download (see
+    /// its own comment), so a shell open here completes on its own without
+    /// this test needing to drive a real remote command.
+    /// </summary>
+    [Fact]
+    public async Task FinishedShellChannelIsRemovedFromChannels()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        // Not asserting the count mid-open: e2e/fakeagent completes a shell
+        // essentially instantly (channel_opened immediately followed by
+        // exit_status), so there is no reliable window where it's open but
+        // not yet finished to observe -- the property that actually matters,
+        // and the one this is a regression test for, is what the count
+        // settles back to once everything is done.
+        var before = connection.ChannelCountForTests;
+        await using (var shell = await connection.OpenShellAsync())
+        {
+            await shell.Completed.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Equal(before, connection.ChannelCountForTests);
+    }
+
+    /// <summary>
+    /// Same leak, the forward side: MeowshellForward.DisposeAsync only ever
+    /// sent close_channel -- the agent never sends anything back when a
+    /// forward's listener closes (see closeChannel in forwarding.go), so
+    /// there is no terminal message to remove the entry on. CloseForwardAsync
+    /// now removes it itself, since an explicit close is the only signal
+    /// that exists at all here.
+    /// </summary>
+    [Fact]
+    public async Task ClosedForwardIsRemovedFromChannels()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var before = connection.ChannelCountForTests;
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        Assert.Equal(before + 1, connection.ChannelCountForTests);
+
+        await forward.DisposeAsync();
+
+        Assert.Equal(before, connection.ChannelCountForTests);
+    }
+
     private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
     {
         public void Report(T value) => report(value);

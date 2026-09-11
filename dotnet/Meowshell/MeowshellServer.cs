@@ -231,8 +231,23 @@ public sealed class MeowshellServer : IAsyncDisposable
 
             if (options.PrivateKeyJson is not null)
             {
-                await process.StandardInput.WriteAsync(options.PrivateKeyJson)
-                    .ConfigureAwait(false);
+                // Bounded by StartTimeout the same way WaitForAddressAsync
+                // below is: a plain, unbounded WriteAsync here means a child
+                // that starts but never consumes stdin can hang StartAsync
+                // indefinitely, before StartTimeout ever gets a chance to
+                // apply -- and the caller's own cancellationToken alone
+                // wouldn't add a bound if they left it at the default.
+                using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                writeTimeout.CancelAfter(options.StartTimeout);
+                try
+                {
+                    await process.StandardInput.WriteAsync(options.PrivateKeyJson.AsMemory(), writeTimeout.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"writing the private key to tailcat's stdin did not finish within {options.StartTimeout}");
+                }
                 process.StandardInput.Close();
             }
 

@@ -69,6 +69,7 @@ func readFrame(r io.Reader) (frame, error) {
 type message struct {
 	Msg       string `json:"msg"`
 	RequestID string `json:"request_id,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 func writeControl(w io.Writer, mu *sync.Mutex, channelID uint32, msg message) error {
@@ -114,10 +115,25 @@ func main() {
 		case "open_channel":
 			nextID++
 			id := nextID
-			go func(requestID string, id uint32) {
+			go func(requestID, kind string, id uint32) {
 				time.Sleep(openDelay)
 				writeControl(os.Stdout, &outMu, id, message{Msg: "channel_opened", RequestID: requestID})
-			}(msg.RequestID, id)
+				// Only kinds that realistically finish on their own in the
+				// real protocol get a following exit_status: a shell/exec
+				// channel (waitChannel) and an sftp_upload (finalizeUpload).
+				// Forwards never get one at all -- the agent sends nothing
+				// back when a forward's listener closes (see closeChannel in
+				// forwarding.go), so sending one here would be testing
+				// against behavior the real agent doesn't have. sftp_download
+				// is deliberately excluded too: some tests rely on a download
+				// channel staying open with nothing ever arriving, to
+				// exercise cancelling a transfer that would otherwise never
+				// finish on its own.
+				switch kind {
+				case "", "shell", "exec", "sftp_upload":
+					writeControl(os.Stdout, &outMu, id, message{Msg: "exit_status"})
+				}
+			}(msg.RequestID, msg.Kind, id)
 		case "close_channel":
 			fmt.Fprintf(results, "CLOSED %d\n", f.ChannelID)
 			results.Sync()
