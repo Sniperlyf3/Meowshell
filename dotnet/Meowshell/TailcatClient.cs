@@ -73,7 +73,15 @@ public static class TailcatClient
     {
         var psi = Prepare(options);
         foreach (var a in args) psi.ArgumentList.Add(a);
-        return RunAsync(psi, options.Timeout, "tailcat " + string.Join(' ', args));
+        // Name the operation by its verb alone (e.g. "tailcat ping"), not the
+        // full argument vector: several callers (PingAsync, ListFilesAsync,
+        // SshAsync, CpAsync) put a tailcat address -- treated as
+        // credential-like elsewhere in this codebase's own security model --
+        // or other caller-supplied values directly in args, and this message
+        // ends up in a TimeoutException that an application can easily let
+        // reach a log or crash reporter.
+        var verb = args.Length > 0 ? args[0] : "";
+        return RunAsync(psi, options.Timeout, $"tailcat {verb}");
     }
 
     private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
@@ -89,7 +97,21 @@ public static class TailcatClient
         }
         catch (OperationCanceledException)
         {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            // Kill() only requests termination -- wait (bounded) for the OS
+            // to actually reap the child before returning, the same fix
+            // already applied to MeowshellAgentConnection/TailcatListener:
+            // otherwise a caller has no guarantee the process is actually
+            // gone by the time this throws.
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    using var killGrace = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    try { await process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                }
+            }
+            catch { }
             throw new TimeoutException($"{commandForTimeoutMessage} did not finish within {timeout}");
         }
         return new TailcatResult(
