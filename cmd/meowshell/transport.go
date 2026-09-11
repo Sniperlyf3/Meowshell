@@ -209,6 +209,45 @@ type bufConn struct {
 
 func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
+var lookupAgentTXT = net.DefaultResolver.LookupTXT
+
+func resolveAgentDestination(ctx context.Context, dest string) (string, bool, error) {
+	if looksLikeTailcatAddress(dest) {
+		return dest, true, nil
+	}
+	// user@host, explicit host:port, and IP literals are unambiguously ordinary
+	// SSH destinations. A bare DNS name is the only form that can also stand
+	// for Tailcat's documented "tailcat=tc..." TXT indirection.
+	if strings.Contains(dest, "@") {
+		return dest, false, nil
+	}
+	if _, _, err := net.SplitHostPort(dest); err == nil {
+		return dest, false, nil
+	}
+	if net.ParseIP(strings.Trim(dest, "[]")) != nil {
+		return dest, false, nil
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	txts, err := lookupAgentTXT(lookupCtx, strings.TrimSuffix(dest, "."))
+	if err != nil {
+		// A missing/unresolvable TXT record does not make a normal SSH hostname
+		// invalid; its A/AAAA lookup belongs to the regular TCP dial path.
+		return dest, false, nil
+	}
+	for _, txt := range txts {
+		if value, ok := strings.CutPrefix(txt, "tailcat="); ok {
+			value = strings.TrimSpace(value)
+			if !looksLikeTailcatAddress(value) {
+				return "", false, fmt.Errorf("DNS name %q has an invalid tailcat TXT address", dest)
+			}
+			return value, true, nil
+		}
+	}
+	return dest, false, nil
+}
+
 func looksLikeTailcatAddress(dest string) bool {
 	rest, ok := strings.CutPrefix(dest, "tc")
 	if !ok || rest == "" {
