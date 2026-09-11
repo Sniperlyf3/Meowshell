@@ -134,3 +134,17 @@ checks are `go test ./...`, `go vet ./...`, `./verify-binaries.sh`, and
 `dotnet test dotnet/Meowshell.sln --configuration Release`. Release review should
 also run `govulncheck ./...` after materializing the pinned tailcat checkout and
 a NuGet dependency audit in an environment with the required .NET SDK.
+
+## Review verification results
+
+The review environment was subsequently provisioned with .NET SDK 8.0.425 and
+the pinned Linux amd64 binaries. All 86 non-E2E .NET tests passed. The complete
+suite executed all 107 tests: 94 passed and 13 relay-dependent E2E cases failed
+with `context deadline exceeded` or an SSH EOF after the tailcat connection
+could not be established. Local real-binary E2E coverage, including listener
+startup/shutdown and key/address operations, did pass. The environment routes
+outbound HTTP(S) through a mandatory proxy, and the failures are consistent with
+the tailcat transport being unable to reach its relay from this environment.
+They are therefore recorded as an environment limitation rather than a passing
+result or a demonstrated product regression. The full E2E suite still needs a
+run from a network that permits the tailcat transport before release.
