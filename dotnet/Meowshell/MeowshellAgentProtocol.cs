@@ -56,13 +56,20 @@ internal static class MeowshellAgentProtocol
         if (n > MaxFrameLength)
             throw new TailcatException("meowshell agent protocol error", 0, $"frame length {n} exceeds the {MaxFrameLength} limit");
 
-        var body = new byte[n];
-        if (!await ReadFullAsync(stream, body, cancellationToken).ConfigureAwait(false))
+        // Read the header and payload directly into their final buffers
+        // instead of one body-sized buffer that then gets copied into a
+        // second, payload-sized one: at the 64MiB frame limit, that used to
+        // mean two ~64MiB allocations live at once (and a full-frame copy)
+        // for a single incoming frame.
+        var header = new byte[FrameHeaderLength];
+        if (!await ReadFullAsync(stream, header, cancellationToken).ConfigureAwait(false))
             throw new TailcatException("meowshell agent protocol error", 0, "connection closed mid-frame");
 
         var payload = new byte[n - FrameHeaderLength];
-        Array.Copy(body, FrameHeaderLength, payload, 0, payload.Length);
-        return new AgentFrame(body[0], ReadUInt32BigEndian(body.AsSpan(1, 4)), payload);
+        if (!await ReadFullAsync(stream, payload, cancellationToken).ConfigureAwait(false))
+            throw new TailcatException("meowshell agent protocol error", 0, "connection closed mid-frame");
+
+        return new AgentFrame(header[0], ReadUInt32BigEndian(header.AsSpan(1, 4)), payload);
     }
 
     private static async Task<bool> ReadFullAsync(Stream stream, byte[] buf, CancellationToken cancellationToken)

@@ -526,7 +526,26 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     await HandleDataAsync(frame.Value.ChannelId, frame.Value.Payload).ConfigureAwait(false);
                     continue;
                 }
-                var msg = System.Text.Json.JsonSerializer.Deserialize<AgentMessage>(frame.Value.Payload, MeowshellAgentProtocol.JsonOptions)!;
+                // Reject explicitly rather than falling through to JSON
+                // parsing: an unrecognized frame type means either the
+                // stream is desynced (in which case trusting the rest of
+                // this frame's bytes as a length-prefixed boundary is
+                // already unsafe) or the agent sent something this build
+                // doesn't understand -- either way, a clear protocol error
+                // beats silently attempting to parse arbitrary bytes as a
+                // control message.
+                if (frame.Value.Type != MeowshellAgentProtocol.FrameTypeControl)
+                    throw new TailcatException("meowshell agent protocol error", 0, $"unknown frame type {frame.Value.Type}");
+                // The null-forgiving deserialize below used to let a literal
+                // JSON "null" control frame turn into an unguarded
+                // NullReferenceException a few lines later (msg.Msg on a
+                // null msg) -- still caught by this method's own try/catch
+                // and still faulting the connection (correctly: a malformed
+                // control frame means this stream can no longer be trusted
+                // to be in sync), but with a confusing exception instead of
+                // a clear protocol-error diagnostic.
+                var msg = System.Text.Json.JsonSerializer.Deserialize<AgentMessage>(frame.Value.Payload, MeowshellAgentProtocol.JsonOptions)
+                    ?? throw new TailcatException("meowshell agent protocol error", 0, "control frame payload was JSON null");
                 await HandleControlAsync(frame.Value.ChannelId, msg).ConfigureAwait(false);
             }
             FaultEverything(new TailcatException("meowshell agent exited unexpectedly", 0, _diagnostics.Tail()));
