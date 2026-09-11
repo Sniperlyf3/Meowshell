@@ -64,7 +64,17 @@ func listenUnix(path string) (net.Listener, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("checking stale socket %s: %w", path, err)
 	}
-	ln, err := net.Listen("unix", path)
+	// net.Listen creates the socket file at default (umask-derived)
+	// permissions; only the Chmod below narrows it to the owner. Without
+	// withRestrictedUmask, that's a brief window in which another local
+	// user could connect before access is restricted. Chmod still runs
+	// unconditionally afterward as a backstop.
+	var ln net.Listener
+	err := withRestrictedUmask(func() error {
+		var lnErr error
+		ln, lnErr = net.Listen("unix", path)
+		return lnErr
+	})
 	if err != nil {
 		return nil, err
 	}
