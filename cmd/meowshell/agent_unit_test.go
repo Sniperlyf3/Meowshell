@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // TestOpenChannelRejectsUnknownKind is a regression test: openChannel used
@@ -115,5 +117,67 @@ func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("serveFrames did not finish after consuming its input")
+	}
+}
+
+
+// TestSlowSFTPOperationDoesNotBlockFrameReader is a regression test for
+// head-of-line blocking: sftpOp used to run synchronously inside
+// handleControl/serveFrames, so one slow server-side metadata operation could
+// prevent prompt responses and unrelated channels from being processed.
+func TestSlowSFTPOperationDoesNotBlockFrameReader(t *testing.T) {
+	var input bytes.Buffer
+	sftpBody, err := json.Marshal(controlMessage{Msg: "sftp_op", Op: "stat", Path: "slow", RequestID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(&input, frame{Type: frameTypeControl, ChannelID: 0, Payload: sftpBody}); err != nil {
+		t.Fatal(err)
+	}
+	promptBody, err := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: "p2", Answer: "still-responsive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(&input, frame{Type: frameTypeControl, ChannelID: 0, Payload: promptBody}); err != nil {
+		t.Fatal(err)
+	}
+
+	session := newAgentSession(&input, io.Discard)
+	// handleControl only dispatches non-prompt messages after connection setup.
+	session.scPtr.Store(&ssh.Client{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	session.sftpOpHandler = func(controlMessage) {
+		close(started)
+		<-release
+	}
+	prompt := make(chan controlMessage, 1)
+	session.prompts["p2"] = prompt
+
+	done := make(chan error, 1)
+	go func() { done <- session.serveFrames() }()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow SFTP operation never started")
+	}
+	select {
+	case got := <-prompt:
+		if got.Answer != "still-responsive" {
+			t.Fatalf("prompt response answer = %q", got.Answer)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("frame reader stalled behind a slow SFTP operation")
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveFrames returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serveFrames did not finish")
 	}
 }
