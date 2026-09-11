@@ -366,6 +366,44 @@ requirement of tailcat itself, the same for every client API. `OpenRemoteForward
 ("-R", asking the *far end* to open a listener) is the one exception: it's
 SSH-only, since tailcat has no equivalent feature to fall back to.
 
+### Signing with a Keystore-backed key
+
+`SignRequested` hands you a `MeowshellSignRequest` and asks for the
+signature bytes. Its `Algorithm` is the **signature algorithm the SSH
+handshake negotiated**, not the key's type — the two differ for RSA, and
+the difference is which digest the signature has to commit to. A handler
+that ignores `Algorithm` and always computes, say, `SHA256withRSA` is
+wrong whenever the server picked `rsa-sha2-512`, and wrong in a way that
+surfaces only as a failed handshake with nothing more specific to go on.
+
+For an ECDSA or Ed25519 key the value is the same string as the key type,
+which is all it ever was before, so a handler written against those keys
+needs no change. RSA keys are what produce values that did not occur
+previously:
+
+| `Algorithm` | Signature bytes to return | Android `Signature` algorithm | Conversion needed |
+| --- | --- | --- | --- |
+| `rsa-sha2-512` | Raw PKCS#1 v1.5 signature, modulus-sized | `SHA512withRSA` | None |
+| `rsa-sha2-256` | Raw PKCS#1 v1.5 signature, modulus-sized | `SHA256withRSA` | None |
+| `ssh-rsa` | Raw PKCS#1 v1.5 signature, modulus-sized | `SHA1withRSA` | None |
+| `ecdsa-sha2-nistp256` | `mpint r \|\| mpint s` (RFC 5656 §3.1.2) | `SHA256withECDSA` | **Yes** — see below |
+| `ssh-ed25519` | Raw 64-byte signature | n/a | None |
+
+The bytes you return are the algorithm-specific signature blob, not a DER
+envelope and not the full SSH signature structure. RSA and Ed25519 need
+nothing done to them. ECDSA does: Android returns a DER
+`SEQUENCE { INTEGER r, INTEGER s }`, and SSH wants `r` and `s` as two
+mpints — each a 4-byte big-endian length followed by the big-endian value,
+with a leading `0x00` byte when the high bit would otherwise be set. Pass
+the DER through unconverted and the server rejects the signature without
+saying why.
+
+RSA keys only became usable here once the negotiated algorithm reached the
+handler: previously the key's own type (`ssh-rsa`, meaning SHA-1) was the
+only thing ever offered, and OpenSSH has refused that by default since 8.8.
+This matters most on Android, where KeyMint guarantees ECDSA and RSA but
+not Curve25519, so RSA is the only hardware-backed option on some devices.
+
 ### Errors
 
 Everything that can go wrong at the process level -- a non-zero exit, or a
