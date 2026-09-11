@@ -7,9 +7,32 @@ import (
 	"encoding/pem"
 	"io"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestDeliverPromptResponseDoesNotBlockOnDuplicate(t *testing.T) {
+	session := newAgentSession(nil, nil)
+	responses := make(chan controlMessage, 1)
+	session.prompts["p1"] = responses
+
+	done := make(chan struct{})
+	go func() {
+		session.deliverPromptResponse(controlMessage{RequestID: "p1", Answer: "first"})
+		session.deliverPromptResponse(controlMessage{RequestID: "p1", Answer: "duplicate"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a duplicate prompt response blocked the frame reader")
+	}
+	if got := (<-responses).Answer; got != "first" {
+		t.Fatalf("delivered answer = %q, want first", got)
+	}
+}
 
 func testAuthSession(t *testing.T) (session *agentSession, fromAgent io.Reader, toAgent io.Writer) {
 	t.Helper()

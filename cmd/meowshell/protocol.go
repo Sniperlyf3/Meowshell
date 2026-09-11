@@ -27,13 +27,25 @@ type frame struct {
 }
 
 func writeFrame(w io.Writer, f frame) error {
+	if len(f.Payload) > maxFrameLength-frameHeaderLength {
+		return fmt.Errorf("frame payload length %d exceeds the %d limit", len(f.Payload), maxFrameLength-frameHeaderLength)
+	}
 	buf := make([]byte, 4+frameHeaderLength+len(f.Payload))
 	binary.BigEndian.PutUint32(buf[0:4], uint32(frameHeaderLength+len(f.Payload)))
 	buf[4] = f.Type
 	binary.BigEndian.PutUint32(buf[5:9], f.ChannelID)
 	copy(buf[9:], f.Payload)
-	_, err := w.Write(buf)
-	return err
+	for len(buf) > 0 {
+		n, err := w.Write(buf)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		buf = buf[n:]
+	}
+	return nil
 }
 
 func readFrame(r io.Reader) (frame, error) {

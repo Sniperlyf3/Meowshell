@@ -8,6 +8,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -32,21 +33,24 @@ type pipeConn struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
 	stdin  io.WriteCloser
+	once   sync.Once
+	err    error
 }
 
 func (c *pipeConn) Read(p []byte) (int, error)  { return c.stdout.Read(p) }
 func (c *pipeConn) Write(p []byte) (int, error) { return c.stdin.Write(p) }
 
 func (c *pipeConn) Close() error {
-	c.stdin.Close()
-	c.stdout.Close()
-	err := c.cmd.Wait()
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return nil
-	}
-	return err
+	c.once.Do(func() {
+		c.stdin.Close()
+		c.stdout.Close()
+		c.err = c.cmd.Wait()
+		var exitErr *exec.ExitError
+		if errors.As(c.err, &exitErr) {
+			c.err = nil
+		}
+	})
+	return c.err
 }
 
 func (c *pipeConn) LocalAddr() net.Addr             { return pipeAddr{} }
@@ -63,19 +67,30 @@ func (pipeAddr) Network() string { return "tailcat" }
 func (pipeAddr) String() string  { return "tailcat" }
 
 func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, hostKeyCallback ssh.HostKeyCallback, auth []ssh.AuthMethod) (*ssh.Client, error) {
-	conn, err := dial(ctx)
+	handshakeCtx, cancel := context.WithTimeout(ctx, sshHandshakeTimeout)
+	defer cancel()
+	conn, err := dial(handshakeCtx)
 	if err != nil {
 		return nil, err
 	}
+	stopCancellation := context.AfterFunc(handshakeCtx, func() { conn.Close() })
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, remoteAddr, &ssh.ClientConfig{
 		User:            user,
 		HostKeyCallback: hostKeyCallback,
 		Auth:            auth,
 		Timeout:         sshHandshakeTimeout,
 	})
+	stoppedCancellation := stopCancellation()
 	if err != nil {
 		conn.Close()
+		if ctxErr := handshakeCtx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("SSH handshake: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("SSH handshake: %w", err)
+	}
+	if !stoppedCancellation || handshakeCtx.Err() != nil {
+		conn.Close()
+		return nil, fmt.Errorf("SSH handshake: %w", handshakeCtx.Err())
 	}
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }

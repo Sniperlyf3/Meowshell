@@ -12,7 +12,9 @@ set -euo pipefail
 
 REPO_DIR=$PWD
 SRC_URL=${SRC_URL:-https://github.com/tailscale/tailcat.git}
-SRC_REF=${SRC_REF:-main}
+# Keep release inputs reproducible. Override deliberately for upstream testing;
+# CI uses this same reviewed revision unless a workflow_dispatch input is given.
+SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < "$REPO_DIR/tailcat.ref")}
 SRC_DIR=${SRC_DIR:-$REPO_DIR/.tailcat-src}
 OUT_DIR=${OUT_DIR:-$REPO_DIR/dist}
 API=${ANDROID_API_LEVEL:-21}
@@ -28,6 +30,10 @@ git -C "$SRC_DIR" checkout --detach FETCH_HEAD
 # CI always starts from a fresh clone) would otherwise still carry the
 # patch applied below from the previous run, and re-applying it would fail.
 git -C "$SRC_DIR" reset --hard FETCH_HEAD
+# The Android netmon patch adds a source file, so reset alone is insufficient:
+# Git deliberately leaves that untracked file behind. SRC_DIR is a disposable
+# build checkout; clean it as well so repeated builds start from the same tree.
+git -C "$SRC_DIR" clean -fd
 
 # netmon.NewStatic() (used by pickregion.go's PickBestRegion, itself called
 # by ConnInfo.Expand whenever a key's RegionID is -1, the default for
@@ -50,7 +56,7 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/pickregion-nil-ifstate.patch"
 # file's comments for the detail. Added via `go get`, which computes
 # go.mod/go.sum correctly, rather than hand-patching them.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/android-netmon-interface-getter.patch"
-(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5)
+(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0)
 
 # tailcat's SSH server hardcodes /bin/sh and /usr/local/bin:/usr/bin:/bin
 # for the session shell and PATH, neither of which exist on Android --

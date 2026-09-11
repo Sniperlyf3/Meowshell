@@ -179,7 +179,7 @@ public sealed class MeowshellServerTests : IDisposable
         await using var server = await MeowshellServer.StartAsync(options);
 
         var lines = File.ReadAllLines(seen);
-        Assert.Equal(Path.Combine(options.BinaryDirectory, "libtailcat.so"), lines[0]);
+        Assert.Equal(Path.Combine(options.BinaryDirectory!, "libtailcat.so"), lines[0]);
         Assert.Equal(options.HomeDirectory, lines[1]);
     }
 

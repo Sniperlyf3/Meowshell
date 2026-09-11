@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       tailcat_ref:
-        description: tailcat git ref to build
-        default: main
+        description: tailcat git ref override (blank uses tailcat.ref)
+        default: ""
       android_api_level:
         description: minimum Android API level
         default: "21"
@@ -41,8 +41,9 @@ jobs:
       # checkout for the real cross-compiled build.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
-          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
@@ -55,6 +56,12 @@ jobs:
         run: |
           go vet ./...
           go test ./...
+
+      - name: Scan Go call paths for known vulnerabilities
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
       - name: Locate the NDK
         run: |
@@ -72,9 +79,14 @@ jobs:
           # tailcat's go.mod asks for a newer Go than setup-go's stable may
           # be; let the toolchain fetch it rather than pinning a version here.
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
           ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
         run: ./build.sh
+
+      - name: Scan the patched tailcat build input for known vulnerabilities
+        env:
+          GOTOOLCHAIN: auto
+        run: (cd .tailcat-src && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/tailcat)
 
       - name: Verify each binary targets the platform it claims
         run: ./verify-binaries.sh
@@ -119,8 +131,9 @@ jobs:
       - name: Build a host tailcat to act as the client
         env:
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
@@ -165,6 +178,9 @@ jobs:
     needs: build
     strategy:
       fail-fast: false
+      # Both architectures use the same public relay service. Running them one
+      # at a time avoids manufacturing a relay-load race in the test harness.
+      max-parallel: 1
       matrix:
         include:
           - runner: ubuntu-latest
@@ -234,6 +250,11 @@ jobs:
         # until the Pack step below has run once.
         run: mkdir -p nupkg
 
+      - name: Audit NuGet dependencies
+        run: |
+          dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
+          dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
+
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
@@ -242,7 +263,18 @@ jobs:
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-        run: dotnet test dotnet/Meowshell.sln -c Release --nologo
+        run: >-
+          dotnet test dotnet/Meowshell.sln -c Release --nologo
+          --logger "trx;LogFileName=meowshell-tests.trx"
+          --results-directory test-results
+
+      - name: Upload .NET test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dotnet-test-results
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.
@@ -376,8 +408,9 @@ jobs:
         # address -- by having a real client dial in and run commands.
         env:
           GOTOOLCHAIN: auto
-          SRC_REF: ${{ inputs.tailcat_ref || 'main' }}
+          SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD

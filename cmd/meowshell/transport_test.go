@@ -3,13 +3,60 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTailcatDialerContextDoesNotOwnReturnedConnection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cat subprocess fixture is Unix-only")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, err := tailcatDialer("cat", nil)(ctx)
+	if err != nil {
+		t.Fatalf("tailcatDialer: %v", err)
+	}
+	defer conn.Close()
+
+	// A dial context governs creation of a connection, not the lifetime of a
+	// successfully returned connection. dialSSHClient cancels the context it
+	// passes here as soon as the SSH handshake completes.
+	cancel()
+	const message = "still connected\n"
+	if _, err := io.WriteString(conn, message); err != nil {
+		t.Fatalf("write after dial context cancellation: %v", err)
+	}
+	buf := make([]byte, len(message))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read after dial context cancellation: %v", err)
+	}
+	if got := string(buf); got != message {
+		t.Fatalf("echo = %q, want %q", got, message)
+	}
+}
+
+func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	conn, err := tailcatDialer("command-must-not-be-started", nil)(ctx)
+	if conn != nil {
+		conn.Close()
+		t.Fatal("tailcatDialer returned a connection for a canceled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tailcatDialer error = %v, want context canceled", err)
+	}
+}
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
@@ -124,6 +171,90 @@ func TestDialHTTPConnectProxyRejectsNon200(t *testing.T) {
 	defer cancel()
 	if _, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22"); err == nil {
 		t.Fatal("dialHTTPConnectProxy against a 407 response did not error")
+	}
+}
+
+func TestDialHTTPConnectProxyHonorsCancellationAfterDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		close(accepted)
+		io.Copy(io.Discard, conn)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proxyURL := mustParseURL(t, "http://"+ln.Addr().String())
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22")
+		done <- err
+	}()
+	<-accepted
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("dialHTTPConnectProxy cancellation = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt the proxy response read")
+	}
+}
+
+func TestProxyDialerDoesNotExposeMalformedURLPassword(t *testing.T) {
+	const secret = "super-secret-password"
+	_, err := proxyDialer("http://user:"+secret+"%zz@example.com", "backend.example:22")
+	if err == nil {
+		t.Fatal("proxyDialer accepted a malformed URL")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("proxy parse error exposed the password: %v", err)
+	}
+}
+
+func TestDialHTTPSConnectProxyUsesTLS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	firstByte := make(chan byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var b [1]byte
+		if _, err := conn.Read(b[:]); err == nil {
+			firstByte <- b[0]
+		}
+	}()
+
+	proxyURL := mustParseURL(t, "https://"+ln.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22"); err == nil {
+		t.Fatal("dialHTTPConnectProxy against a non-TLS HTTPS proxy did not error")
+	}
+	select {
+	case got := <-firstByte:
+		if got != 0x16 { // TLS handshake record.
+			t.Fatalf("first HTTPS proxy byte = %#x, want TLS handshake %#x", got, byte(0x16))
+		}
+	case <-ctx.Done():
+		t.Fatal("HTTPS proxy did not receive a connection")
 	}
 }
 
