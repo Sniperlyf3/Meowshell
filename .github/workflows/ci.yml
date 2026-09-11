@@ -104,7 +104,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tailcat-binaries
           path: dist/
@@ -270,7 +270,7 @@ jobs:
 
       - name: Upload .NET test diagnostics
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dotnet-test-results
           path: test-results/
@@ -313,7 +313,7 @@ jobs:
         # its PackageReference resolves to the version just packed.
         run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nuget
           path: nupkg/*
@@ -362,7 +362,7 @@ jobs:
           cp "$apk" demo-apks/meowshell-demo.apk
           ls -la demo-apks
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: meowshell-demo-apks
           path: demo-apks/*
