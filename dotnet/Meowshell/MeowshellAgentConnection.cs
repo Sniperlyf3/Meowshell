@@ -41,7 +41,13 @@ public sealed record MeowshellKeyboardInteractivePrompt(string Name, string Inst
 
 /// <summary>A request to sign with a Keystore-backed key -- see <see cref="MeowshellAgentConfigureOptions.KeystoreKeyIds"/>.</summary>
 /// <param name="KeyId">Which key to sign with.</param>
-/// <param name="Algorithm">The signature algorithm requested.</param>
+/// <param name="Algorithm">
+/// The signature algorithm the SSH handshake negotiated -- "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa",
+/// "ecdsa-sha2-nistp256" or "ssh-ed25519" -- which for an RSA key is not the same as the key's type, and
+/// decides which digest to sign under (SHA-512, SHA-256 or SHA-1 respectively). Sign under this, not under
+/// a fixed algorithm: the mismatch surfaces only as a failed handshake. See the README for the exact bytes
+/// each algorithm expects back, including the DER-to-mpint conversion an ECDSA signature needs.
+/// </param>
 /// <param name="Data">The bytes to sign.</param>
 public sealed record MeowshellSignRequest(string KeyId, string Algorithm, byte[] Data);
 
@@ -84,7 +90,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <summary>A keyboard-interactive (OTP/PAM) challenge. May fire more than once per connection attempt. No handler cancels the auth attempt.</summary>
     public event Func<MeowshellKeyboardInteractivePrompt, CancellationToken, Task<string[]>>? KeyboardInteractiveRequested;
 
-    /// <summary>A Keystore-backed key needs to sign something. No handler refuses the signature.</summary>
+    /// <summary>A Keystore-backed key needs to sign something, under the algorithm in <see cref="MeowshellSignRequest.Algorithm"/>. No handler refuses the signature.</summary>
     public event Func<MeowshellSignRequest, CancellationToken, Task<byte[]>>? SignRequested;
 
     private MeowshellAgentConnection(Process process)

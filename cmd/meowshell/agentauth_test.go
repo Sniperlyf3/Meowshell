@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
+	"slices"
 	"testing"
 	"time"
 
@@ -151,5 +156,174 @@ func TestKeystoreSignerPropagatesRefusal(t *testing.T) {
 
 	if _, err := signer.Sign(nil, []byte("data")); err == nil {
 		t.Fatal("Sign with a cancelled response did not error")
+	}
+}
+
+func rsaTestPublicKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+func ecdsaTestPublicKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+func ed25519TestPublicKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sshPub
+}
+
+func TestKeystoreSignerAlgorithms(t *testing.T) {
+	tests := []struct {
+		name string
+		pub  ssh.PublicKey
+		want []string
+	}{
+		{"rsa offers SHA-2 before SHA-1", rsaTestPublicKey(t), []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}},
+		{"ecdsa offers only its own type", ecdsaTestPublicKey(t), []string{ssh.KeyAlgoECDSA256}},
+		{"ed25519 offers only its own type", ed25519TestPublicKey(t), []string{ssh.KeyAlgoED25519}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			signer := &keystoreSigner{keyID: "k", pub: tt.pub}
+			if got := signer.Algorithms(); !slices.Equal(got, tt.want) {
+				t.Errorf("Algorithms() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// answerSignPrompt reads one sign prompt and answers it with sig, reporting the
+// algorithm the signer asked for.
+func answerSignPrompt(t *testing.T, fromAgent io.Reader, toAgent io.Writer, sig []byte) <-chan string {
+	t.Helper()
+	algorithms := make(chan string, 1)
+	go func() {
+		f, err := readFrame(fromAgent)
+		if err != nil {
+			close(algorithms)
+			return
+		}
+		var msg controlMessage
+		if err := json.Unmarshal(f.Payload, &msg); err != nil {
+			close(algorithms)
+			return
+		}
+		algorithms <- msg.Algorithm
+		body, _ := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Signature: sig})
+		writeFrame(toAgent, frame{Type: frameTypeControl, ChannelID: 0, Payload: body})
+	}()
+	return algorithms
+}
+
+func TestKeystoreSignerForwardsNegotiatedAlgorithm(t *testing.T) {
+	session, fromAgent, toAgent := testAuthSession(t)
+	signer := &keystoreSigner{session: session, keyID: "keystore-rsa", pub: rsaTestPublicKey(t)}
+
+	asked := answerSignPrompt(t, fromAgent, toAgent, []byte("fake-signature-bytes"))
+
+	sig, err := signer.SignWithAlgorithm(nil, []byte("data to sign"), ssh.KeyAlgoRSASHA256)
+	if err != nil {
+		t.Fatalf("SignWithAlgorithm: %v", err)
+	}
+	if got := <-asked; got != ssh.KeyAlgoRSASHA256 {
+		t.Errorf("prompt algorithm = %q, want %q", got, ssh.KeyAlgoRSASHA256)
+	}
+	if sig.Format != ssh.KeyAlgoRSASHA256 {
+		t.Errorf("signature format = %q, want %q", sig.Format, ssh.KeyAlgoRSASHA256)
+	}
+}
+
+func TestKeystoreSignerEmptyAlgorithmUsesFirstPreference(t *testing.T) {
+	session, fromAgent, toAgent := testAuthSession(t)
+	signer := &keystoreSigner{session: session, keyID: "keystore-rsa", pub: rsaTestPublicKey(t)}
+
+	asked := answerSignPrompt(t, fromAgent, toAgent, []byte("fake-signature-bytes"))
+
+	sig, err := signer.SignWithAlgorithm(nil, []byte("data to sign"), "")
+	if err != nil {
+		t.Fatalf("SignWithAlgorithm: %v", err)
+	}
+	if got := <-asked; got != ssh.KeyAlgoRSASHA512 {
+		t.Errorf("prompt algorithm = %q, want the first preference %q", got, ssh.KeyAlgoRSASHA512)
+	}
+	if sig.Format != ssh.KeyAlgoRSASHA512 {
+		t.Errorf("signature format = %q, want %q", sig.Format, ssh.KeyAlgoRSASHA512)
+	}
+}
+
+func TestKeystoreSignerRejectsUnsupportedAlgorithmWithoutPrompting(t *testing.T) {
+	session, fromAgent, _ := testAuthSession(t)
+	signer := &keystoreSigner{session: session, keyID: "keystore-ecdsa", pub: ecdsaTestPublicKey(t)}
+
+	prompted := make(chan struct{})
+	go func() {
+		if _, err := readFrame(fromAgent); err == nil {
+			close(prompted)
+		}
+	}()
+
+	if _, err := signer.SignWithAlgorithm(nil, []byte("data"), ssh.KeyAlgoRSASHA512); err == nil {
+		t.Fatal("signing with an algorithm the key cannot produce did not error")
+	}
+
+	select {
+	case <-prompted:
+		t.Fatal("a sign prompt was sent for an algorithm the key cannot produce")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestKeystoreSignFailureIsReportedAsAnAuthFailure(t *testing.T) {
+	session, fromAgent, toAgent := testAuthSession(t)
+	signer := &keystoreSigner{session: session, keyID: "keystore-key-1", pub: ed25519TestPublicKey(t)}
+
+	go func() {
+		f, err := readFrame(fromAgent)
+		if err != nil {
+			return
+		}
+		var msg controlMessage
+		if err := json.Unmarshal(f.Payload, &msg); err != nil {
+			return
+		}
+		body, _ := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Cancelled: true})
+		writeFrame(toAgent, frame{Type: frameTypeControl, ChannelID: 0, Payload: body})
+	}()
+
+	_, err := signer.Sign(nil, []byte("data"))
+	if err == nil {
+		t.Fatal("Sign with a cancelled response did not error")
+	}
+	// The handshake wraps whatever a signer returns, so the classification has
+	// to survive wrapping the way it reaches the agent's error reporting.
+	wrapped := fmt.Errorf("ssh: handshake failed: %w", err)
+	if got := classifyConnectError(wrapped); got != errAuthFailed {
+		t.Errorf("classifyConnectError(%v) = %q, want %q", wrapped, got, errAuthFailed)
 	}
 }
