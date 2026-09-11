@@ -210,6 +210,7 @@ type agentChannel struct {
 	cancel         context.CancelFunc
 	isUpload       bool
 	uploadPath     string
+	uploadTempPath string
 	uploadPreserve bool
 	uploadMode     uint32
 	uploadModTime  int64
@@ -540,7 +541,7 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 	case "resize":
 		a.resize(channelID, msg)
 	case "close_channel":
-		a.closeChannel(channelID)
+		a.closeChannel(channelID, msg)
 	case "sftp_op":
 		a.dispatchSFTPOp(msg)
 	default:
@@ -680,6 +681,9 @@ func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err 
 				ch.cancel()
 			}
 			ch.sftpFile.Close()
+			if ch.isUpload {
+				a.cleanupUploadTemp(ch)
+			}
 		}
 	})
 }
@@ -888,7 +892,7 @@ func (a *agentSession) resize(channelID uint32, msg controlMessage) {
 	}
 }
 
-func (a *agentSession) closeChannel(channelID uint32) {
+func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 	ch := a.removeChannel(channelID)
 	if ch == nil {
 		return
@@ -897,6 +901,16 @@ func (a *agentSession) closeChannel(channelID uint32) {
 	case ch.session != nil:
 		stopChannelWriter(ch)
 		ch.session.Close()
+	case ch.sftpFile != nil && ch.isUpload && msg.Cancelled:
+		// Cancellation is intentionally different from normal EOF: never
+		// commit a partially uploaded staging file just because the caller
+		// closed the channel while unwinding a cancelled/failed UploadAsync.
+		stopChannelWriter(ch)
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+		ch.sftpFile.Close()
+		a.cleanupUploadTemp(ch)
 	case ch.sftpFile != nil && ch.isUpload:
 		// All preceding data frames have already been enqueued by the sole
 		// frame reader. Drain them without blocking that reader, then finalize.
