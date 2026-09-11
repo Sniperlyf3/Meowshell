@@ -314,10 +314,6 @@ jobs:
           path: test-results/
           if-no-files-found: warn
 
-      - name: Stop the local DERP relay
-        if: always()
-        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
-
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.
         run: dotnet workload install android
@@ -354,6 +350,13 @@ jobs:
         # the pack step above. BuildNumber must match the pack step's, so
         # its PackageReference resolves to the version just packed.
         run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
+
+      - name: Stop the local DERP relay
+        # Meowshell.PackageTests above also runs real-binary E2E tests, so
+        # this has to wait until every step that could need the relay is
+        # done, not just the "Test" step above it.
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
