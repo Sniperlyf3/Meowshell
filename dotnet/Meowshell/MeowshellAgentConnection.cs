@@ -343,21 +343,41 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var sink = new AgentDownloadSink();
         var id = await OpenChannelAsync(new AgentMessage { Msg = "open_channel", Kind = "sftp_download", Path = remotePath },
             (chId, opened) => { sink.TotalBytes = opened.Size; return (chId, (IAgentChannelSink)sink); }, cancellationToken).ConfigureAwait(false);
+
+        var finalPath = Path.GetFullPath(localPath);
+        var tempPath = finalPath + ".meowshell-download-" + Guid.NewGuid().ToString("N");
+        var committed = false;
         try
         {
             var total = sink.TotalBytes;
-            await using var file = File.Create(localPath);
-            var stream = sink.Content;
-            var buffer = new byte[64 * 1024];
-            long done = 0;
-            int n;
-            while ((n = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            await using (var file = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
             {
-                await file.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
-                done += n;
-                progress?.Report((done, total));
+                var stream = sink.Content;
+                var buffer = new byte[64 * 1024];
+                long done = 0;
+                int n;
+                while ((n = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    await file.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
+                    done += n;
+                    progress?.Report((done, total));
+                }
+                await sink.Completed.ConfigureAwait(false);
+                await file.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
-            await sink.Completed.ConfigureAwait(false);
+
+            if (preserve)
+            {
+                var stat = await StatAsync(remotePath, cancellationToken: cancellationToken).ConfigureAwait(false);
+                File.SetLastWriteTimeUtc(tempPath, stat.ModifiedAt.UtcDateTime);
+                if (!OperatingSystem.IsWindows())
+                {
+                    try { File.SetUnixFileMode(tempPath, (UnixFileMode)(stat.Mode & 0x1FF)); } catch (PlatformNotSupportedException) { }
+                }
+            }
+
+            File.Move(tempPath, finalPath, overwrite: true);
+            committed = true;
         }
         finally
         {
@@ -369,14 +389,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             // must actually cancel the transfer, not just stop consuming it.
             try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
             _channels.TryRemove(id, out _);
-        }
-        if (preserve)
-        {
-            var stat = await StatAsync(remotePath, cancellationToken: cancellationToken).ConfigureAwait(false);
-            File.SetLastWriteTimeUtc(localPath, stat.ModifiedAt.UtcDateTime);
-            if (!OperatingSystem.IsWindows())
+            if (!committed)
             {
-                try { File.SetUnixFileMode(localPath, (UnixFileMode)(stat.Mode & 0x1FF)); } catch (PlatformNotSupportedException) { }
+                try { File.Delete(tempPath); } catch { }
             }
         }
     }
