@@ -178,8 +178,10 @@ jobs:
     needs: build
     strategy:
       fail-fast: false
-      # Both architectures use the same public relay service. Running them one
-      # at a time avoids manufacturing a relay-load race in the test harness.
+      # Each matrix entry now starts its own local relay (see
+      # ../e2e/README.md) instead of sharing the public one, so this no
+      # longer guards against a shared-relay load race -- left at 1 as a
+      # deliberate choice to keep, not because it's still load-bearing.
       max-parallel: 1
       matrix:
         include:

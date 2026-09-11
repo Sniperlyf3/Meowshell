@@ -114,6 +114,14 @@ the three listeners, `GracePeriod`) are declared once, on `TailcatOptions`
 and `TailcatListenerOptions`, and inherited by all four options types below
 — not duplicated per type.
 
+Leaving `DerpMapUrl` unset doesn't just mean "tailcat's own default" in the
+literal sense of always resolving the same way: it means the flag is
+omitted from the command line entirely, so tailcat's own fallback applies —
+including its `TAILCAT_DERPMAP_URL` environment variable. Set that once in
+the host process's environment to point every `Meowshell`/`TailcatClient`
+call at a self-hosted relay without touching `DerpMapUrl` anywhere; this
+repo's own CI does exactly that (see [`e2e/README.md`](../e2e/README.md)).
+
 **`MeowshellOptions`** (for `MeowshellServer`) — `HomeDirectory` and
 `WorkDirectory` are required; everything else has a default.
 
