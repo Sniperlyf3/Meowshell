@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -104,7 +105,14 @@ func proxyAuthFromURL(u *url.URL) *proxy.Auth {
 
 func dialHTTPConnectProxy(ctx context.Context, proxyURL *url.URL, hostPort string) (net.Conn, error) {
 	d := net.Dialer{Timeout: tcpDialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
+	var conn net.Conn
+	var err error
+	if proxyURL.Scheme == "https" {
+		tlsDialer := tls.Dialer{NetDialer: &d}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", proxyURL.Host)
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", proxyURL.Host)
+	}
 	if err != nil {
 		return nil, err
 	}

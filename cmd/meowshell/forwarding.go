@@ -52,8 +52,15 @@ func listenUnix(path string) (net.Listener, error) {
 	if path == "" {
 		return nil, fmt.Errorf("a unix listen_network needs a non-empty socket path")
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("removing stale socket %s: %w", path, err)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("refusing to remove non-socket path %s", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("removing stale socket %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("checking stale socket %s: %w", path, err)
 	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {

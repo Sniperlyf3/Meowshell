@@ -127,6 +127,42 @@ func TestDialHTTPConnectProxyRejectsNon200(t *testing.T) {
 	}
 }
 
+func TestDialHTTPSConnectProxyUsesTLS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	firstByte := make(chan byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var b [1]byte
+		if _, err := conn.Read(b[:]); err == nil {
+			firstByte <- b[0]
+		}
+	}()
+
+	proxyURL := mustParseURL(t, "https://"+ln.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := dialHTTPConnectProxy(ctx, proxyURL, "backend.example:22"); err == nil {
+		t.Fatal("dialHTTPConnectProxy against a non-TLS HTTPS proxy did not error")
+	}
+	select {
+	case got := <-firstByte:
+		if got != 0x16 { // TLS handshake record.
+			t.Fatalf("first HTTPS proxy byte = %#x, want TLS handshake %#x", got, byte(0x16))
+		}
+	case <-ctx.Done():
+		t.Fatal("HTTPS proxy did not receive a connection")
+	}
+}
+
 func readFull(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {

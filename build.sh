@@ -12,7 +12,9 @@ set -euo pipefail
 
 REPO_DIR=$PWD
 SRC_URL=${SRC_URL:-https://github.com/tailscale/tailcat.git}
-SRC_REF=${SRC_REF:-main}
+# Keep release inputs reproducible. Override deliberately for upstream testing;
+# CI uses this same reviewed revision unless a workflow_dispatch input is given.
+SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < "$REPO_DIR/tailcat.ref")}
 SRC_DIR=${SRC_DIR:-$REPO_DIR/.tailcat-src}
 OUT_DIR=${OUT_DIR:-$REPO_DIR/dist}
 API=${ANDROID_API_LEVEL:-21}
