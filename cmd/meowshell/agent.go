@@ -183,9 +183,19 @@ type connectOptions struct {
 	auth           []ssh.AuthMethod
 }
 
+const agentChannelWriteQueueDepth = 32
+
 type agentChannel struct {
 	session *ssh.Session
 	stdin   io.WriteCloser
+
+	// writeQueue decouples the single protocol frame reader from potentially
+	// blocking remote writes. A slow SSH/SFTP peer must never be able to stall
+	// prompt responses, close requests, or unrelated channels. The queue is
+	// deliberately bounded; if a producer outruns the remote peer, that channel
+	// is failed instead of applying head-of-line blocking to the whole agent.
+	writeQueue chan []byte
+	writeOnce  sync.Once
 
 	sftpFile       *sftp.File
 	ctx            context.Context
@@ -543,31 +553,70 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 
 func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	ch := a.channel(channelID)
-	if ch == nil {
+	if ch == nil || ch.writeQueue == nil {
 		return
 	}
-	switch {
-	case ch.stdin != nil:
-		// A failure here isn't reported as a channel error: the session's
-		// own exit (session.Wait(), in waitChannel) is what determines the
-		// channel's real outcome, and normally arrives on its own shortly
-		// after stdin breaks. Logged rather than silently dropped so it's
-		// at least visible in diagnostics if the exit itself is delayed or
-		// doesn't explain what happened.
-		if _, err := ch.stdin.Write(payload); err != nil {
-			fmt.Fprintf(os.Stderr, "meowshell: writing to channel %d's remote stdin: %v\n", channelID, err)
-		}
-	case ch.sftpFile != nil && ch.isUpload:
-		if ch.uploadErr != nil {
-			// Already failed: don't keep writing to (or erroring about) a
-			// file finalizeUpload is going to report as failed regardless.
-			return
-		}
-		if _, err := ch.sftpFile.Write(payload); err != nil {
-			ch.uploadErr = err
-			a.writeError(channelID, classifySFTPError(err), err)
-		}
+
+	// readFrame owns payload only until this call returns. Copy before handing
+	// it to a channel worker, then enqueue without blocking the sole frame
+	// reader. If this bounded queue is full, fail only this channel rather than
+	// allowing one non-reading remote peer to freeze every multiplexed channel.
+	p := append([]byte(nil), payload...)
+	select {
+	case ch.writeQueue <- p:
+	default:
+		err := fmt.Errorf("channel %d remote input is not being consumed fast enough", channelID)
+		a.writeError(channelID, errUnknown, err)
+		a.failChannelWrite(channelID, ch, err)
 	}
+}
+
+func (a *agentSession) startChannelWriter(channelID uint32, ch *agentChannel) {
+	ch.writeQueue = make(chan []byte, agentChannelWriteQueueDepth)
+	go func() {
+		for payload := range ch.writeQueue {
+			var err error
+			switch {
+			case ch.stdin != nil:
+				_, err = ch.stdin.Write(payload)
+			case ch.sftpFile != nil && ch.isUpload:
+				_, err = ch.sftpFile.Write(payload)
+			}
+			if err != nil {
+				a.writeError(channelID, classifyChannelWriteError(ch, err), err)
+				a.failChannelWrite(channelID, ch, err)
+				return
+			}
+		}
+	}()
+}
+
+func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
+	if ch.sftpFile != nil {
+		return classifySFTPError(err)
+	}
+	return errConnectionLost
+}
+
+func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err error) {
+	ch.writeOnce.Do(func() {
+		if ch.sftpFile != nil && ch.isUpload {
+			ch.uploadErr = err
+		}
+		// Closing the underlying operation is what releases a worker already
+		// blocked inside Write. removeChannel is intentionally idempotent here:
+		// close_channel or the normal waiter may have won the race.
+		a.removeChannel(channelID)
+		switch {
+		case ch.session != nil:
+			ch.session.Close()
+		case ch.sftpFile != nil:
+			if ch.cancel != nil {
+				ch.cancel()
+			}
+			ch.sftpFile.Close()
+		}
+	})
 }
 
 func (a *agentSession) channel(id uint32) *agentChannel {
@@ -648,6 +697,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	a.chansMu.Lock()
 	a.chans[id] = ch
 	a.chansMu.Unlock()
+	a.startChannelWriter(id, ch)
 
 	// RequestAgentForwarding must happen before Start/Shell (the remote
 	// shell only picks up forwarding if it's requested before the shell
