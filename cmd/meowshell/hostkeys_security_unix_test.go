@@ -3,10 +3,13 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestTCPHostKeyCallbackRejectsInsecureKnownHostsDirectory(t *testing.T) {
