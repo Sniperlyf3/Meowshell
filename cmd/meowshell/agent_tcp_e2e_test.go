@@ -77,6 +77,116 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 	})
 }
 
+// TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError is a
+// regression test: openShellChannel used to send channel_opened before
+// calling session.Start/session.Shell, so a failure there produced a
+// misleading channel_opened immediately followed by an error -- instead of
+// a single, correctly-correlated open failure the caller never has to
+// unwind a "successfully opened" channel for. A server that rejects the
+// exec request lets the test trigger that failure deterministically.
+func TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	addr, stop := startTestSSHServerRejectingSessionStart(t)
+	defer stop()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+	defer stopAgent(t, cmd, stdin)
+
+	f := mustReadFrame(t, out)
+	msg := decodeControl(t, f)
+	if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+		t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+	}
+	send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Accept: true})
+	expectConnected(t, out)
+
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"anything"}, RequestID: "req1"})
+
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("open_channel against a server that rejects the exec request = %+v, want a single \"error\" (not a channel_opened)", msg)
+	}
+	if msg.RequestID != "req1" {
+		t.Errorf("error RequestID = %q, want %q -- the open failure must correlate to the open_channel request, not arrive as a channel_opened followed by a separate error", msg.RequestID, "req1")
+	}
+}
+
+// startTestSSHServerRejectingSessionStart accepts session channels but
+// always rejects the "exec"/"shell" request that session.Start/session.Shell
+// send to actually start the remote command -- deterministically forcing
+// openShellChannel's post-open failure path without needing a flaky timing
+// trick.
+func startTestSSHServerRejectingSessionStart(t *testing.T) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, config)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					if newCh.ChannelType() != "session" {
+						newCh.Reject(ssh.UnknownChannelType, "unsupported")
+						continue
+					}
+					ch, requests, err := newCh.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						defer ch.Close()
+						for req := range requests {
+							switch req.Type {
+							case "exec", "shell":
+								if req.WantReply {
+									req.Reply(false, nil)
+								}
+								return
+							default:
+								if req.WantReply {
+									req.Reply(true, nil)
+								}
+							}
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	stop = func() { ln.Close() }
+	t.Cleanup(stop)
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "127.0.0.1:" + port, stop
+}
+
 func startAgent(t *testing.T, meowshellBin, knownHosts, dest string) (*exec.Cmd, *os.File, *bufio.Reader) {
 	t.Helper()
 	return startAgentConfigured(t, meowshellBin, knownHosts, dest, controlMessage{Msg: "configure"})

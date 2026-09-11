@@ -645,16 +645,16 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	a.chans[id] = ch
 	a.chansMu.Unlock()
 
-	if err := a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID}); err != nil {
-		a.removeChannel(id)
-		session.Close()
-		return
-	}
-
+	// RequestAgentForwarding must happen before Start/Shell (the remote
+	// shell only picks up forwarding if it's requested before the shell
+	// process starts), but reporting its failure is deferred until after
+	// channel_opened below -- it's non-fatal to the channel itself (the
+	// shell/exec still works, just without forwarding), and channel_opened
+	// no longer precedes Start/Shell, so there's no longer an already-open
+	// channel to report it on until that's succeeded.
+	var forwardingErr error
 	if a.agentForwardingReady {
-		if err := agent.RequestAgentForwarding(session); err != nil {
-			a.writeError(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", err))
-		}
+		forwardingErr = agent.RequestAgentForwarding(session)
 	}
 
 	switch msg.Kind {
@@ -665,10 +665,27 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		err = session.Shell()
 	}
 	if err != nil {
+		// Reported via writeOpenError (correlated by RequestID, not a
+		// channel ID), not writeError: channel_opened is deliberately sent
+		// only once Start/Shell has actually succeeded, so a caller never
+		// sees a channel reported as open that immediately turns out not to
+		// be -- a channel_opened-then-error sequence the caller would have
+		// to specifically account for, versus a single, already-handled
+		// open failure.
 		a.removeChannel(id)
 		session.Close()
-		a.writeError(id, errUnknown, fmt.Errorf("starting session: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("starting session: %w", err))
 		return
+	}
+
+	if err := a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID}); err != nil {
+		a.removeChannel(id)
+		session.Close()
+		return
+	}
+
+	if forwardingErr != nil {
+		a.writeError(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", forwardingErr))
 	}
 
 	var wg sync.WaitGroup
