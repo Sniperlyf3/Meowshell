@@ -58,7 +58,25 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 }
 
 func tailcatKeyFromName(name string) (key.NodePrivate, error) {
-	if name == "" || name == "new" {
+	if name == "" {
+		// Mirrors tailcat's own clientKey(): an empty --key means "use the
+		// saved client-default key if one exists, else a fresh ephemeral
+		// one" -- not unconditionally a fresh ephemeral key. Diverging here
+		// meant exit-node forwarding's in-process tailcat.Client could end
+		// up using a different identity than the SSH transport subprocess
+		// (which, unlike this function, already calls into tailcat's own
+		// clientKey()), silently failing authorization against a
+		// destination's --allow list that only names the saved
+		// client-default key even though the SSH connection itself worked.
+		confDir, err := os.UserConfigDir()
+		if err != nil {
+			return key.NodePrivate{}, err
+		}
+		if _, err := os.Stat(filepath.Join(confDir, "tailcat", "keys", "client-default.private.json")); err != nil {
+			return key.NewNode(), nil
+		}
+		name = "client-default"
+	} else if name == "new" {
 		return key.NewNode(), nil
 	}
 	path := name
