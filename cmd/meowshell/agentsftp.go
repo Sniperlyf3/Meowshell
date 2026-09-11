@@ -132,6 +132,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 		a.chansMu.Lock()
 		a.chans[id] = ch
 		a.chansMu.Unlock()
+		a.startChannelWriter(id, ch)
 		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID})
 
 	case "sftp_download":
