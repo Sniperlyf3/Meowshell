@@ -30,14 +30,23 @@ func (e *hostKeyChangedError) Unwrap() error { return e.err }
 type hostKeyPrompter func(hostname string, remote net.Addr, key ssh.PublicKey) (accept bool, err error)
 
 func tcpHostKeyCallback(knownHostsPath string, prompt hostKeyPrompter) (ssh.HostKeyCallback, error) {
-	if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0o700); err != nil {
+	dir := filepath.Dir(knownHostsPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating known_hosts directory: %w", err)
+	}
+	if err := validateKnownHostsDir(dir); err != nil {
+		return nil, err
 	}
 	f, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("creating known_hosts file: %w", err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("closing known_hosts file: %w", err)
+	}
+	if err := validateKnownHostsFile(knownHostsPath); err != nil {
+		return nil, err
+	}
 
 	verify, err := knownhosts.New(knownHostsPath)
 	if err != nil {
