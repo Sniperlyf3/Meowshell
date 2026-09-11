@@ -231,8 +231,10 @@ type agentSession struct {
 	chans   map[uint32]*agentChannel
 	nextID  atomic.Uint32
 
-	sftpMu     sync.Mutex
-	sftpClient *sftp.Client
+	sftpMu        sync.Mutex
+	sftpClient    *sftp.Client
+	sftpOpSlots   chan struct{}
+	sftpOpHandler func(controlMessage)
 
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
@@ -253,8 +255,9 @@ func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 	return &agentSession{
 		in:      in,
 		out:     out,
-		chans:   make(map[uint32]*agentChannel),
-		prompts: make(map[string]chan controlMessage),
+		chans:       make(map[uint32]*agentChannel),
+		prompts:     make(map[string]chan controlMessage),
+		sftpOpSlots: make(chan struct{}, 8),
 	}
 }
 
@@ -533,7 +536,7 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 	case "close_channel":
 		a.closeChannel(channelID)
 	case "sftp_op":
-		a.sftpOp(msg)
+		a.dispatchSFTPOp(msg)
 	default:
 		a.writeError(channelID, errProtocolError, fmt.Errorf("unknown message %q", msg.Msg))
 	}
@@ -551,6 +554,27 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 		case ch <- msg:
 		default:
 		}
+	}
+}
+
+func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
+	select {
+	case a.sftpOpSlots <- struct{}{}:
+		go func() {
+			defer func() { <-a.sftpOpSlots }()
+			if a.sftpOpHandler != nil {
+				a.sftpOpHandler(msg)
+				return
+			}
+			a.sftpOp(msg)
+		}()
+	default:
+		a.writeControl(0, controlMessage{
+			Msg:       "error",
+			RequestID: msg.RequestID,
+			Code:      errUnknown,
+			Message:   "too many concurrent SFTP operations",
+		})
 	}
 }
 
