@@ -670,6 +670,27 @@ func (a *agentSession) channel(id uint32) *agentChannel {
 	return a.chans[id]
 }
 
+func (a *agentSession) registerChannel(ch *agentChannel) (uint32, error) {
+	a.chansMu.Lock()
+	defer a.chansMu.Unlock()
+
+	// ID 0 is reserved for connection-level control messages. Skip it on
+	// uint32 wrap and never overwrite a still-active channel if a very
+	// long-lived agent eventually cycles through the ID space.
+	for attempts := uint64(0); attempts < uint64(^uint32(0)); attempts++ {
+		id := a.nextID.Add(1)
+		if id == 0 {
+			continue
+		}
+		if _, exists := a.chans[id]; exists {
+			continue
+		}
+		a.chans[id] = ch
+		return id, nil
+	}
+	return 0, fmt.Errorf("no free channel IDs")
+}
+
 func (a *agentSession) openChannel(msg controlMessage) {
 	switch msg.Kind {
 	case "sftp_upload", "sftp_download":
@@ -737,11 +758,13 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		return
 	}
 
-	id := a.nextID.Add(1)
 	ch := &agentChannel{session: session, stdin: stdin}
-	a.chansMu.Lock()
-	a.chans[id] = ch
-	a.chansMu.Unlock()
+	id, err := a.registerChannel(ch)
+	if err != nil {
+		session.Close()
+		a.writeOpenError(msg.RequestID, errUnknown, err)
+		return
+	}
 	a.startChannelWriter(id, ch)
 
 	// RequestAgentForwarding must happen before Start/Shell (the remote
