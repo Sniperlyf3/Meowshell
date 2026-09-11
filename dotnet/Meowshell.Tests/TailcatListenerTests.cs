@@ -53,4 +53,37 @@ public sealed class TailcatListenerTests : IDisposable
 
         await listener.DisposeAsync();
     }
+
+    // Regression test for the old async-void Process.Exited callback. The
+    // framework event must only kick off a tracked Task; once Completed has
+    // settled, that observer is itself awaitable and quiescent rather than an
+    // unobservable async-void continuation that could still be running.
+    [Fact]
+    public async Task UnexpectedExitIsObservedByTrackedTask()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var script = Path.Combine(_dir, "exit-now.sh");
+        await File.WriteAllTextAsync(script, "#!/bin/sh\nexit 7\n");
+        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var psi = new ProcessStartInfo(script)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+        };
+        var process = new Process { StartInfo = psi };
+        var listener = TailcatListener.Start(process, TimeSpan.FromSeconds(5), onLog: null);
+
+        await Assert.ThrowsAsync<TailcatException>(
+            () => listener.Completed.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        await listener.ExitObserverForTests.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(listener.ExitObserverForTests.IsCompletedSuccessfully);
+
+        await listener.DisposeAsync();
+    }
+
 }
