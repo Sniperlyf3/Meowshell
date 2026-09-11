@@ -1,6 +1,5 @@
 diff --git a/cmd/tailcat/parentjob_other.go b/cmd/tailcat/parentjob_other.go
 new file mode 100644
-index 0000000..7a9a8c1
 --- /dev/null
 +++ b/cmd/tailcat/parentjob_other.go
 @@ -0,0 +1,5 @@
@@ -11,10 +10,9 @@ index 0000000..7a9a8c1
 +func joinParentJobFromEnv() error { return nil }
 diff --git a/cmd/tailcat/parentjob_windows.go b/cmd/tailcat/parentjob_windows.go
 new file mode 100644
-index 0000000..c4b6dc4
 --- /dev/null
 +++ b/cmd/tailcat/parentjob_windows.go
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +//go:build windows
 +
 +package main
@@ -63,10 +61,10 @@ index 0000000..c4b6dc4
 +	return nil
 +}
 diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
-index 0000000..0000000 100644
 --- a/cmd/tailcat/tailcat.go
 +++ b/cmd/tailcat/tailcat.go
-@@ -645,6 +645,10 @@ func main() {
+@@ -645,2 +645,6 @@
+ func main() {
 +	if err := joinParentJobFromEnv(); err != nil {
 +		log.Fatalf("tailcat: %v", err)
 +	}
