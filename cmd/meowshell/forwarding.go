@@ -92,7 +92,12 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 		return
 	}
 	client := a.forwardClient()
-	id := a.registerForward(ln)
+	id, err := a.registerForward(ln)
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errUnknown, err)
+		return
+	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
@@ -115,7 +120,12 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
 		return
 	}
-	id := a.registerForward(ln)
+	id, err := a.registerForward(ln)
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errUnknown, err)
+		return
+	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
@@ -138,7 +148,12 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 		return
 	}
 	client := a.forwardClient()
-	id := a.registerForward(ln)
+	id, err := a.registerForward(ln)
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errUnknown, err)
+		return
+	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
@@ -183,12 +198,8 @@ func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network,
 	}
 }
 
-func (a *agentSession) registerForward(ln net.Listener) uint32 {
-	id := a.nextID.Add(1)
-	a.chansMu.Lock()
-	a.chans[id] = &agentChannel{listener: ln}
-	a.chansMu.Unlock()
-	return id
+func (a *agentSession) registerForward(ln net.Listener) (uint32, error) {
+	return a.registerChannel(&agentChannel{listener: ln})
 }
 
 // halfCloser is implemented by *net.TCPConn and *net.UnixConn, the two
