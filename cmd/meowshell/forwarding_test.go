@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestListenUnixRefusesToRemoveNonSocket(t *testing.T) {
@@ -25,5 +30,186 @@ func TestListenUnixRefusesToRemoveNonSocket(t *testing.T) {
 	}
 	if string(got) != "keep me" {
 		t.Fatalf("regular file changed to %q", got)
+	}
+}
+
+// TestProxyForwardedConnPropagatesHalfClose is a regression test: a client
+// that finishes sending and half-closes its write side (not the whole
+// connection) must still be able to receive a response the backend sends
+// afterward. proxyForwardedConn used to tear down both connections outright
+// the instant either direction's io.Copy saw EOF -- correct for a client
+// that hangs up entirely, wrong for one that legitimately calls
+// CloseWrite() and then waits for a reply.
+func TestProxyForwardedConnPropagatesHalfClose(t *testing.T) {
+	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backendLn.Close()
+
+	const request = "request-from-client"
+	// Large enough that a connection torn down early would visibly truncate
+	// it, rather than the test getting lucky with a response that fits in
+	// one TCP segment either way.
+	response := bytes.Repeat([]byte("response-data-"), 8192)
+
+	backendDone := make(chan error, 1)
+	go func() {
+		conn, err := backendLn.Accept()
+		if err != nil {
+			backendDone <- err
+			return
+		}
+		defer conn.Close()
+		// io.ReadAll blocks until EOF -- the client's CloseWrite, not the
+		// whole connection closing -- then this can still write back.
+		got, err := io.ReadAll(conn)
+		if err != nil {
+			backendDone <- err
+			return
+		}
+		if string(got) != request {
+			backendDone <- fmt.Errorf("backend received %q, want %q", got, request)
+			return
+		}
+		_, err = conn.Write(response)
+		backendDone <- err
+	}()
+
+	forwardLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forwardLn.Close()
+	go func() {
+		conn, err := forwardLn.Accept()
+		if err != nil {
+			return
+		}
+		proxyForwardedConn(conn, func() (net.Conn, error) {
+			return net.Dial("tcp", backendLn.Addr().String())
+		})
+	}()
+
+	client, err := net.Dial("tcp", forwardLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("reading the response: %v", err)
+	}
+	if !bytes.Equal(got, response) {
+		t.Fatalf("client received %d bytes, want the full %d-byte response "+
+			"(half-close was not propagated -- the connection was torn down early)", len(got), len(response))
+	}
+
+	select {
+	case err := <-backendDone:
+		if err != nil {
+			t.Fatalf("backend goroutine: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend goroutine did not finish")
+	}
+}
+
+// fakeSOCKSDialer never actually dials -- the SOCKS5 tests below exercise
+// only the handshake, which fails (or times out) before any CONNECT target
+// would be dialed.
+type fakeSOCKSDialer struct{}
+
+func (fakeSOCKSDialer) Dial(network, addr string) (net.Conn, error) {
+	return nil, fmt.Errorf("fakeSOCKSDialer: unexpected dial to %s", addr)
+}
+
+// TestServeSOCKS5RejectsNoAuthWhenNotOffered is a regression test for RFC
+// 1928 section 3.1: the server's method-selection reply must name a method
+// the client actually offered. serveSOCKS5 used to select "no authentication
+// required" (0x00) whenever the listener itself required no auth,
+// regardless of whether the client's greeting ever listed that method.
+func TestServeSOCKS5RejectsNoAuthWhenNotOffered(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "") // no auth required
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Greeting offering only username/password (0x02) -- never 0x00 ("no
+	// authentication required").
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[0] != 0x05 || reply[1] != 0xFF {
+		t.Fatalf("method-selection reply = % x, want 05 ff (no acceptable methods) -- "+
+			"the server must never select a method the client didn't offer", reply)
+	}
+}
+
+// TestServeSOCKS5EnforcesHandshakeDeadline is a regression test: a client
+// that opens the connection and then sends nothing must not hold it (and a
+// goroutine) open indefinitely -- serveSOCKS5 used to perform every
+// handshake read with no deadline at all, which only stayed a local
+// resource concern for as long as these listeners were loopback-only.
+func TestServeSOCKS5EnforcesHandshakeDeadline(t *testing.T) {
+	old := socksHandshakeTimeout
+	socksHandshakeTimeout = 200 * time.Millisecond
+	defer func() { socksHandshakeTimeout = old }()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "")
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Send nothing. The server must give up and close its side well within
+	// a couple of handshake-timeout windows, not hang forever.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if n, err := conn.Read(buf); err != io.EOF {
+		t.Fatalf("read = (%d, %v), want (0, io.EOF): the server should have closed its side after the handshake deadline", n, err)
 	}
 }

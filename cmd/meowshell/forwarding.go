@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
+	"time"
 )
 
 func (a *agentSession) openForwardChannel(msg controlMessage) {
@@ -18,7 +20,7 @@ func (a *agentSession) openForwardChannel(msg controlMessage) {
 	case "forward_socks":
 		a.openSOCKSForward(msg)
 	default:
-		a.writeError(0, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
+		a.writeOpenError(msg.RequestID, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
 	}
 }
 
@@ -76,12 +78,12 @@ func listenUnix(path string) (net.Listener, error) {
 func (a *agentSession) openLocalForward(msg controlMessage) {
 	ln, err := resolveLocalListener(msg)
 	if err != nil {
-		a.writeError(0, errUnknown, err)
+		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
 	client := a.forwardClient()
 	id := a.registerForward(ln)
-	a.writeControl(id, controlMessage{Msg: "channel_opened", BoundAddr: ln.Addr().String()})
+	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
 		for {
@@ -100,11 +102,11 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 	client := a.client()
 	ln, err := client.Listen("tcp", msg.ListenAddr)
 	if err != nil {
-		a.writeError(0, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
 		return
 	}
 	id := a.registerForward(ln)
-	a.writeControl(id, controlMessage{Msg: "channel_opened", BoundAddr: ln.Addr().String()})
+	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
 		for {
@@ -122,12 +124,12 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 func (a *agentSession) openSOCKSForward(msg controlMessage) {
 	ln, err := resolveLocalListener(msg)
 	if err != nil {
-		a.writeError(0, errUnknown, err)
+		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
 	client := a.forwardClient()
 	id := a.registerForward(ln)
-	a.writeControl(id, controlMessage{Msg: "channel_opened", BoundAddr: ln.Addr().String()})
+	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	go func() {
 		for {
@@ -148,6 +150,17 @@ func (a *agentSession) registerForward(ln net.Listener) uint32 {
 	return id
 }
 
+// halfCloser is implemented by *net.TCPConn and *net.UnixConn, the two
+// concrete connection types actually passed as conn/remote here (accepted
+// TCP/Unix forwards, and ssh.Client.Dial's own net.Conn). Where it's
+// available, closing only the write half on EOF lets a client that has
+// finished sending (an explicit CloseWrite, not just going idle) still
+// receive a response the other side hasn't finished sending yet, instead of
+// the whole connection dying the instant one direction goes quiet.
+type halfCloser interface {
+	CloseWrite() error
+}
+
 func proxyForwardedConn(conn io.ReadWriteCloser, dial func() (net.Conn, error)) {
 	defer conn.Close()
 	remote, err := dial()
@@ -156,11 +169,40 @@ func proxyForwardedConn(conn io.ReadWriteCloser, dial func() (net.Conn, error)) 
 	}
 	defer remote.Close()
 
-	done := make(chan struct{}, 2)
-	go func() { io.Copy(remote, conn); done <- struct{}{} }()
-	go func() { io.Copy(conn, remote); done <- struct{}{} }()
-	<-done
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(remote, conn)
+		if hc, ok := remote.(halfCloser); ok {
+			hc.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(conn, remote)
+		if hc, ok := conn.(halfCloser); ok {
+			hc.CloseWrite()
+		}
+	}()
+	// Wait for both directions, not just the first to finish: with EOF
+	// alone now only half-closing (above) instead of tearing down the
+	// whole connection, returning early here would still cut off whichever
+	// direction is still in flight via the deferred Close calls.
+	wg.Wait()
 }
+
+// socksHandshakeTimeout bounds the unauthenticated SOCKS5 negotiation (the
+// greeting, credentials, and CONNECT request) so a slow or silent client
+// can't hold a goroutine and socket open indefinitely. Normally that's a
+// self-inflicted local resource concern at worst -- these listeners default
+// to loopback -- but OpenSocksForwardAsync/OpenSocksForwardOnUnixSocketAsync
+// can opt into a wider bind (allowNonLoopbackBind), at which point it
+// becomes remotely triggerable and matters for real. Reset once the tunnel
+// is established: the data-relay phase that follows has no business timing
+// out on its own. A var, not a const, so a test can shrink it rather than
+// waiting out the real 30s to exercise the deadline.
+var socksHandshakeTimeout = 30 * time.Second
 
 func serveSOCKS5(conn net.Conn, client interface {
 	Dial(network, addr string) (net.Conn, error)
@@ -170,6 +212,11 @@ func serveSOCKS5(conn net.Conn, client interface {
 			conn.Close()
 		}
 	}()
+
+	if err := conn.SetDeadline(time.Now().Add(socksHandshakeTimeout)); err != nil {
+		conn.Close()
+		return
+	}
 
 	hdr := make([]byte, 2)
 	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
@@ -184,18 +231,24 @@ func serveSOCKS5(conn net.Conn, client interface {
 
 	requireAuth := username != "" || password != ""
 	const (
-		methodNone      = 0x00
-		methodUserPass  = 0x02
-		methodNoneUsage = methodNone
+		methodNone         = 0x00
+		methodUserPass     = 0x02
+		methodNoAcceptable = 0xFF
 	)
-	selected := byte(methodNoneUsage)
-	if requireAuth {
-		if !containsByte(methods, methodUserPass) {
-			conn.Write([]byte{0x05, 0xFF})
-			conn.Close()
-			return
-		}
+	var selected byte
+	switch {
+	case requireAuth && containsByte(methods, methodUserPass):
 		selected = methodUserPass
+	case !requireAuth && containsByte(methods, methodNone):
+		selected = methodNone
+	default:
+		// Either the client didn't offer the one method this listener
+		// actually supports (RFC 1928 3.1: the reply must be a method the
+		// client offered, never one it didn't), or auth is required and it
+		// offered something else entirely.
+		conn.Write([]byte{0x05, methodNoAcceptable})
+		conn.Close()
+		return
 	}
 	if _, err := conn.Write([]byte{0x05, selected}); err != nil {
 		conn.Close()
@@ -266,6 +319,13 @@ func serveSOCKS5(conn net.Conn, client interface {
 		return
 	}
 	if err := writeSOCKS5Reply(conn, 0x00); err != nil {
+		conn.Close()
+		remote.Close()
+		return
+	}
+	// The handshake is done; a long-lived data relay is the point from
+	// here on, not something to time out on its own.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
 		remote.Close()
 		return
