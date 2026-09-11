@@ -194,8 +194,11 @@ type agentChannel struct {
 	// prompt responses, close requests, or unrelated channels. The queue is
 	// deliberately bounded; if a producer outruns the remote peer, that channel
 	// is failed instead of applying head-of-line blocking to the whole agent.
-	writeQueue chan []byte
-	writeOnce  sync.Once
+	writeQueue    chan []byte
+	writeStop     chan struct{}
+	writeStopOnce sync.Once
+	writePending  sync.WaitGroup
+	writeFailOnce sync.Once
 
 	sftpFile       *sftp.File
 	ctx            context.Context
@@ -562,9 +565,13 @@ func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	// reader. If this bounded queue is full, fail only this channel rather than
 	// allowing one non-reading remote peer to freeze every multiplexed channel.
 	p := append([]byte(nil), payload...)
+	ch.writePending.Add(1)
 	select {
 	case ch.writeQueue <- p:
+	case <-ch.writeStop:
+		ch.writePending.Done()
 	default:
+		ch.writePending.Done()
 		err := fmt.Errorf("channel %d remote input is not being consumed fast enough", channelID)
 		a.writeError(channelID, errUnknown, err)
 		a.failChannelWrite(channelID, ch, err)
@@ -573,22 +580,36 @@ func (a *agentSession) handleData(channelID uint32, payload []byte) {
 
 func (a *agentSession) startChannelWriter(channelID uint32, ch *agentChannel) {
 	ch.writeQueue = make(chan []byte, agentChannelWriteQueueDepth)
+	ch.writeStop = make(chan struct{})
 	go func() {
-		for payload := range ch.writeQueue {
-			var err error
-			switch {
-			case ch.stdin != nil:
-				_, err = ch.stdin.Write(payload)
-			case ch.sftpFile != nil && ch.isUpload:
-				_, err = ch.sftpFile.Write(payload)
-			}
-			if err != nil {
-				a.writeError(channelID, classifyChannelWriteError(ch, err), err)
-				a.failChannelWrite(channelID, ch, err)
+		for {
+			select {
+			case payload := <-ch.writeQueue:
+				var err error
+				switch {
+				case ch.stdin != nil:
+					_, err = ch.stdin.Write(payload)
+				case ch.sftpFile != nil && ch.isUpload:
+					_, err = ch.sftpFile.Write(payload)
+				}
+				ch.writePending.Done()
+				if err != nil {
+					a.writeError(channelID, classifyChannelWriteError(ch, err), err)
+					a.failChannelWrite(channelID, ch, err)
+					return
+				}
+			case <-ch.writeStop:
 				return
 			}
 		}
 	}()
+}
+
+func stopChannelWriter(ch *agentChannel) {
+	if ch == nil || ch.writeStop == nil {
+		return
+	}
+	ch.writeStopOnce.Do(func() { close(ch.writeStop) })
 }
 
 func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
@@ -599,7 +620,7 @@ func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
 }
 
 func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err error) {
-	ch.writeOnce.Do(func() {
+	ch.writeFailOnce.Do(func() {
 		if ch.sftpFile != nil && ch.isUpload {
 			ch.uploadErr = err
 		}
@@ -727,6 +748,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		// to specifically account for, versus a single, already-handled
 		// open failure.
 		a.removeChannel(id)
+		stopChannelWriter(ch)
 		session.Close()
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("starting session: %w", err))
 		return
@@ -734,6 +756,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 
 	if err := a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID}); err != nil {
 		a.removeChannel(id)
+		stopChannelWriter(ch)
 		session.Close()
 		return
 	}
@@ -781,6 +804,7 @@ func (a *agentSession) waitChannel(id uint32, ch *agentChannel, wg *sync.WaitGro
 	}
 	a.writeControl(id, controlMessage{Msg: "exit_status", ExitCode: exitCode})
 	a.removeChannel(id)
+	stopChannelWriter(ch)
 }
 
 func (a *agentSession) resize(channelID uint32, msg controlMessage) {
@@ -804,9 +828,16 @@ func (a *agentSession) closeChannel(channelID uint32) {
 	}
 	switch {
 	case ch.session != nil:
+		stopChannelWriter(ch)
 		ch.session.Close()
 	case ch.sftpFile != nil && ch.isUpload:
-		a.finalizeUpload(channelID, ch)
+		// All preceding data frames have already been enqueued by the sole
+		// frame reader. Drain them without blocking that reader, then finalize.
+		go func() {
+			ch.writePending.Wait()
+			stopChannelWriter(ch)
+			a.finalizeUpload(channelID, ch)
+		}()
 	case ch.sftpFile != nil:
 		if ch.cancel != nil {
 			ch.cancel()
@@ -830,6 +861,7 @@ func (a *agentSession) closeAllChannels() {
 	a.chans = make(map[uint32]*agentChannel)
 	a.chansMu.Unlock()
 	for _, ch := range chans {
+		stopChannelWriter(ch)
 		switch {
 		case ch.session != nil:
 			ch.session.Close()
