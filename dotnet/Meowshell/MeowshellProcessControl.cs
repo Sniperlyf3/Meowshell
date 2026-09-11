@@ -7,20 +7,44 @@ namespace Meowshell;
 internal static class MeowshellProcessControl
 {
     private const int ETXTBSY = 26;
+    internal const string ParentJobEnvironmentVariable = "MEOWSHELL_PARENT_JOB";
 
-    public static void Start(Process process)
+    public static JobObject? Start(Process process)
     {
-        for (var attempt = 1; ; attempt++)
+        JobObject? job = null;
+        if (OperatingSystem.IsWindows())
         {
-            try
+            job = JobObject.CreateForChild();
+            process.StartInfo.Environment[ParentJobEnvironmentVariable] = job.Name;
+        }
+
+        try
+        {
+            for (var attempt = 1; ; attempt++)
             {
-                process.Start();
-                return;
+                try
+                {
+                    process.Start();
+                    break;
+                }
+                catch (Win32Exception ex) when (ex.NativeErrorCode == ETXTBSY && attempt < 5)
+                {
+                    Thread.Sleep(50 * attempt);
+                }
             }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == ETXTBSY && attempt < 5)
-            {
-                Thread.Sleep(50 * attempt);
-            }
+
+            // Parent-side assignment is a fallback and a verification step.
+            // Meowshell/tailcat join the named job at process entry, before
+            // they can spawn descendants; if an externally supplied binary
+            // ignores the environment variable, this still attaches it here.
+            if (OperatingSystem.IsWindows())
+                job!.EnsureAssigned(process);
+            return job;
+        }
+        catch
+        {
+            job?.Dispose();
+            throw;
         }
     }
 
