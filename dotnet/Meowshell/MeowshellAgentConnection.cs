@@ -301,6 +301,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var id = await OpenChannelAsync(request,
             (chId, _) => (chId, (IAgentChannelSink)new AgentRequestResponseSink(completion)), cancellationToken).ConfigureAwait(false);
+        var normalCloseSent = false;
         try
         {
             await using var file = File.OpenRead(localPath);
@@ -314,6 +315,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 progress?.Report(sent);
             }
             await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            normalCloseSent = true;
             await completion.Task.ConfigureAwait(false);
         }
         finally
@@ -324,7 +326,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             // connection's life. Safe to send twice -- a second
             // close_channel for an already-closed id is a no-op on the
             // agent side.
-            try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
+            if (!normalCloseSent)
+            {
+                try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel", Cancelled = true }, CancellationToken.None).ConfigureAwait(false); } catch { }
+            }
             _channels.TryRemove(id, out _);
         }
     }
