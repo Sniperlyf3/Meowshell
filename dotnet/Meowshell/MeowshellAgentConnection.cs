@@ -147,7 +147,11 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             {
                 if (e.Data is null) return;
                 connection._diagnostics.Add(e.Data);
-                connection.Log?.Invoke(e.Data);
+                // Raised on a framework-owned thread with nothing else
+                // watching it: an exception from a Log subscriber must not
+                // be allowed to escape and take the process down over a
+                // logging failure.
+                try { connection.Log?.Invoke(e.Data); } catch { }
             };
             process.BeginErrorReadLine();
 

@@ -39,18 +39,40 @@ internal sealed class TailcatListener : IAsyncDisposable
         // that registering afterwards misses Exited and leaves Completed hung.
         process.Exited += async (_, _) =>
         {
-            await process.WaitForExitAsync().ConfigureAwait(false);
-            if (listener._stopped) listener._exited.TrySetResult();
-            else listener._exited.TrySetException(new TailcatException(
-                "tailcat exited unexpectedly", process.ExitCode, listener._diagnostics.Tail()));
+            // This is effectively async void (EventHandler has no return
+            // value to await): an unhandled exception here would otherwise
+            // escape to the ThreadPool and crash the whole process instead
+            // of just this operation. Whatever went wrong, Completed must
+            // still resolve rather than hang forever waiting for a result
+            // that will now never arrive.
+            try
+            {
+                await process.WaitForExitAsync().ConfigureAwait(false);
+                if (listener._stopped) listener._exited.TrySetResult();
+                else listener._exited.TrySetException(new TailcatException(
+                    "tailcat exited unexpectedly", process.ExitCode, listener._diagnostics.Tail()));
+            }
+            catch (Exception ex)
+            {
+                listener._exited.TrySetException(ex);
+            }
         };
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) { listener.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is null) return;
+            // Raised on a framework-owned thread with nothing else watching
+            // it: an exception from a Log subscriber (or onLog) must not be
+            // allowed to escape and take the process down over a logging
+            // failure.
+            try { listener.Log?.Invoke(e.Data); } catch { }
+            try { onLog?.Invoke(e.Data); } catch { }
+        };
         process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is null) return;
             listener._diagnostics.Add(e.Data);
-            listener.Log?.Invoke(e.Data);
-            onLog?.Invoke(e.Data);
+            try { listener.Log?.Invoke(e.Data); } catch { }
+            try { onLog?.Invoke(e.Data); } catch { }
         };
         MeowshellProcessControl.Start(process);
         if (OperatingSystem.IsWindows())
