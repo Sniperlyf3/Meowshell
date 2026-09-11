@@ -70,6 +70,9 @@ type message struct {
 	Msg       string `json:"msg"`
 	RequestID string `json:"request_id,omitempty"`
 	Kind      string `json:"kind,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 func writeControl(w io.Writer, mu *sync.Mutex, channelID uint32, msg message) error {
@@ -80,6 +83,13 @@ func writeControl(w io.Writer, mu *sync.Mutex, channelID uint32, msg message) er
 	mu.Lock()
 	defer mu.Unlock()
 	return writeFrame(w, frame{ChannelID: channelID, Payload: body})
+}
+
+func writeData(w io.Writer, mu *sync.Mutex, channelID uint32, data []byte) error {
+	payload := append([]byte{0}, data...)
+	mu.Lock()
+	defer mu.Unlock()
+	return writeFrame(w, frame{Type: 1, ChannelID: channelID, Payload: payload})
 }
 
 func main() {
@@ -115,9 +125,14 @@ func main() {
 		case "open_channel":
 			nextID++
 			id := nextID
-			go func(requestID, kind string, id uint32) {
+			go func(requestID, kind, path string, id uint32) {
 				time.Sleep(openDelay)
 				writeControl(os.Stdout, &outMu, id, message{Msg: "channel_opened", RequestID: requestID})
+				if kind == "sftp_download" && path == "partial-then-error" {
+					writeData(os.Stdout, &outMu, id, []byte("partial-new-data"))
+					writeControl(os.Stdout, &outMu, id, message{Msg: "error", Code: "unknown", Message: "synthetic download failure"})
+					return
+				}
 				// Only kinds that realistically finish on their own in the
 				// real protocol get a following exit_status: a shell/exec
 				// channel (waitChannel) and an sftp_upload (finalizeUpload).
@@ -133,7 +148,7 @@ func main() {
 				case "", "shell", "exec", "sftp_upload":
 					writeControl(os.Stdout, &outMu, id, message{Msg: "exit_status"})
 				}
-			}(msg.RequestID, msg.Kind, id)
+			}(msg.RequestID, msg.Kind, msg.Path, id)
 		case "close_channel":
 			fmt.Fprintf(results, "CLOSED %d\n", f.ChannelID)
 			results.Sync()
