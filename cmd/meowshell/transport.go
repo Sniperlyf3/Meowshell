@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"strings"
 	"time"
 
@@ -56,7 +57,32 @@ func tcpDialer(hostPort string) dialer {
 
 func jumpDialer(via jumpClient, hostPort string) dialer {
 	return func(ctx context.Context) (net.Conn, error) {
-		return via.Dial("tcp", hostPort)
+		// via.Dial (an *ssh.Client's channel-opening Dial) takes no context,
+		// so a hostile or unresponsive jump host can otherwise hang this
+		// past the handshake timeout dialSSHClient thinks it's enforcing.
+		// Run it in the background and honor ctx ourselves; if it does
+		// eventually complete after we've given up, close the orphaned
+		// connection instead of leaking it.
+		type result struct {
+			conn net.Conn
+			err  error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			conn, err := via.Dial("tcp", hostPort)
+			ch <- result{conn, err}
+		}()
+		select {
+		case res := <-ch:
+			return res.conn, res.err
+		case <-ctx.Done():
+			go func() {
+				if res := <-ch; res.conn != nil {
+					res.conn.Close()
+				}
+			}()
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -64,16 +90,24 @@ type jumpClient interface {
 	Dial(network, addr string) (net.Conn, error)
 }
 
-func splitUserHost(dest, defaultPort string) (user, hostPort string) {
+func splitUserHost(dest, defaultPort string) (username, hostPort string) {
 	if at := strings.LastIndex(dest, "@"); at >= 0 {
-		user, dest = dest[:at], dest[at+1:]
+		username, dest = dest[:at], dest[at+1:]
+	} else if u, err := user.Current(); err == nil {
+		// Matches ordinary `ssh host` behavior: no user@ prefix means the
+		// local OS user, not an empty SSH username. If the lookup itself
+		// fails (e.g. no /etc/passwd entry for the running UID, as can
+		// happen in a minimal container), fall back to the previous
+		// behavior of leaving it empty rather than failing the connection
+		// outright.
+		username = u.Username
 	}
 	if _, _, err := net.SplitHostPort(dest); err == nil {
-		return user, dest
+		return username, dest
 	}
 
 	host := strings.TrimSuffix(strings.TrimPrefix(dest, "["), "]")
-	return user, net.JoinHostPort(host, defaultPort)
+	return username, net.JoinHostPort(host, defaultPort)
 }
 
 func proxyDialer(proxyURL, hostPort string) (dialer, error) {

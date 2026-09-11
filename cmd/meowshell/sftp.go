@@ -40,11 +40,26 @@ type pipeConn struct {
 func (c *pipeConn) Read(p []byte) (int, error)  { return c.stdout.Read(p) }
 func (c *pipeConn) Write(p []byte) (int, error) { return c.stdin.Write(p) }
 
+// pipeConnCloseGrace bounds how long Close waits for the tailcat subprocess
+// to exit after its stdin/stdout are closed, before killing it outright. A
+// subprocess that ignores (or never notices) that closure -- hung, wedged,
+// or simply not watching for it -- would otherwise make cmd.Wait() block
+// forever, turning a bounded SSH handshake timeout (Close is invoked from
+// dialSSHClient's context.AfterFunc on expiry) into an unbounded hang.
+const pipeConnCloseGrace = 5 * time.Second
+
 func (c *pipeConn) Close() error {
 	c.once.Do(func() {
 		c.stdin.Close()
 		c.stdout.Close()
-		c.err = c.cmd.Wait()
+		done := make(chan error, 1)
+		go func() { done <- c.cmd.Wait() }()
+		select {
+		case c.err = <-done:
+		case <-time.After(pipeConnCloseGrace):
+			c.cmd.Process.Kill()
+			c.err = <-done
+		}
 		var exitErr *exec.ExitError
 		if errors.As(c.err, &exitErr) {
 			c.err = nil

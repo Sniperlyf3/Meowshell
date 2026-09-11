@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/user"
 	"runtime"
 	"strings"
 	"testing"
@@ -58,6 +59,44 @@ func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
 	}
 }
 
+// blockingJumpClient's Dial never returns until unblocked, standing in for
+// a hostile or unresponsive jump host during TestJumpDialerRespectsContext.
+type blockingJumpClient struct {
+	unblock chan struct{}
+}
+
+func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
+	<-b.unblock
+	return nil, errors.New("dial finished after being unblocked, too late to matter")
+}
+
+// TestJumpDialerRespectsContext is a regression test: jumpDialer's returned
+// func used to ignore the context entirely and call via.Dial directly, which
+// takes no context of its own -- so a hostile or unresponsive jump host
+// could hang a connection attempt indefinitely, well past the handshake
+// timeout dialSSHClient thinks it's enforcing.
+func TestJumpDialerRespectsContext(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+
+	dial := jumpDialer(&blockingJumpClient{unblock: unblock}, "host:22")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	conn, err := dial(ctx)
+	if conn != nil {
+		conn.Close()
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("jumpDialer error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("jumpDialer blocked for %s past its context deadline, want it to return promptly", elapsed)
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)
@@ -87,17 +126,26 @@ func TestLooksLikeTailcatAddress(t *testing.T) {
 	}
 }
 
+// TestSplitUserHost is also a regression test: an address with no user@
+// prefix used to always produce an empty SSH username, diverging from
+// ordinary `ssh host` behavior (which defaults to the local OS user). Cases
+// with no @ now expect the local user, looked up the same way the fix does,
+// so the test doesn't hardcode a value tied to whoever runs it.
 func TestSplitUserHost(t *testing.T) {
+	localUser := ""
+	if u, err := user.Current(); err == nil {
+		localUser = u.Username
+	}
 	cases := []struct {
 		dest           string
 		wantUser, want string
 	}{
-		{"example.com", "", "example.com:22"},
-		{"example.com:2222", "", "example.com:2222"},
+		{"example.com", localUser, "example.com:22"},
+		{"example.com:2222", localUser, "example.com:2222"},
 		{"alice@example.com", "alice", "example.com:22"},
 		{"alice@example.com:2222", "alice", "example.com:2222"},
-		{"[::1]", "", "[::1]:22"},
-		{"[::1]:2222", "", "[::1]:2222"},
+		{"[::1]", localUser, "[::1]:22"},
+		{"[::1]:2222", localUser, "[::1]:2222"},
 		{"alice@[::1]:2222", "alice", "[::1]:2222"},
 	}
 	for _, c := range cases {
