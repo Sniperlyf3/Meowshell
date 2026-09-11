@@ -30,6 +30,10 @@ git -C "$SRC_DIR" checkout --detach FETCH_HEAD
 # CI always starts from a fresh clone) would otherwise still carry the
 # patch applied below from the previous run, and re-applying it would fail.
 git -C "$SRC_DIR" reset --hard FETCH_HEAD
+# The Android netmon patch adds a source file, so reset alone is insufficient:
+# Git deliberately leaves that untracked file behind. SRC_DIR is a disposable
+# build checkout; clean it as well so repeated builds start from the same tree.
+git -C "$SRC_DIR" clean -fd
 
 # netmon.NewStatic() (used by pickregion.go's PickBestRegion, itself called
 # by ConnInfo.Expand whenever a key's RegionID is -1, the default for

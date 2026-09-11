@@ -9,10 +9,54 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestTailcatDialerContextDoesNotOwnReturnedConnection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cat subprocess fixture is Unix-only")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, err := tailcatDialer("cat", nil)(ctx)
+	if err != nil {
+		t.Fatalf("tailcatDialer: %v", err)
+	}
+	defer conn.Close()
+
+	// A dial context governs creation of a connection, not the lifetime of a
+	// successfully returned connection. dialSSHClient cancels the context it
+	// passes here as soon as the SSH handshake completes.
+	cancel()
+	const message = "still connected\n"
+	if _, err := io.WriteString(conn, message); err != nil {
+		t.Fatalf("write after dial context cancellation: %v", err)
+	}
+	buf := make([]byte, len(message))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read after dial context cancellation: %v", err)
+	}
+	if got := string(buf); got != message {
+		t.Fatalf("echo = %q, want %q", got, message)
+	}
+}
+
+func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	conn, err := tailcatDialer("command-must-not-be-started", nil)(ctx)
+	if conn != nil {
+		conn.Close()
+		t.Fatal("tailcatDialer returned a connection for a canceled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tailcatDialer error = %v, want context canceled", err)
+	}
+}
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()

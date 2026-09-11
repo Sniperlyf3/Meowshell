@@ -21,7 +21,14 @@ type dialer func(ctx context.Context) (net.Conn, error)
 
 func tailcatDialer(tailcatBin string, argv []string) dialer {
 	return func(ctx context.Context) (net.Conn, error) {
-		cmd := exec.CommandContext(ctx, tailcatBin, argv...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// The context only bounds dialing; it does not own the connection after
+		// this function returns. In particular, dialSSHClient cancels its
+		// handshake context after a successful handshake. CommandContext would
+		// then kill the tailcat process backing the live SSH connection.
+		cmd := exec.Command(tailcatBin, argv...)
 		cmd.Stderr = os.Stderr
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
