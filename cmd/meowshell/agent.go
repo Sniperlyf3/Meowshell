@@ -57,7 +57,7 @@ func agentCmd(args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	key := fs.String("key", "", "tailcat client key name or path")
 	tailcatBin := fs.String("tailcat", "", "path to the tailcat binary")
-	derpMapURL := fs.String("derpmap-url", "", "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url")
+	derpMapURL := fs.String("derpmap-url", os.Getenv("TAILCAT_DERPMAP_URL"), "URL of the JSON DERP map to resolve a DERP region from, instead of tailcat's default. Passed to tailcat's own --derpmap-url for the agent's own connection; also used directly by exit-node forwarding's in-process tailcat.Client, which spawns no subprocess and so cannot fall back to tailcat's own TAILCAT_DERPMAP_URL handling the way every other tailcat invocation here does")
 	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	port := fs.String("p", "22", "port number of the destination's SSH service")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts)")

@@ -27,6 +27,7 @@ import (
 	"syscall"
 
 	"tailscale.com/derp/derpserver"
+	"tailscale.com/net/stun"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -54,6 +55,31 @@ func run(statusFile string) error {
 	derpSrv.StartTLS()
 	defer derpSrv.Close()
 
+	// tailcat's own local-DERP test helper (runDevDERP in
+	// cmd/tailcat/tailcat.go) answers STUN rather than omitting it: without a
+	// STUN responder, netcheck burns ~3s timing out on UDP probes before it
+	// declares a report, delaying (and in exit-node forwarding, apparently
+	// destabilizing) the server's home DERP connection and readiness.
+	stunLn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return fmt.Errorf("listening for STUN: %w", err)
+	}
+	defer stunLn.Close()
+	go func() {
+		var buf [1500]byte
+		for {
+			n, src, err := stunLn.ReadFromUDPAddrPort(buf[:])
+			if err != nil {
+				return
+			}
+			txid, err := stun.ParseBindingRequest(buf[:n])
+			if err != nil {
+				continue
+			}
+			stunLn.WriteToUDPAddrPort(stun.Response(txid, src), src)
+		}
+	}()
+
 	derpPort := derpLn.Addr().(*net.TCPAddr).Port
 	derpMap := &tailcfg.DERPMap{
 		Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{
@@ -68,7 +94,7 @@ func run(statusFile string) error {
 					IPv4:             "127.0.0.1",
 					IPv6:             "none",
 					DERPPort:         derpPort,
-					STUNPort:         -1,
+					STUNPort:         stunLn.LocalAddr().(*net.UDPAddr).Port,
 					InsecureForTests: true,
 				}},
 			},
