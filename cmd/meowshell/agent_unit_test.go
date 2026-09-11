@@ -70,19 +70,8 @@ func (w *blockingWriteCloser) Close() error {
 // command that stopped reading stdin could therefore block prompt responses,
 // closes, and every unrelated channel on the same agent connection.
 func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
-	var input bytes.Buffer
-	if err := writeFrame(&input, frame{Type: frameTypeData, ChannelID: 1, Payload: []byte("blocked")}); err != nil {
-		t.Fatal(err)
-	}
-	promptBody, err := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: "p1", Answer: "ok"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFrame(&input, frame{Type: frameTypeControl, ChannelID: 0, Payload: promptBody}); err != nil {
-		t.Fatal(err)
-	}
-
-	session := newAgentSession(&input, io.Discard)
+	inputR, inputW := io.Pipe()
+	session := newAgentSession(inputR, io.Discard)
 	blocked := newBlockingWriteCloser()
 	ch := &agentChannel{stdin: blocked}
 	session.chans[1] = ch
@@ -94,12 +83,22 @@ func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- session.serveFrames() }()
 
+	if err := writeFrame(inputW, frame{Type: frameTypeData, ChannelID: 1, Payload: []byte("blocked")}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-blocked.started:
 	case <-time.After(time.Second):
 		t.Fatal("channel writer never reached the blocking remote Write")
 	}
 
+	promptBody, err := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: "p1", Answer: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(inputW, frame{Type: frameTypeControl, ChannelID: 0, Payload: promptBody}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case got := <-prompt:
 		if got.Answer != "ok" {
@@ -109,6 +108,9 @@ func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
 		t.Fatal("prompt_response was not processed while another channel's remote Write was blocked")
 	}
 
+	if err := inputW.Close(); err != nil {
+		t.Fatal(err)
+	}
 	blocked.Close()
 	select {
 	case err := <-done:
@@ -116,7 +118,7 @@ func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
 			t.Fatalf("serveFrames returned %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("serveFrames did not finish after consuming its input")
+		t.Fatal("serveFrames did not finish after input closed")
 	}
 }
 
