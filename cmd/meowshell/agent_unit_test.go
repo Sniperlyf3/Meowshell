@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestOpenChannelRejectsUnknownKind is a regression test: openChannel used
@@ -29,5 +32,87 @@ func TestOpenChannelRejectsUnknownKind(t *testing.T) {
 	}
 	if len(session.chans) != 0 {
 		t.Fatalf("openChannel with an unknown kind registered %d channel(s); want none opened", len(session.chans))
+	}
+}
+
+
+type blockingWriteCloser struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingWriteCloser() *blockingWriteCloser {
+	return &blockingWriteCloser{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *blockingWriteCloser) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(p), nil
+}
+
+func (w *blockingWriteCloser) Close() error {
+	select {
+	case <-w.release:
+	default:
+		close(w.release)
+	}
+	return nil
+}
+
+// TestBlockedChannelWriteDoesNotBlockFrameReader is a regression test for a
+// multiplexing-wide denial of service: handleData used to call the remote
+// stdin/SFTP Write synchronously on serveFrames' sole goroutine. A remote
+// command that stopped reading stdin could therefore block prompt responses,
+// closes, and every unrelated channel on the same agent connection.
+func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
+	var input bytes.Buffer
+	if err := writeFrame(&input, frame{Type: frameTypeData, ChannelID: 1, Payload: []byte("blocked")}); err != nil {
+		t.Fatal(err)
+	}
+	promptBody, err := json.Marshal(controlMessage{Msg: "prompt_response", RequestID: "p1", Answer: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(&input, frame{Type: frameTypeControl, ChannelID: 0, Payload: promptBody}); err != nil {
+		t.Fatal(err)
+	}
+
+	session := newAgentSession(&input, io.Discard)
+	blocked := newBlockingWriteCloser()
+	ch := &agentChannel{stdin: blocked}
+	session.chans[1] = ch
+	session.startChannelWriter(1, ch)
+
+	prompt := make(chan controlMessage, 1)
+	session.prompts["p1"] = prompt
+
+	done := make(chan error, 1)
+	go func() { done <- session.serveFrames() }()
+
+	select {
+	case <-blocked.started:
+	case <-time.After(time.Second):
+		t.Fatal("channel writer never reached the blocking remote Write")
+	}
+
+	select {
+	case got := <-prompt:
+		if got.Answer != "ok" {
+			t.Fatalf("prompt response answer = %q, want %q", got.Answer, "ok")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prompt_response was not processed while another channel's remote Write was blocked")
+	}
+
+	blocked.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveFrames returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serveFrames did not finish after consuming its input")
 	}
 }
