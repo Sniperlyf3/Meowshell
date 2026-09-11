@@ -10,7 +10,7 @@ internals were not independently penetration-tested.
 
 ## Executive summary
 
-The review found eight actionable weaknesses and remediated them in this
+The review found eleven actionable weaknesses and remediated them in this
 revision:
 
 1. **High — HTTPS proxy transport was not encrypted.** The `https` proxy scheme
@@ -48,6 +48,17 @@ revision:
 8. **Low — a fast listener failure could be missed.** The .NET wrapper started
    a process before subscribing to its exit event, so `Completed` could hang if
    the child exited in that window. Event handlers are now installed first.
+9. **High — remote output could grow managed memory without bound.** The .NET
+   multiplexer drained the child continuously into an unbounded per-channel
+   queue. A hostile SSH peer could exhaust the embedding application's memory.
+   Queues are now bounded and the protocol reader applies backpressure.
+10. **Medium — subprocess-backed SSH handshakes could ignore cancellation and
+    timeout.** The pipe transport's deadline methods are necessarily no-ops.
+    Handshake cancellation now closes the connection and `tailcat` is launched
+    with `CommandContext`, guaranteeing termination at the context deadline.
+11. **Low — protocol frame writes assumed one full writer call.** A legal short
+    write could truncate a frame and desynchronize the protocol. Writes now loop
+    to completion, and both implementations reject oversized outbound frames.
 
 No hard-coded credentials, shell-based local process launch, unrestricted
 local TCP bind by default, unbounded protocol frame allocation, or silent TCP
@@ -71,6 +82,55 @@ Unix-socket permissions, and commit-pinned GitHub Actions.
   deliberate insecure modes.
 - **Build/release:** upstream tailcat source, Go/NuGet dependencies, downloaded
   toolchains, CI actions, native artifacts, and NuGet trusted publishing.
+
+## Audit execution plan
+
+The review is repeatable in six ordered phases; `REVIEW_MAP.md` is the file-level
+checklist for phases two through four.
+
+1. **Baseline and inventory:** freeze the PR revision and tailcat pin; enumerate
+   source, generated exclusions, dependencies, entrypoints, platforms, secrets,
+   privileges, and network/filesystem/process boundaries.
+2. **Adversarial data flow:** trace every untrusted value from CLI/.NET API or
+   remote frame through parsing, validation, allocation, logging, persistence,
+   process arguments, authentication, forwarding, SFTP, and response handling.
+3. **Lifecycle and concurrency:** evaluate startup, steady state, cancellation,
+   timeout, partial I/O, backpressure, duplicate/out-of-order messages, abrupt
+   EOF, process crashes, repeated disposal, and concurrent channels/prompts.
+4. **Platform and supply chain:** compare Unix/Windows/Android behavior; inspect
+   build patches, mutable inputs, CI permissions/actions, artifacts, package RID
+   layout, publishing identity, and dependency advisory coverage.
+5. **Exploit-oriented validation:** add deterministic regressions for confirmed
+   defects, exercise protocol limits and races, run unit/E2E tests, race/static
+   analyzers, Go call-path vulnerability scans, and transitive NuGet audits.
+6. **Disposition and release gate:** record fixed, accepted, transferred, and
+   unverified risks with owners/conditions. A release passes only when required
+   CI/platform E2E jobs and dependency scans pass against the exact artifacts.
+
+No finite source audit can prove that every scenario is safe. This plan instead
+enumerates the relevant attacker capabilities, failure modes, and trust
+boundaries, states exclusions explicitly, and leaves uncertain claims as
+release gates or residual risks rather than silently treating them as safe.
+
+## Security objectives and attacker models
+
+The audit protects four primary assets: shell execution authority, SSH/private
+key material, bearer tailcat addresses and proxy credentials, and availability
+of the embedding application/device. It considered:
+
+- an unauthenticated Internet peer that learns or guesses an address;
+- an authenticated but malicious SSH server or shell account;
+- a malicious SOCKS/HTTP proxy, DERP relay, or on-path observer;
+- a local unprivileged process racing files, sockets, agents, or child startup;
+- an application caller supplying malformed, oversized, or adversarial options;
+- a compromised package/module source, mutable Git ref, CI action, or artifact;
+- abrupt cancellation, process death, short I/O, resource exhaustion, duplicate
+  messages, reordered lifecycle events, and platform-specific behavior.
+
+The review does not claim protection from a compromised OS/kernel, a process
+with the same effective account that can debug/read this process, a malicious
+application intentionally invoking unsafe options, compromise of GitHub/NuGet
+administrative accounts, or undiscovered defects in cryptographic primitives.
 
 ## Findings and disposition
 
@@ -145,6 +205,38 @@ leaving `Completed` unresolved and lifecycle callers waiting indefinitely. Exit
 and output handlers are now registered before process start; existing crash
 tests exercise the fast-failure path.
 
+### SR-09: unbounded managed channel buffering — fixed (High)
+
+Every frame from the Go child was appended to an unbounded .NET channel while a
+separate pump waited for the application to consume its `Pipe`. Consequently a
+remote command that emitted data faster than the application read it could grow
+memory until process termination. The queue now holds at most 32 frame/control
+items. The main protocol loop awaits queue admission, preserving frame order and
+propagating backpressure through the child pipe and SSH channel. The tradeoff is
+intentional head-of-line blocking across multiplexed channels under a stalled
+consumer, which is preferable to unbounded memory consumption.
+Shutdown explicitly faults active sinks before awaiting the reader, so a
+consumer that has stopped reading cannot turn that backpressure into a shutdown
+deadlock.
+
+### SR-10: ineffective pipe-transport handshake deadlines — fixed (Medium)
+
+SSH applies network deadlines through `net.Conn`, but the subprocess pipe
+adapter cannot implement kernel socket deadlines and returned success without
+enforcement. A stuck or replaced tailcat executable could therefore outlive the
+nominal handshake timeout. `dialSSHClient` now derives a bounded handshake
+context and closes any transport when it expires; tailcat subprocesses use
+`exec.CommandContext`; and `pipeConn.Close` is idempotent so cancellation and
+normal cleanup may safely race.
+
+### SR-11: partial and oversized outbound frames — fixed (Low)
+
+Go's `io.Writer` contract permits a short write. The protocol writer previously
+ignored the byte count, potentially emitting a truncated frame followed by an
+unparseable stream. It now writes until all bytes are accepted and fails on no
+progress. Both Go and .NET writers enforce the same 64 MiB outbound bound already
+used by readers, preventing integer/size mismatches and fail-late allocations.
+
 ## Accepted design risks and hardening backlog
 
 1. **Tailcat SSH host-key checking is intentionally disabled.** Tailcat sessions
@@ -182,6 +274,34 @@ tests exercise the fast-failure path.
    be reliably zeroed. Prefer ssh-agent and Android Keystore sign callbacks over
    raw private-key/password configuration.
 
+## Scenario coverage matrix
+
+| Scenario | Control or disposition |
+| --- | --- |
+| Address disclosure | Prefer authorized keys/client allowlists; address-only mode remains explicit risk. |
+| TCP SSH MITM | TOFU known-hosts; changed keys fail closed. |
+| Tailcat SSH identity | Capability-address security assumption; tracked as accepted design risk. |
+| Malicious HTTPS proxy/on-path peer | Certificate-verified TLS before credentials or CONNECT. |
+| Proxy stalls after accepting TCP | Context cancellation closes the live connection. |
+| Proxy URL contains secrets | Raw parse errors are suppressed; parsed URLs are redacted. |
+| Public local forward/proxy | Refused unless the caller opts into non-loopback bind. |
+| Unauthenticated SOCKS use | TCP SOCKS generates credentials by default; constant-time comparison. |
+| Unix socket path substitution | Symlinks and non-sockets are refused; private parent directory recommended. |
+| Oversized/malformed IPC frame | 64 MiB inbound/outbound cap and structural header checks. |
+| Short IPC write | Full-write loop or error; regression coverage included. |
+| Duplicate/racing prompt response | Non-blocking delivery under the lifecycle lock. |
+| Hostile high-volume command output | Bounded per-channel buffering with transport backpressure. |
+| Stalled SSH handshake/subprocess | Bounded context, connection close, and command-context kill. |
+| Cancellation during .NET startup | Correct cancellation type and unconditional child cleanup. |
+| Child exits immediately | Exit handlers registered before start. |
+| SFTP path abuse | Executes with SSH user's authority; embedding app must impose narrower allowlists. |
+| Remote command injection | API explicitly transports a shell command string; untrusted concatenation forbidden. |
+| Compromised upstream branch | Reviewed full tailcat commit pin; override is explicit. |
+| Known vulnerable dependency | CI scans both Go modules and all restorable NuGet graphs; warnings fail builds. |
+| Compromised CI action | Actions are full-commit pinned and workflow defaults to read-only contents. |
+| Package publication credential theft | NuGet trusted publishing uses short-lived scoped OIDC. |
+| Artifact/platform mismatch | ELF/PE architecture and Android-loader verification plus host/device E2E. |
+
 ## Verification plan
 
 The security fixes are covered by focused Go tests. The standard repository
@@ -193,8 +313,9 @@ a NuGet dependency audit in an environment with the required .NET SDK.
 ## Review verification results
 
 The review environment was subsequently provisioned with .NET SDK 8.0.425 and
-the pinned Linux amd64 binaries. All 86 non-E2E .NET tests passed. The complete
-suite executed all 107 tests: 94 passed and 13 relay-dependent E2E cases failed
+the pinned Linux amd64 binaries. At that revision all 86 non-E2E .NET tests
+passed. The then-current complete suite executed all 107 tests: 94 passed and
+13 relay-dependent E2E cases failed
 with `context deadline exceeded` or an SSH EOF after the tailcat connection
 could not be established. Local real-binary E2E coverage, including listener
 startup/shutdown and key/address operations, did pass. The environment routes
@@ -203,3 +324,9 @@ the tailcat transport being unable to reach its relay from this environment.
 They are therefore recorded as an environment limitation rather than a passing
 result or a demonstrated product regression. The full E2E suite still needs a
 run from a network that permits the tailcat transport before release.
+
+After the additional PR hardening, all 87 current non-E2E .NET tests pass. Go
+unit tests, focused race-detector tests, `go vet`, root and patched-tailcat
+`govulncheck`, transitive NuGet audit, workflow lint, and shell syntax checks
+also pass. Network/device E2E remains a required CI release gate rather than a
+claim derived from the restricted review container.

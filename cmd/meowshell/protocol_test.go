@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+type shortWriter struct {
+	bytes.Buffer
+	max int
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
+	}
+	return w.Buffer.Write(p)
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	cases := []frame{
 		{Type: frameTypeControl, ChannelID: 0, Payload: []byte(`{"msg":"open_channel"}`)},
@@ -44,6 +56,27 @@ func TestReadFrameMultipleInSequence(t *testing.T) {
 	}
 	if _, err := readFrame(&buf); err != io.EOF {
 		t.Fatalf("readFrame at end of stream = %v, want io.EOF", err)
+	}
+}
+
+func TestWriteFrameCompletesShortWrites(t *testing.T) {
+	w := &shortWriter{max: 3}
+	want := frame{Type: frameTypeData, ChannelID: 42, Payload: []byte("payload")}
+	if err := writeFrame(w, want); err != nil {
+		t.Fatalf("writeFrame with short writer: %v", err)
+	}
+	got, err := readFrame(&w.Buffer)
+	if err != nil {
+		t.Fatalf("readFrame after short writes: %v", err)
+	}
+	if got.Type != want.Type || got.ChannelID != want.ChannelID || !bytes.Equal(got.Payload, want.Payload) {
+		t.Fatalf("frame after short writes = %+v, want %+v", got, want)
+	}
+}
+
+func TestWriteFrameRejectsOversizedPayload(t *testing.T) {
+	if err := writeFrame(io.Discard, frame{Payload: make([]byte, maxFrameLength-frameHeaderLength+1)}); err == nil {
+		t.Fatal("writeFrame accepted an oversized payload")
 	}
 }
 

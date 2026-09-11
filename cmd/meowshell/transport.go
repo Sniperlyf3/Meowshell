@@ -21,7 +21,7 @@ type dialer func(ctx context.Context) (net.Conn, error)
 
 func tailcatDialer(tailcatBin string, argv []string) dialer {
 	return func(ctx context.Context) (net.Conn, error) {
-		cmd := exec.Command(tailcatBin, argv...)
+		cmd := exec.CommandContext(ctx, tailcatBin, argv...)
 		cmd.Stderr = os.Stderr
 		stdin, err := cmd.StdinPipe()
 		if err != nil {

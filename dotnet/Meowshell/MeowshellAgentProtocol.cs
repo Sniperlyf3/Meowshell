@@ -25,8 +25,11 @@ internal static class MeowshellAgentProtocol
 
     public static async Task WriteFrameAsync(Stream stream, AgentFrame frame, CancellationToken cancellationToken)
     {
-        var buf = new byte[4 + FrameHeaderLength + frame.Payload.Length];
-        WriteUInt32BigEndian(buf.AsSpan(0, 4), (uint)(FrameHeaderLength + frame.Payload.Length));
+        var frameLength = checked(FrameHeaderLength + frame.Payload.Length);
+        if (frameLength > MaxFrameLength)
+            throw new TailcatException("meowshell agent protocol error", 0, $"frame length {frameLength} exceeds the {MaxFrameLength} limit");
+        var buf = new byte[4 + frameLength];
+        WriteUInt32BigEndian(buf.AsSpan(0, 4), (uint)frameLength);
         buf[4] = frame.Type;
         WriteUInt32BigEndian(buf.AsSpan(5, 4), frame.ChannelId);
         frame.Payload.CopyTo(buf.AsSpan(9));

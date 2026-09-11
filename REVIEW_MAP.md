@@ -43,7 +43,7 @@ process leakage on setup failure/cancellation.
 - `cmd/meowshell/agentauth.go`, `cmd/meowshell/agentauth_test.go`
 - `cmd/meowshell/sshagent_unix.go`, `cmd/meowshell/sshagent_windows.go`
 - `cmd/meowshell/keystage_unix.go`, `cmd/meowshell/keystage_windows.go`
-- `cmd/meowshell/sftp.go`
+- `cmd/meowshell/sftp.go`, `cmd/meowshell/sftp_test.go`
 - `cmd/meowshell/agent_auth_e2e_test.go`
 - `cmd/meowshell/agent_tcp_e2e_test.go`
 - `cmd/meowshell/agent_security_e2e_test.go`

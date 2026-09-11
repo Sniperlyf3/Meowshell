@@ -467,11 +467,11 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 if (frame is null) break;
                 if (frame.Value.Type == MeowshellAgentProtocol.FrameTypeData)
                 {
-                    HandleData(frame.Value.ChannelId, frame.Value.Payload);
+                    await HandleDataAsync(frame.Value.ChannelId, frame.Value.Payload).ConfigureAwait(false);
                     continue;
                 }
                 var msg = System.Text.Json.JsonSerializer.Deserialize<AgentMessage>(frame.Value.Payload, MeowshellAgentProtocol.JsonOptions)!;
-                HandleControl(frame.Value.ChannelId, msg);
+                await HandleControlAsync(frame.Value.ChannelId, msg).ConfigureAwait(false);
             }
             FaultEverything(new TailcatException("meowshell agent exited unexpectedly", 0, _diagnostics.Tail()));
         }
@@ -481,16 +481,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }
     }
 
-    private void HandleData(uint channelId, byte[] payload)
+    private async Task HandleDataAsync(uint channelId, byte[] payload)
     {
         if (payload.Length == 0) return;
         var stream = payload[0];
         var data = payload.AsMemory(1);
         if (_channels.TryGetValue(channelId, out var sink))
-            _ = sink.OnDataAsync(stream, data);
+            await sink.OnDataAsync(stream, data).ConfigureAwait(false);
     }
 
-    private void HandleControl(uint channelId, AgentMessage msg)
+    private async Task HandleControlAsync(uint channelId, AgentMessage msg)
     {
         switch (msg.Msg)
         {
@@ -535,7 +535,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }
 
         if (_channels.TryGetValue(channelId, out var sink))
-            sink.OnControl(msg);
+            await sink.OnControlAsync(msg).ConfigureAwait(false);
     }
 
     private async Task HandlePromptAsync(AgentMessage msg)
@@ -612,6 +612,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { MeowshellProcessControl.TryKill(_process); }
         }
+        // Release bounded channel pumps before waiting for the read loop. A
+        // consumer that stopped reading may have backpressured that loop; faulting
+        // its sink completes the pipe and lets shutdown make progress.
+        FaultEverything(new OperationCanceledException("meowshell agent connection stopped"));
         try { await _readLoop.ConfigureAwait(false); } catch { }
     }
 
@@ -628,7 +632,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 internal interface IAgentChannelSink
 {
     Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data);
-    void OnControl(AgentMessage msg);
+    Task OnControlAsync(AgentMessage msg);
     void OnFault(Exception ex);
 }
 
@@ -638,7 +642,12 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
 
     private readonly IAgentChannelSink _inner;
     private readonly System.Threading.Channels.Channel<QueueItem> _queue =
-        System.Threading.Channels.Channel.CreateUnbounded<QueueItem>(new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+        System.Threading.Channels.Channel.CreateBounded<QueueItem>(new System.Threading.Channels.BoundedChannelOptions(32)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,
+        });
     private readonly Task _pumpTask;
 
     public AgentChannelDataPump(IAgentChannelSink inner)
@@ -658,20 +667,19 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
             }
             else
             {
-                _inner.OnControl(item.Control!);
+                await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
             }
         }
     }
 
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
     {
-        _queue.Writer.TryWrite(new QueueItem(true, stream, data, null));
-        return Task.CompletedTask;
+        return _queue.Writer.WriteAsync(new QueueItem(true, stream, data, null)).AsTask();
     }
 
-    public void OnControl(AgentMessage msg)
+    public async Task OnControlAsync(AgentMessage msg)
     {
-        _queue.Writer.TryWrite(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg));
+        await _queue.Writer.WriteAsync(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)).ConfigureAwait(false);
         if (msg.Msg is "exit_status" or "error")
             _queue.Writer.TryComplete();
     }
@@ -686,7 +694,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
 internal sealed class AgentIgnoreSink : IAgentChannelSink
 {
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data) => Task.CompletedTask;
-    public void OnControl(AgentMessage msg) { }
+    public Task OnControlAsync(AgentMessage msg) => Task.CompletedTask;
     public void OnFault(Exception ex) { }
 }
 
@@ -694,10 +702,11 @@ internal sealed class AgentRequestResponseSink(TaskCompletionSource<int> complet
 {
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data) => Task.CompletedTask;
 
-    public void OnControl(AgentMessage msg)
+    public Task OnControlAsync(AgentMessage msg)
     {
         if (msg.Msg == "exit_status") completion.TrySetResult(msg.ExitCode);
         else if (msg.Msg == "error") completion.TrySetException(new TailcatException("upload failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code)));
+        return Task.CompletedTask;
     }
 
     public void OnFault(Exception ex) => completion.TrySetException(ex);
@@ -718,7 +727,7 @@ internal sealed class AgentDownloadSink : IAgentChannelSink
         if (result.IsCompleted) return;
     }
 
-    public void OnControl(AgentMessage msg)
+    public Task OnControlAsync(AgentMessage msg)
     {
         switch (msg.Msg)
         {
@@ -732,6 +741,7 @@ internal sealed class AgentDownloadSink : IAgentChannelSink
                 _completed.TrySetException(ex);
                 break;
         }
+        return Task.CompletedTask;
     }
 
     public void OnFault(Exception ex)
@@ -783,7 +793,7 @@ public sealed class MeowshellAgentShellChannel : IAgentChannelSink, IAsyncDispos
         return pipe.Writer.WriteAsync(data).AsTask();
     }
 
-    void IAgentChannelSink.OnControl(AgentMessage msg)
+    Task IAgentChannelSink.OnControlAsync(AgentMessage msg)
     {
         switch (msg.Msg)
         {
@@ -799,6 +809,7 @@ public sealed class MeowshellAgentShellChannel : IAgentChannelSink, IAsyncDispos
                 _exitCode.TrySetException(ex);
                 break;
         }
+        return Task.CompletedTask;
     }
 
     void IAgentChannelSink.OnFault(Exception ex)
