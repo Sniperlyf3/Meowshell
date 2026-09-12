@@ -121,6 +121,7 @@ func TestLooksLikeTailcatAddress(t *testing.T) {
 	}{
 		{"tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1", true},
 		{"tc", false},
+		{"tcZm9v", false}, // base64-looking hostname, but not a structurally valid Tailcat address
 		{"tcp://example.com", false},
 		{"example.com:2222", false},
 		{"user@example.com", false},
