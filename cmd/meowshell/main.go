@@ -68,6 +68,7 @@ executable, then on $PATH.
 `
 
 func main() {
+	startManagedParentWatchdog()
 	if err := joinParentJobFromEnv(); err != nil {
 		fmt.Fprintf(os.Stderr, "meowshell: %v\n", err)
 		os.Exit(1)
