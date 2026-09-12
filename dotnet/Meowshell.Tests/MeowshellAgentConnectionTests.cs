@@ -107,7 +107,8 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     /// every test below needs to, or returns null for the caller to no-op
     /// on when there's no Go toolchain to build it with.
     /// </summary>
-    private async Task<(MeowshellAgentConnection Connection, string ResultsPath)?> ConnectToFakeAgentAsync()
+    private async Task<(MeowshellAgentConnection Connection, string ResultsPath)?> ConnectToFakeAgentAsync(
+        string destination = "example.invalid", Action<MeowshellAgentConnection>? configureConnection = null)
     {
         var fakeAgent = await BuildFakeAgentAsync();
         if (fakeAgent is null) return null;
@@ -131,7 +132,7 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "home"),
             Timeout = TimeSpan.FromSeconds(10),
-        }, "example.invalid");
+        }, destination, configureConnection: configureConnection);
         return (connection, meowshellPath + ".results");
     }
 
@@ -497,6 +498,41 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         Assert.Equal(1, Volatile.Read(ref callbackCount));
 
         release.TrySetResult();
+    }
+
+
+    private const string PromptDestination = "prompt-before-connect";
+
+    [Fact]
+    public async Task ConfigureConnectionSubscribesInTimeForTheHandshakePrompts()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var fingerprints = new List<string>();
+        if (await ConnectToFakeAgentAsync(PromptDestination, connection =>
+        {
+            connection.HostKeyPromptRequested += (prompt, _) =>
+            {
+                fingerprints.Add(prompt.Fingerprint);
+                return Task.FromResult(true);
+            };
+            connection.PasswordRequested += (_, _) => Task.FromResult("hunter2");
+        }) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY ACCEPT true", TimeSpan.FromSeconds(5)));
+        Assert.True(await WaitForResultAsync(resultsPath, "PASSWORD ANSWER hunter2", TimeSpan.FromSeconds(5)));
+        Assert.NotEmpty(fingerprints);
+        Assert.All(fingerprints, fingerprint => Assert.StartsWith("SHA256:", fingerprint));
+    }
+
+    [Fact]
+    public async Task WithoutConfigureConnectionHandshakePromptsGoUnanswered()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync(PromptDestination) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY CANCELLED", TimeSpan.FromSeconds(5)));
     }
 
 }
