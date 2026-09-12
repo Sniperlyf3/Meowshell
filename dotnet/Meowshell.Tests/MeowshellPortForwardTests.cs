@@ -8,7 +8,7 @@ public sealed class MeowshellPortForwardTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private (MeowshellPortForwardOptions options, string argsFile) Fake(string script = "exec sleep 300\n")
+    private (MeowshellPortForwardOptions options, string argsFile) Fake(string script = "echo '# forwarding 127.0.0.1:18080 -> remote 8080' >&2\necho '# forwarding 127.0.0.1:19090 -> remote 9090' >&2\nexec sleep 300\n")
     {
         var bin = Path.Combine(_dir, "bin");
         Directory.CreateDirectory(bin);
@@ -61,6 +61,7 @@ public sealed class MeowshellPortForwardTests : IDisposable
         Assert.Contains(options.Address, args);
         Assert.Contains("8080", args);
         Assert.Contains("0:9090", args);
+        Assert.Equal(["127.0.0.1:18080", "127.0.0.1:19090"], forward.BoundAddresses);
     }
 
     // Regression test: StartAsync used to discard MeowshellBinaries.Locate's
@@ -77,7 +78,7 @@ public sealed class MeowshellPortForwardTests : IDisposable
         Directory.CreateDirectory(bin);
         var envFile = Path.Combine(_dir, "env-" + Guid.NewGuid().ToString("N"));
         var shell = Path.Combine(bin, "libmeowshell.so");
-        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\nexec sleep 300\n");
+        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\necho '# forwarding 127.0.0.1:18080 -> remote 8080' >&2\nexec sleep 300\n");
         File.SetUnixFileMode(shell, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
         var cat = Path.Combine(bin, "libtailcat.so");
         File.WriteAllText(cat, "#!/bin/bash\ntrue\n");
@@ -157,13 +158,27 @@ public sealed class MeowshellPortForwardTests : IDisposable
     }
 
     [Fact]
-    public async Task CompletedFaultsWhenForwardingCrashesOnItsOwn()
+    public async Task StartAsyncFailsWhenForwardingCrashesBeforeBinding()
     {
         var (options, _) = Fake("sleep 0.2\necho 'listen: address already in use' >&2\nexit 1\n");
-        await using var forward = await MeowshellPortForward.StartAsync(options);
-
-        var ex = await Assert.ThrowsAsync<TailcatException>(() => forward.Completed);
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => MeowshellPortForward.StartAsync(options));
         Assert.Equal(1, ex.ExitCode);
         Assert.Contains("address already in use", ex.Diagnostics);
+    }
+
+    [Fact]
+    public async Task StartAsyncDoesNotReturnUntilAllListenersAreBound()
+    {
+        var (options, _) = Fake("sleep 0.25\necho '# forwarding 127.0.0.1:18080 -> remote 8080' >&2\nsleep 0.25\necho '# forwarding 127.0.0.1:19090 -> remote 9090' >&2\nexec sleep 300\n");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await using var forward = await MeowshellPortForward.StartAsync(options with
+        {
+            Mappings = ["8080", "9090"],
+            StartTimeout = TimeSpan.FromSeconds(3),
+        });
+        sw.Stop();
+
+        Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(400), $"StartAsync returned before both listeners were ready: {sw.Elapsed}");
+        Assert.Equal(["127.0.0.1:18080", "127.0.0.1:19090"], forward.BoundAddresses);
     }
 }
