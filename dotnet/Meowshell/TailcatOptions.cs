@@ -33,7 +33,7 @@ public abstract record TailcatOptions
     /// <summary>How the binaries are named in <see cref="BinaryDirectory"/>. Defaults to the convention for the running platform.</summary>
     public BinaryNaming Naming { get; init; } = BinaryNaming.ForCurrentPlatform();
 
-    /// <summary>A writable HOME. Use the app's FilesDir.</summary>
+    /// <summary>A private writable HOME. On Android use an app-owned child of FilesDir (for example FilesDir/meowshell), not the platform-managed FilesDir root itself.</summary>
     public required string HomeDirectory { get; init; }
 
     /// <summary>URL of a self-hosted, JSON-encoded DERP map to use instead of tailcat's default. Passed to tailcat's own <c>--derpmap-url</c>.</summary>
