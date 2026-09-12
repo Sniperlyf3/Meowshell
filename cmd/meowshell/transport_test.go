@@ -114,12 +114,14 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
+const validTailcatAddress = "tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1"
+
 func TestLooksLikeTailcatAddress(t *testing.T) {
 	cases := []struct {
 		dest string
 		want bool
 	}{
-		{"tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1", true},
+		{validTailcatAddress, true},
 		{"tc", false},
 		{"tcZm9v", false}, // base64-looking hostname, but not a structurally valid Tailcat address
 		{"tcp://example.com", false},
@@ -333,7 +335,7 @@ func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 		if name != "device.example.com" {
 			t.Fatalf("TXT lookup name = %q", name)
 		}
-		return []string{"other=value", "tailcat=tcQUJDRA"}, nil
+		return []string{"other=value", "tailcat=" + validTailcatAddress}, nil
 	}
 	t.Cleanup(func() { lookupAgentTXT = old })
 
@@ -341,8 +343,8 @@ func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !isTailcat || got != "tcQUJDRA" {
-		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, "tcQUJDRA")
+	if !isTailcat || got != validTailcatAddress {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, validTailcatAddress)
 	}
 }
 
