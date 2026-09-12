@@ -162,6 +162,16 @@ func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve b
 			}
 			return nil
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// WalkDir does not follow a directory symlink itself, but a
+			// symlink *entry* reaches here (it's neither a directory nor
+			// skipped), and uploadFile's os.Open would silently follow it --
+			// uploading whatever the link actually points to (e.g. a
+			// symlink named "backup" pointing at ~/.ssh/id_ed25519) under
+			// the innocuous name the tree shows. Refuse rather than upload
+			// arbitrary local files the caller never intended to share.
+			return fmt.Errorf("%s is a symlink; refusing to follow it (symlinks are not supported by cp)", p)
+		}
 		return uploadFile(sf, p, dst, preserve)
 	}); err != nil {
 		return err
@@ -229,6 +239,24 @@ func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve
 	if !recursive {
 		return fmt.Errorf("%s is a directory (use -r to copy recursively)", remotePath)
 	}
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return err
+	}
+	// filepathRelFromSlash already rejects a rel path that textually escapes
+	// localPath (via ".." or an absolute path), but that alone doesn't stop
+	// a destination tree that already contains a symlink component (e.g.
+	// "download/images" pointing at "/etc") from being written through:
+	// filepath.Join + os.MkdirAll/os.Create follow such a symlink like any
+	// other directory. os.Root resolves each path relative to localPath and
+	// refuses to follow a symlink (in-tree or not) that would land outside
+	// it, closing that gap regardless of what the destination tree already
+	// contains.
+	root, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("opening download destination %s: %w", localPath, err)
+	}
+	defer root.Close()
+
 	var dirs []dirMeta
 	walker := sf.Walk(remotePath)
 	for walker.Step() {
@@ -239,20 +267,18 @@ func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve
 		if err != nil {
 			return err
 		}
-		dst := localPath
-		if rel != "." {
-			dst = filepath.Join(localPath, rel)
-		}
 		if walker.Stat().IsDir() {
-			if err := os.MkdirAll(dst, 0o755); err != nil {
-				return err
+			if rel != "." {
+				if err := root.MkdirAll(rel, 0o755); err != nil {
+					return err
+				}
 			}
 			if preserve {
-				dirs = append(dirs, dirMeta{path: dst, modTime: walker.Stat().ModTime(), mode: walker.Stat().Mode().Perm()})
+				dirs = append(dirs, dirMeta{path: rel, modTime: walker.Stat().ModTime(), mode: walker.Stat().Mode().Perm()})
 			}
 			continue
 		}
-		if err := downloadFile(sf, walker.Path(), dst, walker.Stat(), preserve); err != nil {
+		if err := downloadFileInRoot(sf, walker.Path(), root, rel, walker.Stat(), preserve); err != nil {
 			return err
 		}
 	}
@@ -261,10 +287,10 @@ func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
 		d := dirs[i]
-		if err := os.Chtimes(d.path, d.modTime, d.modTime); err != nil {
+		if err := root.Chtimes(d.path, d.modTime, d.modTime); err != nil {
 			return err
 		}
-		if err := os.Chmod(d.path, d.mode); err != nil {
+		if err := root.Chmod(d.path, d.mode); err != nil {
 			return err
 		}
 	}
@@ -300,6 +326,40 @@ func downloadFile(sf *sftp.Client, remotePath, localPath string, fi os.FileInfo,
 		return err
 	}
 	return os.Chmod(localPath, fi.Mode().Perm())
+}
+
+// downloadFileInRoot is downloadFile's counterpart for a recursive download:
+// relPath is resolved against root (localPath) instead of being an absolute
+// path, so os.Root's own symlink-escape checks apply to every path
+// component, not just the textual one filepathRelFromSlash already
+// validated.
+func downloadFileInRoot(sf *sftp.Client, remotePath string, root *os.Root, relPath string, fi os.FileInfo, preserve bool) error {
+	src, err := sf.Open(remotePath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := root.Create(relPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		return err
+	}
+	// See downloadFile's own Close comment: checked explicitly, not
+	// deferred, since a filesystem can fail a write on flush/Close after
+	// io.Copy already reported success.
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("finishing download of %s: %w", relPath, err)
+	}
+	if !preserve {
+		return nil
+	}
+	if err := root.Chtimes(relPath, fi.ModTime(), fi.ModTime()); err != nil {
+		return err
+	}
+	return root.Chmod(relPath, fi.Mode().Perm())
 }
 
 func filepathRelFromSlash(base, target string) (string, error) {

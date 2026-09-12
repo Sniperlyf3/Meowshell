@@ -175,6 +175,87 @@ func TestDownloadPreservesDirectoryModTime(t *testing.T) {
 	}
 }
 
+// TestUploadRefusesToFollowSymlink is a regression test: a recursive
+// upload's filepath.WalkDir doesn't descend through a directory symlink
+// itself, but a symlink *entry* reaches uploadFile the same way a regular
+// file does (WalkDir's DirEntry.IsDir() is false for a symlink, even one
+// pointing at a directory), and uploadFile's os.Open silently follows it --
+// uploading whatever the link actually points to under the innocuous name
+// the tree shows. A symlink named "backup" pointing at ~/.ssh/id_ed25519
+// inside an otherwise-innocent directory would have the key's contents
+// uploaded without any indication in the source tree's own listing.
+func TestUploadRefusesToFollowSymlink(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	_ = session
+
+	srcRoot := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("SENSITIVE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(srcRoot, "innocuous-name")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := upload(client, srcRoot, "dest", true, false)
+	if err == nil {
+		t.Fatal("upload through a symlinked entry succeeded; want it refused")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("upload error = %v, want it to mention the symlink", err)
+	}
+
+	if _, statErr := client.Stat("dest/innocuous-name"); statErr == nil {
+		t.Error("the symlink's target content was uploaded to the server despite the error")
+	}
+}
+
+// TestDownloadRefusesToEscapeViaLocalSymlink is a regression test:
+// filepathRelFromSlash only validates the *textual* remote path (rejecting
+// ".." components), but that alone doesn't stop a destination tree that
+// already contains a symlink component from being written through --
+// filepath.Join + os.MkdirAll/os.Create followed such a symlink like any
+// other directory. If a local "download/outside" entry were ever a symlink
+// pointing elsewhere (planted by an earlier run, another process, or a
+// mistake), remote content named "outside/whatever" would land there
+// instead of inside the requested download root.
+func TestDownloadRefusesToEscapeViaLocalSymlink(t *testing.T) {
+	session, client, _ := newInProcessSFTPClient(t)
+	_ = session
+
+	if err := client.MkdirAll("remote/outside"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := client.Create("remote/outside/payload.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	localRoot := t.TempDir()
+	dst := filepath.Join(localRoot, "dest")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escapeTarget := t.TempDir()
+	if err := os.Symlink(escapeTarget, filepath.Join(dst, "outside")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := download(client, "remote", dst, true, false); err == nil {
+		t.Fatal("download through a locally-symlinked destination component succeeded; want it refused")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(escapeTarget, "payload.txt")); statErr == nil {
+		t.Error("remote content was written through the local symlink, escaping the requested download root")
+	}
+}
+
 func TestCPUsageErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name string
