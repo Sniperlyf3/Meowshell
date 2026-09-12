@@ -280,4 +280,41 @@ func TestRegisterChannelSkipsZeroAndActiveIDs(t *testing.T) {
 	if session.chans[1] != existing {
 		t.Fatal("active channel 1 was overwritten during ID wrap")
 	}
+
+func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) {
+	oldTimeout := openChannelTimeout
+	openChannelTimeout = 100 * time.Millisecond
+	defer func() { openChannelTimeout = oldTimeout }()
+
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	release := make(chan struct{})
+	defer close(release)
+	session.openChannelHandler = func(controlMessage) { <-release }
+
+	session.dispatchOpenChannel(controlMessage{
+		Msg: "open_channel", Kind: "shell", RequestID: "slow-open",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(session.openChannelSlots) != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(session.openChannelSlots) != 0 {
+		t.Fatal("timed-out channel open permanently held an openChannelSlots entry")
+	}
+
+	msgs := readControlFrames(t, &out)
+	found := false
+	for _, msg := range msgs {
+		if msg.RequestID == "slow-open" && msg.Code == errTimeout {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
+	}
+}
+
 }
