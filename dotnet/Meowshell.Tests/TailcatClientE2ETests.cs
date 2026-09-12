@@ -66,7 +66,7 @@ public sealed class TailcatClientE2ETests : IDisposable
 
         var address = await TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions
         {
-            Name = "e2e-server-key",
+            Name = "e2e-server-key-" + Guid.NewGuid().ToString("N"),
             Region = "1",
         });
         Assert.StartsWith("tc", address);
@@ -91,7 +91,7 @@ public sealed class TailcatClientE2ETests : IDisposable
 
         var pub = await TailcatClient.GenerateKeyAsync(ClientOptions(bin), new TailcatKeyOptions
         {
-            Name = "e2e-client-key",
+            Name = "e2e-client-key-" + Guid.NewGuid().ToString("N"),
             Client = true,
         });
         Assert.StartsWith("nodekey:", pub);
