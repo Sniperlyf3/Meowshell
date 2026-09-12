@@ -47,7 +47,11 @@ git -C "$SRC_DIR" clean -fd
 # changed the surrounding code and this needs re-checking, so fail loudly
 # rather than silently shipping the panic.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/pickregion-nil-ifstate.patch"
-git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/key-from-stdin.patch"
+# key-from-stdin.patch's hunks carry no surrounding context lines (each is a
+# single changed line, e.g. "@@ -95 +95 @@"), which git apply's default
+# fuzz/context matching rejects even when the target line is an exact,
+# unambiguous match -- --unidiff-zero is required for this style of hunk.
+git -C "$SRC_DIR" apply --unidiff-zero "$REPO_DIR/patches/tailcat/key-from-stdin.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/windows-parent-job.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,

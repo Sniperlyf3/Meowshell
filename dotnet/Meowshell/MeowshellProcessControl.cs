@@ -43,7 +43,12 @@ internal static class MeowshellProcessControl
         }
         catch
         {
-            job?.Dispose();
+            // JobObject is [SupportedOSPlatform("windows")]; job is always
+            // null on other platforms, but the analyzer can't see that
+            // through the assignment above, so this needs its own explicit
+            // guard to avoid a CA1416 platform-compatibility build error.
+            if (OperatingSystem.IsWindows())
+                job?.Dispose();
             throw;
         }
     }
