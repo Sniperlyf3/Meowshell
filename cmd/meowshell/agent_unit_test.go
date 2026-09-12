@@ -317,5 +317,3 @@ func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) 
 		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
 	}
 }
-
-}
