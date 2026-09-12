@@ -230,6 +230,32 @@ jobs:
         with:
           go-version: stable
 
+      # See the "build" job's own comment: cmd/meowshell's go.mod replaces
+      # github.com/tailscale/tailcat with a local ./.tailcat-src checkout, so
+      # go vet/go test need it present before either can resolve imports.
+      - name: Fetch tailcat source (for go.mod's replace directive)
+        shell: bash
+        env:
+          SRC_REF: ${{ inputs.tailcat_ref }}
+        run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+
+      # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
+      # validation, N9) only builds and runs under GOOS=windows, so it never
+      # gets exercised by the "build" job's own go vet/go test, which run on
+      # ubuntu-latest -- this is the only place in CI a real Windows host
+      # actually type-checks and runs that code.
+      - name: Vet and test meowshell on Windows
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go vet ./...
+          go test ./...
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: tailcat-binaries
