@@ -53,7 +53,7 @@ public static class TailcatClient
     private static ProcessStartInfo Prepare(TailcatClientOptions options)
     {
         var (_, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(tailcat)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -389,7 +389,7 @@ public static class TailcatClient
     public static async Task<TailcatEnvironment> GetEnvironmentAsync(TailcatClientOptions options)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -405,10 +405,15 @@ public static class TailcatClient
         return TailcatEnvironment.Parse(result.Stdout);
     }
 
+    // Keep bearer-like Tailcat addresses and caller filesystem paths out of
+    // timeout/output-limit exception text. The arguments are already in the
+    // child ProcessStartInfo; diagnostics need only identify the operation.
+    internal static string CpTimeoutCommand(IReadOnlyList<string> _) => "meowshell cp";
+
     private static Task<TailcatResult> RunMeowshellCpAsync(TailcatClientOptions options, IReadOnlyList<string> cpArgs)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -425,6 +430,6 @@ public static class TailcatClient
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
         TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
-        return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));
+        return RunAsync(psi, options.Timeout, CpTimeoutCommand(cpArgs));
     }
 }
