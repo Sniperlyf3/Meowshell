@@ -97,6 +97,18 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         }
     }
 
+    // Regression test for N13: see MeowshellPortForwardTests's equivalent --
+    // GracePeriod used to reach TailcatListener unvalidated, only actually
+    // used much later inside StopAsync's own CancellationTokenSource.
+    [Fact]
+    public async Task StartAsync_RejectsAnInvalidGracePeriodWithoutStartingTheProcess()
+    {
+        var (options, argsFile) = Fake();
+        var bad = options with { GracePeriod = TimeSpan.FromSeconds(-1) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => MeowshellSocksProxy.StartAsync(bad));
+        Assert.False(File.Exists(argsFile), "the proxy process was started despite an invalid GracePeriod");
+    }
+
     [Fact]
     public async Task StaysUpUntilStoppedAndIsIdempotent()
     {

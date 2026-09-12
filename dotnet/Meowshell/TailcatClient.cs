@@ -129,6 +129,11 @@ public static class TailcatClient
 
     private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
     {
+        // Validated here, the one place every caller (RunAsync(options, args),
+        // GetEnvironmentAsync, RunMeowshellCpAsync) funnels through, and
+        // before the process below is started: a bad timeout must never
+        // leak a spawned child that nothing will ever wait for or kill.
+        TimeSpanValidation.EnsurePositiveAndBounded(timeout, nameof(timeout));
         using var process = new Process { StartInfo = psi };
         using var job = MeowshellProcessControl.Start(process);
         using var cts = new CancellationTokenSource(timeout);

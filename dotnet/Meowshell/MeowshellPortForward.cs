@@ -46,6 +46,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         {
             throw new ArgumentException("At least one port mapping is required.", nameof(options));
         }
+        TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
         Directory.CreateDirectory(options.HomeDirectory);

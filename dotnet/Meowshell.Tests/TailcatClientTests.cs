@@ -59,6 +59,25 @@ public sealed class TailcatClientTests : IDisposable
         };
     }
 
+    // Regression test for N13: the low-level RunAsync used to hand Timeout
+    // straight to `new CancellationTokenSource(timeout)` after the process
+    // was already started (`using var process = ...; using var job =
+    // MeowshellProcessControl.Start(process);` both precede it), so an
+    // invalid Timeout (negative, or too large for CancellationTokenSource's
+    // int-milliseconds range) threw only after spawning a child that nothing
+    // then held a reference to kill -- disposing a Process does not kill it.
+    // argsFile is written by the fake tailcat's own stdout redirection as
+    // soon as it actually runs, so its absence proves the process never started.
+    [Fact]
+    public async Task GenerateKeyRejectsAnInvalidTimeoutWithoutStartingTheProcess()
+    {
+        var (options, argsFile) = Fake("echo tcTHEADDRESS000000000000\n");
+        var bad = options with { Timeout = TimeSpan.FromSeconds(-5) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => TailcatClient.GenerateKeyAsync(
+            bad, new TailcatKeyOptions { Name = "test-key" }));
+        Assert.False(File.Exists(argsFile), "the tailcat process was started despite an invalid Timeout");
+    }
+
     [Fact]
     public async Task GenerateKeyReturnsTheLastLineOfOutput()
     {

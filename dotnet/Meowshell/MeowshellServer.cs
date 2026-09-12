@@ -108,6 +108,9 @@ public sealed class MeowshellServer : IAsyncDisposable
     private readonly TailcatListener _listener;
     private readonly string _addressFile;
     private readonly CancellationTokenSource _deadline = new();
+    private Task _deadlineTask = Task.CompletedTask;
+
+    internal Task DeadlineTaskForTests => _deadlineTask;
 
     /// <summary>The tailcat address clients connect to: <c>tailcat ssh &lt;address&gt;</c>.</summary>
     public string Address { get; private set; } = "";
@@ -148,6 +151,10 @@ public sealed class MeowshellServer : IAsyncDisposable
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
+        TimeSpanValidation.EnsurePositiveAndBounded(options.Lifetime, nameof(options.Lifetime));
+        TimeSpanValidation.EnsurePositiveAndBounded(options.StartTimeout, nameof(options.StartTimeout));
+        TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
+
         var hasSSH = !string.IsNullOrEmpty(options.AuthorizedKeys) || options.InsecureNoAuth;
         if (!string.IsNullOrEmpty(options.AuthorizedKeys) && options.InsecureNoAuth)
         {
@@ -292,7 +299,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
     }
 
-    private void StartDeadline() => _ = Task.Run(async () =>
+    private void StartDeadline() => _deadlineTask = Task.Run(async () =>
     {
         try
         {
@@ -320,6 +327,12 @@ public sealed class MeowshellServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        // Observed rather than left to fault silently as an unobserved task
+        // exception: StopAsync() above already cancels _deadline, so this
+        // normally only awaits OperationCanceledException home, but nothing
+        // upstream should have to trust that StartDeadline's background task
+        // can never fail any other way.
+        try { await _deadlineTask.ConfigureAwait(false); } catch { }
         _deadline.Dispose();
         await _listener.DisposeAsync().ConfigureAwait(false);
     }

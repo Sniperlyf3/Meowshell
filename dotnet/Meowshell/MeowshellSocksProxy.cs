@@ -35,6 +35,8 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
     public static Task<MeowshellSocksProxy> StartAsync(
         MeowshellSocksOptions options, Action<string>? onLog = null)
     {
+        TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
+
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
         Directory.CreateDirectory(options.HomeDirectory);
 

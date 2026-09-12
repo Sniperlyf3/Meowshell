@@ -92,6 +92,49 @@ public sealed class MeowshellServerTests : IDisposable
         await Assert.ThrowsAsync<TimeoutException>(() => MeowshellServer.StartAsync(slow));
     }
 
+    // Regression tests for N13: StartAsync used to hand Lifetime/StartTimeout/
+    // GracePeriod straight to a CancellationTokenSource/Task.Delay deep inside
+    // WaitForAddressAsync or StopAsync, well after the process below was
+    // already spawned -- so a negative value (an obvious caller mistake, or a
+    // TimeSpan built from bad arithmetic) threw ArgumentOutOfRangeException
+    // only after a child process was already running and unreachable (nothing
+    // holds a reference to kill it). The marker file below proves the process
+    // was never started at all: a real "process actually ran" signal, not
+    // just "StartAsync threw the right exception".
+    private (MeowshellOptions options, string marker) FakeWithStartMarker(TimeSpan? lifetime = null)
+    {
+        var marker = Path.Combine(_dir, "started-" + Guid.NewGuid().ToString("N"));
+        var script = $"touch {marker}\n" + PublishesAddress;
+        return (Fake(script, lifetime), marker);
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsANonPositiveLifetimeWithoutStartingTheProcess()
+    {
+        var (options, marker) = FakeWithStartMarker();
+        var bad = options with { Lifetime = TimeSpan.Zero };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => MeowshellServer.StartAsync(bad));
+        Assert.False(File.Exists(marker), "the server process was started despite an invalid Lifetime");
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsANegativeStartTimeoutWithoutStartingTheProcess()
+    {
+        var (options, marker) = FakeWithStartMarker();
+        var bad = options with { StartTimeout = TimeSpan.FromSeconds(-1) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => MeowshellServer.StartAsync(bad));
+        Assert.False(File.Exists(marker), "the server process was started despite an invalid StartTimeout");
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsAnExcessiveGracePeriodWithoutStartingTheProcess()
+    {
+        var (options, marker) = FakeWithStartMarker();
+        var bad = options with { GracePeriod = TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromMilliseconds(1) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => MeowshellServer.StartAsync(bad));
+        Assert.False(File.Exists(marker), "the server process was started despite an invalid GracePeriod");
+    }
+
     [Fact]
     public async Task StopAsync_TerminatesTheServerAndIsIdempotent()
     {

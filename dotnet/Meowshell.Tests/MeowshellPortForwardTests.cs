@@ -117,6 +117,23 @@ public sealed class MeowshellPortForwardTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => MeowshellPortForward.StartAsync(empty));
     }
 
+    // Regression test for N13: GracePeriod used to reach TailcatListener
+    // unvalidated and only actually get used much later, inside StopAsync's
+    // own CancellationTokenSource -- so an invalid value (a caller mistake, a
+    // TimeSpan built from bad arithmetic) would not surface until shutdown,
+    // by which point the process was already running. The redirection line
+    // at the top of the fake shell script always creates argsFile as soon as
+    // the process actually starts, regardless of arguments, so its absence
+    // here proves the process was never spawned.
+    [Fact]
+    public async Task StartAsync_RejectsAnInvalidGracePeriodWithoutStartingTheProcess()
+    {
+        var (options, argsFile) = Fake();
+        var bad = options with { GracePeriod = TimeSpan.FromSeconds(-1) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => MeowshellPortForward.StartAsync(bad));
+        Assert.False(File.Exists(argsFile), "the forward process was started despite an invalid GracePeriod");
+    }
+
     [Fact]
     public async Task StaysUpUntilStoppedAndIsIdempotent()
     {
