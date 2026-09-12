@@ -412,6 +412,7 @@ func TestOpenForwardChannelRejectsExcessiveMaxConnectionsBeforeBinding(t *testin
 	if len(msgs) != 1 || msgs[0].RequestID != "too-many" || msgs[0].Code != errProtocolError {
 		t.Fatalf("excessive max_connections response = %+v, want one protocol error", msgs)
 	}
+}
 
 func TestDialWithTimeoutAbortUnblocksStuckDial(t *testing.T) {
 	abort := make(chan struct{})
@@ -438,6 +439,4 @@ func TestDialWithTimeoutAbortUnblocksStuckDial(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout abort did not unwind the underlying dial goroutine")
 	}
-}
-
 }
