@@ -153,7 +153,7 @@ public sealed class TailcatClientE2ETests : IDisposable
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
         };
-        await using var server = await MeowshellServer.StartAsync(serverOptions);
+        await using var server = await RelayE2E.StartServerAsync(serverOptions);
         Mask(server.Address);
         var clientOptions = ClientOptions(bin);
 
@@ -201,7 +201,7 @@ public sealed class TailcatClientE2ETests : IDisposable
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
         };
-        await using var server = await MeowshellServer.StartAsync(serverOptions);
+        await using var server = await RelayE2E.StartServerAsync(serverOptions);
         Mask(server.Address);
         var clientOptions = ClientOptions(bin);
         var address = new TailcatAddress(server.Address);
@@ -243,7 +243,7 @@ public sealed class TailcatClientE2ETests : IDisposable
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
         };
-        await using var server = await MeowshellServer.StartAsync(serverOptions);
+        await using var server = await RelayE2E.StartServerAsync(serverOptions);
         Mask(server.Address);
         var clientOptions = ClientOptions(bin);
 
