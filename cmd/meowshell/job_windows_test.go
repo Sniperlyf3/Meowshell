@@ -30,6 +30,7 @@ func TestKillOnCloseJobTerminatesChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	closed := time.Now()
 	if err := job.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -37,11 +38,15 @@ func TestKillOnCloseJobTerminatesChild(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("child exited successfully; want Job Object closure to terminate it")
+	case <-done:
+		// Whether a job-triggered kill makes Wait() return an error isn't a
+		// documented, version-stable contract -- what the job guarantee
+		// actually promises is prompt termination. "ping -n 30" takes ~29s
+		// unless killed, so finishing well short of that is the real signal.
+		if elapsed := time.Since(closed); elapsed > 5*time.Second {
+			t.Fatalf("child took %s to exit after job closure; want prompt termination, not a natural finish", elapsed)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("child remained alive after kill-on-close Job Object was closed")
 	}
 }
@@ -98,17 +103,21 @@ func TestParentJobSelfJoinClosesStartupRace(t *testing.T) {
 		t.Fatalf("child startup signal = %q, want joined", line)
 	}
 
+	closed := time.Now()
 	if err := job.Close(); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("child exited successfully; want closing the parent job to terminate it")
+	case <-done:
+		// See TestKillOnCloseJobTerminatesChild: a job-triggered kill isn't
+		// guaranteed to make Wait() return an error, so promptness (well
+		// short of the child's own 30s sleep) is the property to check.
+		if elapsed := time.Since(closed); elapsed > 5*time.Second {
+			t.Fatalf("self-joined child took %s to exit after parent job closure; want prompt termination, not its own 30s sleep completing", elapsed)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("self-joined child survived parent Job Object closure")
 	}
 }
