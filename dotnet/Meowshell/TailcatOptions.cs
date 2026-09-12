@@ -52,6 +52,9 @@ public abstract record TailcatOptions
 /// <summary>Configuration shared by every long-lived listener this library wraps, on top of <see cref="TailcatOptions"/>.</summary>
 public abstract record TailcatListenerOptions : TailcatOptions
 {
+    /// <summary>How long to wait for the native listener to bind and report readiness.</summary>
+    public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
     /// <summary>How long SIGTERM gets before SIGKILL.</summary>
     public TimeSpan GracePeriod { get; init; } = TimeSpan.FromSeconds(3);
 }
