@@ -357,9 +357,14 @@ func TestResetSFTPClientDoesNotCloseNewerReplacement(t *testing.T) {
 	}
 }
 
-func TestResetSFTPClientClearsMatchedClient(t *testing.T) {
-	session, current, _, _ := newInProcessSFTPClient(t)
+func TestResetSFTPClientClearsMatchedClientAfterTransportIsClosed(t *testing.T) {
+	session, current, _, breakTransport := newInProcessSFTPClient(t)
 
+	// resetSFTPClient is a cleanup helper, not a cancellation primitive:
+	// pkg/sftp.Client.Close may wait for its receive loop while the transport
+	// is still live. Production timeout recovery closes SSH first, and
+	// closeHops now does the same before resetting this field.
+	breakTransport()
 	session.resetSFTPClient(current)
 
 	session.sftpMu.Lock()
