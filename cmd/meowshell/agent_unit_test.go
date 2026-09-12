@@ -316,4 +316,71 @@ func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) 
 	if !found {
 		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
 	}
+
+type failingGateWriteCloser struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *failingGateWriteCloser) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return 0, fmt.Errorf("simulated write failure")
+}
+
+func (*failingGateWriteCloser) Close() error { return nil }
+
+func TestChannelWriterFailureDrainsPendingWaitGroup(t *testing.T) {
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	writer := &failingGateWriteCloser{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	ch := &agentChannel{stdin: writer}
+	const id = uint32(7)
+	session.chans[id] = ch
+	session.startChannelWriter(id, ch)
+
+	// First write enters the worker and blocks. Queue additional writes behind
+	// it so a failure of the in-flight write leaves pending work to account for.
+	session.handleData(id, []byte("first"))
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("writer never started first write")
+	}
+	session.handleData(id, []byte("second"))
+	session.handleData(id, []byte("third"))
+
+	waitDone := make(chan struct{})
+	go func() {
+		ch.writePending.Wait()
+		close(waitDone)
+	}()
+
+	close(writer.release)
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("writePending remained non-zero after writer failure drained queued writes")
+	}
+
+	// Once the writer has failed/stopped, stale data for the removed channel
+	// must not create a new pending count after the worker is gone.
+	session.handleData(id, []byte("stale"))
+	waitDone2 := make(chan struct{})
+	go func() {
+		ch.writePending.Wait()
+		close(waitDone2)
+	}()
+	select {
+	case <-waitDone2:
+	case <-time.After(time.Second):
+		t.Fatal("stale data after writer stop reintroduced an unbalanced pending write")
+	}
+}
+
 }
