@@ -194,8 +194,9 @@ func TestSlowSFTPOperationDoesNotBlockFrameReader(t *testing.T) {
 // every future SFTP operation on the connection. Fills every slot with an
 // op that never returns at all, confirms a further one is rejected while
 // they're all still hung, then confirms that after sftpOpTimeout elapses,
-// every slot is free again -- even though none of the original ops ever
-// actually finished.
+// every slot is free again -- even though none of the original ops finished
+// before their timeout. Test cleanup then releases the simulated hung server
+// calls so repeated test runs do not accumulate immortal goroutines.
 func TestDispatchSFTPOpFreesSlotsAfterTimeoutEvenIfOpsNeverReturn(t *testing.T) {
 	oldTimeout := sftpOpTimeout
 	sftpOpTimeout = 200 * time.Millisecond
@@ -203,8 +204,10 @@ func TestDispatchSFTPOpFreesSlotsAfterTimeoutEvenIfOpsNeverReturn(t *testing.T) 
 
 	var out bytes.Buffer
 	session := newAgentSession(nil, &out)
+	release := make(chan struct{})
+	defer close(release)
 	session.sftpOpHandler = func(controlMessage) {
-		select {} // simulates a remote server that never responds at all
+		<-release // simulates a server that stays hung until test cleanup
 	}
 
 	const slots = 8 // matches newAgentSession's sftpOpSlots capacity
