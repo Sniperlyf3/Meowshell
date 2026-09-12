@@ -281,6 +281,7 @@ func TestValidateKeyRejectsTruncatedOversizeInput(t *testing.T) {
 	if err := validateKey(limited); err == nil {
 		t.Fatal("truncated oversized key unexpectedly parsed as valid JSON")
 	}
+}
 
 func TestFindTailcatRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -307,6 +308,4 @@ func TestFindTailcatRejectsGroupWritableExecutable(t *testing.T) {
 	if _, err := findTailcat(p); err == nil {
 		t.Fatal("findTailcat accepted a group-writable native executable")
 	}
-}
-
 }
