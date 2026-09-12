@@ -2,7 +2,7 @@ diff --git a/cmd/tailcat/managed_parent_linux.go b/cmd/tailcat/managed_parent_li
 new file mode 100644
 --- /dev/null
 +++ b/cmd/tailcat/managed_parent_linux.go
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,46 @@
 +//go:build linux || android
 +
 +package main
