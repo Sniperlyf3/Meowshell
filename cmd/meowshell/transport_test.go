@@ -318,7 +318,6 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 	return total, nil
 }
 
-
 func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 	old := lookupAgentTXT
 	lookupAgentTXT = func(ctx context.Context, name string) ([]string, error) {

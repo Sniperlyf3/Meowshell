@@ -260,8 +260,8 @@ type agentSession struct {
 
 func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 	return &agentSession{
-		in:      in,
-		out:     out,
+		in:          in,
+		out:         out,
 		chans:       make(map[uint32]*agentChannel),
 		prompts:     make(map[string]chan controlMessage),
 		sftpOpSlots: make(chan struct{}, 8),

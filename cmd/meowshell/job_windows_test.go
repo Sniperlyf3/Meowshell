@@ -46,7 +46,6 @@ func TestKillOnCloseJobTerminatesChild(t *testing.T) {
 	}
 }
 
-
 // TestParentJobSelfJoinClosesStartupRace verifies the child-side half of the
 // pre-start job protocol. The parent creates the named kill-on-close job before
 // Process.Start; the child opens and joins that exact job from its environment

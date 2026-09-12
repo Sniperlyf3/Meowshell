@@ -203,7 +203,6 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 	}
 }
 
-
 func readRemoteFile(t *testing.T, client *sftp.Client, path string) []byte {
 	t.Helper()
 	f, err := client.Open(path)

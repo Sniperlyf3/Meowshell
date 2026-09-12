@@ -38,7 +38,6 @@ func TestOpenChannelRejectsUnknownKind(t *testing.T) {
 	}
 }
 
-
 type blockingWriteCloser struct {
 	started chan struct{}
 	release chan struct{}
@@ -122,7 +121,6 @@ func TestBlockedChannelWriteDoesNotBlockFrameReader(t *testing.T) {
 	}
 }
 
-
 // TestSlowSFTPOperationDoesNotBlockFrameReader is a regression test for
 // head-of-line blocking: sftpOp used to run synchronously inside
 // handleControl/serveFrames, so one slow server-side metadata operation could
@@ -183,7 +181,6 @@ func TestSlowSFTPOperationDoesNotBlockFrameReader(t *testing.T) {
 		t.Fatal("serveFrames did not finish")
 	}
 }
-
 
 // TestRegisterChannelSkipsZeroAndActiveIDs is a regression test for uint32
 // channel-ID wraparound. ID 0 is reserved for connection control, and wrapping
