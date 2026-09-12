@@ -180,6 +180,9 @@ func dialHTTPConnectProxy(ctx context.Context, proxyURL *url.URL, hostPort strin
 	}
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", hostPort, hostPort, authHeader); err != nil {
 		conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	br := bufio.NewReader(conn)
