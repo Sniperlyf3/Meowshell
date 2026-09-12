@@ -265,7 +265,10 @@ func TestServeValidation(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if err := serve(c.args); err == nil {
 				t.Fatalf("serve(%v) did not error", c.args)
-			
+			}
+		})
+	}
+}
 
 func TestValidateKeyRejectsTruncatedOversizeInput(t *testing.T) {
 	const maxKeyJSON = 64 << 10
@@ -277,9 +280,5 @@ func TestValidateKeyRejectsTruncatedOversizeInput(t *testing.T) {
 	limited := payload[:maxKeyJSON]
 	if err := validateKey(limited); err == nil {
 		t.Fatal("truncated oversized key unexpectedly parsed as valid JSON")
-	}
-}
-}
-		})
 	}
 }
