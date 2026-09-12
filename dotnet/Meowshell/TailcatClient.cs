@@ -198,7 +198,7 @@ public static class TailcatClient
         var last = lines[^1];
         var wantPrefix = key.Client ? "nodekey:" : "tc";
         if (!last.StartsWith(wantPrefix, StringComparison.Ordinal))
-            throw UnexpectedOutput("genkey", $"expected {(key.Client ? "a public key (\"nodekey:...\")" : "a tailcat address (\"tc...\")")}, got: {last}");
+            throw UnexpectedOutput("genkey", $"expected {(key.Client ? "a public key (\"nodekey:...\")" : "a tailcat address (\"tc...\")")}; raw output was omitted because malformed native output may contain credential-like material");
         return last;
     }
 
