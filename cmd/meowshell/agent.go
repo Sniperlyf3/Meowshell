@@ -372,7 +372,7 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 		sc, err := dialSSHClient(ctx, dial, remoteAddr, user, hkCallback, opts.auth)
 		if err != nil {
 			closeClients(chain)
-			return fmt.Errorf("connecting to %s: %w", hop, err)
+			return fmt.Errorf("connecting to %s: %w", connectTargetForDiagnostics(hop, last && looksLikeTailcatAddress(hop)), err)
 		}
 		chain = append(chain, sc)
 		current = sc
@@ -381,6 +381,13 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 	a.hops = chain
 	a.scPtr.Store(current)
 	return nil
+}
+
+func connectTargetForDiagnostics(destination string, isTailcat bool) string {
+	if isTailcat {
+		return "tailcat destination"
+	}
+	return destination
 }
 
 func closeClients(clients []*ssh.Client) {
