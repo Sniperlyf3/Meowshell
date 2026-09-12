@@ -209,10 +209,6 @@ jobs:
           MEOWSHELL: dist/meowshell_linux_${{ matrix.arch }}
         run: ./e2e/host-e2e.sh
 
-      - name: Stop the local DERP relay
-        if: always()
-        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
-
   # The only place the Windows binaries are executed. meowshell is a
   # launcher there, so this covers the launcher, the session, and the key
   # staging that has to work differently without unlink-while-open.
