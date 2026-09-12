@@ -328,12 +328,37 @@ func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 	}
 	t.Cleanup(func() { lookupAgentTXT = old })
 
-	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com")
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !isTailcat || got != "tcQUJDRA" {
 		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, "tcQUJDRA")
+	}
+}
+
+// TestResolveAgentDestinationTXTLookupIsOptIn is the security-relevant
+// regression: without allowTXT, a bare hostname must be left as an ordinary
+// SSH destination -- verified via known_hosts' TOFU -- even when a valid
+// "tailcat=" TXT record exists for it. Without this, anyone able to publish
+// a TXT record for a hostname (DNS being far easier to tamper with or
+// misconfigure than a host's own SSH key) could silently redirect trust from
+// known_hosts to Tailcat's own, unrelated authentication for any hostname a
+// caller ever typed, with no indication anything unusual happened.
+func TestResolveAgentDestinationTXTLookupIsOptIn(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		t.Fatal("TXT record looked up despite allowTXT=false")
+		return nil, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isTailcat || got != "device.example.com" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want ordinary SSH host, no TXT lookup", got, isTailcat)
 	}
 }
 
@@ -344,7 +369,7 @@ func TestResolveAgentDestinationLeavesOrdinarySSHHostAlone(t *testing.T) {
 	}
 	t.Cleanup(func() { lookupAgentTXT = old })
 
-	got, isTailcat, err := resolveAgentDestination(context.Background(), "ssh.example.com")
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "ssh.example.com", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +385,7 @@ func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
 	}
 	t.Cleanup(func() { lookupAgentTXT = old })
 
-	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com"); err == nil {
+	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com", true); err == nil {
 		t.Fatal("malformed tailcat TXT record was accepted")
 	}
 }

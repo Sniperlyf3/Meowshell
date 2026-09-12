@@ -61,6 +61,7 @@ func agentCmd(args []string) error {
 	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	port := fs.String("p", "22", "port number of the destination's SSH service")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts)")
+	resolveTailcatTXT := fs.Bool("resolve-tailcat-txt", false, "for a bare hostname destination, look up a \"tailcat=tc...\" DNS TXT record and dial that Tailcat address instead of ordinary SSH. Off by default: this hands trust to whoever controls DNS for that name instead of known_hosts' TOFU verification, so it must be requested explicitly rather than applying silently to any hostname that happens to have such a record")
 	var jumps stringList
 	fs.Var(&jumps, "jump", "an intermediate TCP SSH host to tunnel through first ([user@]host[:port]); repeatable, in order, closest-to-here first")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, agentUsage); fs.PrintDefaults() }
@@ -71,7 +72,7 @@ func agentCmd(args []string) error {
 		return fmt.Errorf("agent needs exactly one destination")
 	}
 	dest := fs.Arg(0)
-	resolvedDest, isTailcat, err := resolveAgentDestination(context.Background(), dest)
+	resolvedDest, isTailcat, err := resolveAgentDestination(context.Background(), dest, *resolveTailcatTXT)
 	if err != nil {
 		return err
 	}

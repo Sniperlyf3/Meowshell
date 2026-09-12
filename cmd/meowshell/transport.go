@@ -214,7 +214,7 @@ func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 var lookupAgentTXT = net.DefaultResolver.LookupTXT
 
-func resolveAgentDestination(ctx context.Context, dest string) (string, bool, error) {
+func resolveAgentDestination(ctx context.Context, dest string, allowTXT bool) (string, bool, error) {
 	if looksLikeTailcatAddress(dest) {
 		return dest, true, nil
 	}
@@ -228,6 +228,18 @@ func resolveAgentDestination(ctx context.Context, dest string) (string, bool, er
 		return dest, false, nil
 	}
 	if net.ParseIP(strings.Trim(dest, "[]")) != nil {
+		return dest, false, nil
+	}
+	// A bare hostname otherwise means ordinary SSH, verified against
+	// known_hosts with TOFU. The TXT indirection below hands trust to a
+	// completely different mechanism instead -- tailcat's own client
+	// authentication, with no known_hosts involved at all -- on the say-so
+	// of whoever controls DNS for that name. That is a meaningfully weaker
+	// (or at least different) trust boundary than the one a bare hostname
+	// otherwise implies, so it only applies when the caller has explicitly
+	// asked for it; the default leaves a bare hostname as ordinary SSH,
+	// even if a "tailcat=" TXT record happens to exist for it.
+	if !allowTXT {
 		return dest, false, nil
 	}
 
