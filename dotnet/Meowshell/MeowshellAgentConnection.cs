@@ -25,6 +25,9 @@ public sealed record MeowshellAgentConfigureOptions
 
     /// <summary>Forward the local ssh-agent (if any) to the remote, once connected.</summary>
     public bool ForwardLocalAgent { get; init; }
+
+    /// <summary>Let a Keystore-backed RSA key (<see cref="KeystoreKeyIds"/>) fall back to the ssh-rsa (SHA-1) signature format for a server that predates RFC 8332 and rejects the SHA-2 RSA formats offered by default. Leave unset unless a specific server is known to need it: OpenSSH itself has refused ssh-rsa by default since 8.8.</summary>
+    public bool AllowLegacyKeyAlgorithms { get; init; }
 }
 
 /// <summary>A host-key prompt: an unrecognized key on a TCP-transport connection, needing a trust-on-first-use decision.</summary>
@@ -192,6 +195,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             KeystoreKeyIds = configure.KeystoreKeyIds?.ToArray(),
             KeystorePublicKeys = ToJagged(configure.KeystorePublicKeys),
             AgentForwarding = configure.ForwardLocalAgent,
+            AllowLegacyKeyAlgorithms = configure.AllowLegacyKeyAlgorithms,
             ProxyUrl = proxyUrl,
         }, cancellationToken);
 

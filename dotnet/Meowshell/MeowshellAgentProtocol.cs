@@ -151,6 +151,7 @@ internal sealed class AgentMessage
     public string[]? KeystoreKeyIds { get; set; }
     public byte[][]? KeystorePublicKeys { get; set; }
     public bool AgentForwarding { get; set; }
+    public bool AllowLegacyKeyAlgorithms { get; set; }
 
     public string? ProxyUrl { get; set; }
 
