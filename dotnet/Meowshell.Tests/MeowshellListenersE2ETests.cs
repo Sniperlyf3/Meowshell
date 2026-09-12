@@ -129,6 +129,7 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         });
         var backendPort = ((IPEndPoint)backend.LocalEndpoint).Port;
 
+        var serverLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
         await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
@@ -138,7 +139,24 @@ public sealed class MeowshellListenersE2ETests : IDisposable
             AllowExitNode = true,
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
-        });
+        }, onLog: serverLogs.Enqueue);
+
+        // Register the startup log callback before the forward process starts.
+        // Subscribing through forward.Log after StartAsync returns has its own
+        // race: tailcat can bind and print the one-shot "forwarding ..." line
+        // before the caller gets the returned wrapper.
+        var forwardLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var boundAddressFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnForwardLog(string line)
+        {
+            forwardLogs.Enqueue(line);
+            var marker = "forwarding ";
+            var at = line.IndexOf(marker, StringComparison.Ordinal);
+            if (at < 0) return;
+            var rest = line[(at + marker.Length)..];
+            var end = rest.IndexOf(' ');
+            if (end > 0) boundAddressFound.TrySetResult(rest[..end]);
+        }
 
         await using var forward = await MeowshellPortForward.StartAsync(new MeowshellPortForwardOptions
         {
@@ -146,18 +164,7 @@ public sealed class MeowshellListenersE2ETests : IDisposable
             HomeDirectory = Path.Combine(_dir, "forward-home"),
             Address = server.Address,
             Mappings = [$"0:{backendPort}"],
-        });
-
-        var boundAddressFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        forward.Log += line =>
-        {
-            var marker = "forwarding ";
-            var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var rest = line[(at + marker.Length)..];
-            var end = rest.IndexOf(' ');
-            if (end > 0) boundAddressFound.TrySetResult(rest[..end]);
-        };
+        }, OnForwardLog);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var registration = cts.Token.Register(() => boundAddressFound.TrySetCanceled());
@@ -207,6 +214,9 @@ public sealed class MeowshellListenersE2ETests : IDisposable
 
         Assert.True(
             got == backendReply,
-            $"exit-node forward never became end-to-end ready; last={got ?? "<null>"}; attempts: {string.Join(" | ", attempts)}");
+            "exit-node forward never became end-to-end ready; " +
+            $"last={got ?? "<null>"}; attempts: {string.Join(" | ", attempts)}; " +
+            $"forward logs: {string.Join(" || ", forwardLogs)}; " +
+            $"server logs: {string.Join(" || ", serverLogs)}");
     }
 }
