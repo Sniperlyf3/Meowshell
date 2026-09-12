@@ -30,18 +30,27 @@ internal static class MeowshellBinaries
     private static void EnsureExecutable(string path)
     {
         if (OperatingSystem.IsWindows()) return;
-        try
+
+        var info = new FileInfo(path);
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException($"refusing native binary symlink/reparse point: {path}");
+
+        var mode = File.GetUnixFileMode(path);
+        const UnixFileMode writeByOthers =
+            UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+        if ((mode & writeByOthers) != 0)
         {
-            var mode = File.GetUnixFileMode(path);
-            const UnixFileMode exec =
-                UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
-            if ((mode & UnixFileMode.UserExecute) == 0)
-            {
-                File.SetUnixFileMode(path, mode | exec);
-            }
+            throw new IOException(
+                $"refusing native binary writable by group/other: {path} ({Convert.ToString((int)mode, 8)})");
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+
+        if ((mode & UnixFileMode.UserExecute) == 0)
         {
+            // The runtime packages can lose the executable bit when unpacked
+            // through tooling that does not preserve Unix metadata. Restore
+            // only the owner's execute bit; making a private binary executable
+            // by group/other broadens access for no functional reason.
+            File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
         }
     }
 }
