@@ -244,7 +244,8 @@ type agentSession struct {
 	sftpOpSlots   chan struct{}
 	sftpOpHandler func(controlMessage)
 
-	openChannelSlots chan struct{}
+	openChannelSlots   chan struct{}
+	openChannelHandler func(controlMessage)
 
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
@@ -379,9 +380,7 @@ func closeClients(clients []*ssh.Client) {
 }
 
 func (a *agentSession) closeHops() {
-	if a.sftpClient != nil {
-		a.sftpClient.Close()
-	}
+	a.resetSFTPClient(nil)
 	a.tcMu.Lock()
 	if a.tcClient != nil {
 		a.tcClient.Close()
@@ -425,7 +424,7 @@ func (a *agentSession) startKeepalive() {
 
 func (a *agentSession) reportConnectionLost(err error) {
 	a.writeError(0, errConnectionLost, err)
-	if client := a.client(); client != nil {
+	if client := a.scPtr.Swap(nil); client != nil {
 		client.Close()
 	}
 }
@@ -598,12 +597,43 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 // open. Bounded by openChannelSlots the same way dispatchSFTPOp already
 // bounds concurrent SFTP ops, so a client also can't force unbounded
 // goroutines by flooding open_channel requests.
+var openChannelTimeout = 30 * time.Second
+
 func (a *agentSession) dispatchOpenChannel(msg controlMessage) {
 	select {
 	case a.openChannelSlots <- struct{}{}:
+		done := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { <-a.openChannelSlots }) }
+
 		go func() {
-			defer func() { <-a.openChannelSlots }()
+			defer close(done)
+			defer release()
+			if a.openChannelHandler != nil {
+				a.openChannelHandler(msg)
+				return
+			}
 			a.openChannel(msg)
+		}()
+		go func() {
+			timer := time.NewTimer(openChannelTimeout)
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-timer.C:
+				// SSH's channel-open/session setup APIs have no context or
+				// per-request cancellation. Reclaim the slot, report the
+				// timed-out request, and fail the SSH transport itself so
+				// the blocked goroutine is forced to unwind rather than
+				// becoming a permanent leak. Once the transport is gone,
+				// handleControl also refuses new channel work because
+				// reportConnectionLost clears scPtr.
+				release()
+				a.writeOpenError(msg.RequestID, errTimeout,
+					fmt.Errorf("opening channel did not finish within %s", openChannelTimeout))
+				a.reportConnectionLost(fmt.Errorf("channel open timed out after %s", openChannelTimeout))
+			}
 		}()
 	default:
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("too many concurrent channel opens"))
