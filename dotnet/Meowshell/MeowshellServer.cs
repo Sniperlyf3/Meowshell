@@ -91,10 +91,20 @@ public sealed record MeowshellOptions : TailcatListenerOptions
             Lifetime = lifetime,
         };
 #else
+        // N3: this used to be Path.Combine(Path.GetTempPath(), "meowshell")
+        // -- a fixed, predictable name inside a directory every local user
+        // can write to, so anyone who got there first could plant a
+        // symlink at that exact path (redirecting session key material and
+        // known_hosts, since this becomes HOME for the spawned process,
+        // wherever they chose) or simply leave the directory readable by
+        // others. MeowshellHomeDirectory.ResolveDefault() resolves a
+        // private, per-user location instead and verifies (or establishes)
+        // that it's actually private before handing it back.
+        var homeDir = MeowshellHomeDirectory.ResolveDefault();
         return new MeowshellOptions
         {
-            HomeDirectory = Path.Combine(Path.GetTempPath(), "meowshell"),
-            WorkDirectory = Path.GetTempPath(),
+            HomeDirectory = homeDir,
+            WorkDirectory = homeDir,
             Lifetime = lifetime,
         };
 #endif
