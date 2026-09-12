@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -63,11 +64,14 @@ func newResolver() *resolver {
 }
 
 func (r *resolver) termuxPrefix() string {
-	if p := r.getenv("PREFIX"); p != "" && r.isDir(filepath.Join(p, "bin")) {
+	// These are Android device paths, always "/"-separated regardless of
+	// the host the resolver logic happens to run/test on -- path.Join, not
+	// filepath.Join, which would emit "\" on a Windows build/test host.
+	if p := r.getenv("PREFIX"); p != "" && r.isDir(path.Join(p, "bin")) {
 		return p
 	}
 	const std = "/data/data/com.termux/files/usr"
-	if r.isDir(filepath.Join(std, "bin")) {
+	if r.isDir(path.Join(std, "bin")) {
 		return std
 	}
 	return ""
@@ -88,10 +92,10 @@ func (r *resolver) shell() (string, []string) {
 	var cands []string
 	if p := r.termuxPrefix(); p != "" {
 		cands = append(cands,
-			filepath.Join(p, "bin/bash"),
-			filepath.Join(p, "bin/zsh"),
-			filepath.Join(p, "bin/ash"),
-			filepath.Join(p, "bin/sh"),
+			path.Join(p, "bin/bash"),
+			path.Join(p, "bin/zsh"),
+			path.Join(p, "bin/ash"),
+			path.Join(p, "bin/sh"),
 		)
 	}
 	cands = append(cands,
@@ -115,7 +119,7 @@ func (r *resolver) path() string {
 	}
 	var dirs []string
 	if p := r.termuxPrefix(); p != "" {
-		dirs = append(dirs, filepath.Join(p, "bin"))
+		dirs = append(dirs, path.Join(p, "bin"))
 	}
 
 	dirs = append(dirs,
@@ -168,7 +172,7 @@ func (r *resolver) home() (string, []string) {
 		cands = append(cands, h)
 	}
 	if p := r.termuxPrefix(); p != "" {
-		cands = append(cands, filepath.Join(filepath.Dir(p), "home"))
+		cands = append(cands, path.Join(path.Dir(p), "home"))
 	}
 	cands = append(cands, "/data/local/tmp/meowshell", filepath.Join(os.TempDir(), "meowshell"))
 
