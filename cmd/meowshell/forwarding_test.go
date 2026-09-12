@@ -397,6 +397,7 @@ func TestServeSOCKS5EnforcesHandshakeDeadline(t *testing.T) {
 	if n, err := conn.Read(buf); err != io.EOF {
 		t.Fatalf("read = (%d, %v), want (0, io.EOF): the server should have closed its side after the handshake deadline", n, err)
 	}
+}
 
 func TestOpenForwardChannelRejectsExcessiveMaxConnectionsBeforeBinding(t *testing.T) {
 	var out bytes.Buffer
@@ -411,6 +412,4 @@ func TestOpenForwardChannelRejectsExcessiveMaxConnectionsBeforeBinding(t *testin
 	if len(msgs) != 1 || msgs[0].RequestID != "too-many" || msgs[0].Code != errProtocolError {
 		t.Fatalf("excessive max_connections response = %+v, want one protocol error", msgs)
 	}
-}
-
 }
