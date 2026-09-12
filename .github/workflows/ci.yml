@@ -312,9 +312,6 @@ jobs:
           dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
           dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
 
-      - name: Start a local DERP relay for the E2E tests
-        run: ./e2e/start-testderp.sh
-
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
