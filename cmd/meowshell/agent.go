@@ -158,6 +158,10 @@ func classifyConnectError(err error) errorCode {
 	if errors.As(err, &hkChanged) {
 		return errHostKeyChanged
 	}
+	var hkUnknown *hostKeyUnknownError
+	if errors.As(err, &hkUnknown) {
+		return errHostKeyUnknown
+	}
 	var keystoreSign *keystoreSignError
 	if errors.As(err, &keystoreSign) {
 		return errAuthFailed
@@ -445,7 +449,7 @@ func (a *agentSession) promptHostKey(hostname string, remote net.Addr, key ssh.P
 		return false, err
 	}
 	if resp.Cancelled {
-		return false, fmt.Errorf("host key prompt for %s was cancelled", hostname)
+		return false, &hostKeyUnknownError{hostname: hostname, reason: "the prompt went unanswered"}
 	}
 	return resp.Accept, nil
 }
