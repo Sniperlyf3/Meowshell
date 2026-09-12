@@ -39,6 +39,19 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
     }
 
     [Fact]
+    public void EnsureSecureAcceptsOwnerOnlyDirectoryWithSetGroupBit()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var target = Path.Combine(_dir, "meowshell-setgid");
+        Directory.CreateDirectory(target);
+        File.SetUnixFileMode(target,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.SetGroup);
+
+        MeowshellHomeDirectory.EnsureSecure(target); // Android commonly yields 2700.
+    }
+
+    [Fact]
     public void EnsureSecureRejectsAPreExistingDirectoryReadableByOthers()
     {
         if (OperatingSystem.IsWindows()) return;
