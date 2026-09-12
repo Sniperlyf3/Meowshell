@@ -704,4 +704,39 @@ public sealed class TailcatClientTests : IDisposable
         Assert.Throws<IOException>(() => MeowshellBinaries.Locate(bin, naming));
     }
 
+
+    [Theory]
+    [InlineData("1e999s")]
+    [InlineData("999999999999999999999999999999999999999999999999999999999999999999h")]
+    public void GoDurationOverflowReturnsFalseInsteadOfThrowing(string value)
+    {
+        var ok = GoDuration.TryParse(value, out _);
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TailcatAddressRejectsNullAndDefaultValueCannotMasqueradeAsAnAddress()
+    {
+        Assert.Throws<ArgumentNullException>(() => new TailcatAddress(null!));
+
+        var address = default(TailcatAddress);
+        Assert.Throws<InvalidOperationException>(() => address.ToString());
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            string _ = address;
+        });
+    }
+
+    [Fact]
+    public async Task ParseMalformedJsonDoesNotEchoDecodedPresharedKey()
+    {
+        const string secret = "psk:THIS-MUST-NOT-APPEAR-IN-DIAGNOSTICS";
+        var (options, _) = Fake($"printf '{{\"PresharedKey\":\"{secret}\",BROKEN}}\n'");
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => TailcatClient.ParseAsync(options, new TailcatAddress("tcQUJDRA")));
+
+        Assert.DoesNotContain(secret, ex.ToString());
+        Assert.Contains("raw decoded address data was omitted", ex.ToString());
+    }
+
 }
