@@ -96,7 +96,6 @@ public sealed class MeowshellPortForward : IAsyncDisposable
 
         void HandleLog(string line)
         {
-            onLog?.Invoke(line);
             const string marker = "forwarding ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
             if (at < 0) return;
