@@ -65,7 +65,7 @@ public static class TailcatClient
             psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
         if (options.Verbose)
             psi.ArgumentList.Add("--verbose");
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         return psi;
     }
 
@@ -399,7 +399,7 @@ public static class TailcatClient
         };
         psi.ArgumentList.Add("env");
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         var result = await RunAsync(psi, options.Timeout, "meowshell env").ConfigureAwait(false);
         if (!result.Success) throw Failure("env", result);
         return TailcatEnvironment.Parse(result.Stdout);
@@ -424,7 +424,7 @@ public static class TailcatClient
         foreach (var a in cpArgs) psi.ArgumentList.Add(a);
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));
     }
 }
