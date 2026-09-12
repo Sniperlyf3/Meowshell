@@ -326,8 +326,6 @@ jobs:
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-          TS_DEBUG_TAILCAT_LOCAL_DERP: "1"
-          TAILCAT_DERPMAP_URL: "none"
         run: |
           for i in $(seq 1 10); do
             echo "::group::.NET stress pass $i/10"
@@ -380,9 +378,6 @@ jobs:
         # nupkg does. Not part of Meowshell.sln: it can only run after
         # the pack step above. BuildNumber must match the pack step's, so
         # its PackageReference resolves to the version just packed.
-        env:
-          TS_DEBUG_TAILCAT_LOCAL_DERP: "1"
-          TAILCAT_DERPMAP_URL: "none"
         run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
