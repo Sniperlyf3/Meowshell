@@ -404,3 +404,14 @@ func TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures(t *testing.T) {
 		})
 	}
 }
+
+
+func TestConnectTargetForDiagnosticsRedactsTailcatCapability(t *testing.T) {
+	const secret = "tc-secret-capability"
+	if got := connectTargetForDiagnostics(secret, true); got != "tailcat destination" {
+		t.Fatalf("tailcat diagnostic target = %q, want redacted label", got)
+	}
+	if got := connectTargetForDiagnostics("user@example.com:22", false); got != "user@example.com:22" {
+		t.Fatalf("ordinary SSH diagnostic target = %q, want original host", got)
+	}
+}
