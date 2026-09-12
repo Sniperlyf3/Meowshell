@@ -377,6 +377,24 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     /// this measures that CloseAsync() actually blocks for roughly that long
     /// instead of returning immediately.</summary>
     [Fact]
+    public async Task CancelledForwardCloseStillStopsRemoteListener()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => forward.CloseAsync(cancellation.Token));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "CLOSED", TimeSpan.FromSeconds(5)),
+            "cancelling CloseAsync before its write completed left the remote forward running");
+    }
+
+    [Fact]
     public async Task CloseAsyncWaitsForTheAgentsChannelClosedAcknowledgment()
     {
         if (OperatingSystem.IsWindows()) return;
