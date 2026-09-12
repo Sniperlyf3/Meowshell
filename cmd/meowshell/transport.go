@@ -150,7 +150,7 @@ func proxyDialer(proxyURL, hostPort string) (dialer, error) {
 			return dialHTTPConnectProxy(ctx, u, hostPort)
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported --proxy scheme %q (want socks5 or http)", u.Scheme)
+		return nil, fmt.Errorf("unsupported --proxy scheme %q (want socks5, socks5h, http, or https)", u.Scheme)
 	}
 }
 
