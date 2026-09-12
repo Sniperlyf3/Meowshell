@@ -396,17 +396,11 @@ func findTailcat(explicit string) (string, error) {
 			return "", false
 		}
 
-		if runtimeGOOS != "windows" {
-			if fi.Mode()&0o111 == 0 {
-				return "", false
-			}
-			// TAILCAT_BIN and PATH are inherited process inputs. Refuse an
-			// executable another local user/group can modify, otherwise a
-			// privileged or service-hosted meowshell can be redirected into
-			// attacker-controlled native code without changing its arguments.
-			if fi.Mode().Perm()&0o022 != 0 {
-				return "", false
-			}
+		if runtimeGOOS != "windows" && fi.Mode()&0o111 == 0 {
+			return "", false
+		}
+		if err := validateNativeExecutable(p, fi); err != nil {
+			return "", false
 		}
 		return p, true
 	}
