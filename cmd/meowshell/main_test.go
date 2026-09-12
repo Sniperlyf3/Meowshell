@@ -281,4 +281,32 @@ func TestValidateKeyRejectsTruncatedOversizeInput(t *testing.T) {
 	if err := validateKey(limited); err == nil {
 		t.Fatal("truncated oversized key unexpectedly parsed as valid JSON")
 	}
+
+func TestFindTailcatRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on many Windows runners")
+	}
+	target := writeFakeTailcat(t)
+	link := filepath.Join(t.TempDir(), "tailcat")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(link); err == nil {
+		t.Fatal("findTailcat accepted a symlinked native executable")
+	}
+}
+
+func TestFindTailcatRejectsGroupWritableExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	p := writeFakeTailcat(t)
+	if err := os.Chmod(p, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a group-writable native executable")
+	}
+}
+
 }
