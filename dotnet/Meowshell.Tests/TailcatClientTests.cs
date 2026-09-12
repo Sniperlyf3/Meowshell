@@ -644,4 +644,18 @@ public sealed class TailcatClientTests : IDisposable
         var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.GetEnvironmentAsync(options));
         Assert.Equal(1, ex.ExitCode);
     }
+
+    [Fact]
+    public void AndroidCpTimeoutLabelDoesNotContainCapabilityOrPaths()
+    {
+        const string secretAddress = "tcSECRET-CAPABILITY";
+        const string secretPath = "/private/customer/database.dump";
+        var label = TailcatClient.CpTimeoutCommand(
+            ["-r", secretPath, secretAddress + ":backup/database.dump"]);
+
+        Assert.Equal("meowshell cp", label);
+        Assert.DoesNotContain(secretAddress, label);
+        Assert.DoesNotContain(secretPath, label);
+    }
+
 }
