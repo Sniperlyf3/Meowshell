@@ -76,12 +76,21 @@ internal static class MeowshellHomeDirectory
         }
 
         var mode = File.GetUnixFileMode(dir);
-        if ((mode & ~OwnerOnly) != 0)
+        const UnixFileMode untrustedAccess =
+            UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+        if ((mode & untrustedAccess) != 0)
         {
             throw new IOException(
                 $"refusing to use {dir}: permissions {ToOctal(mode)} allow group/other access " +
                 "(a pre-existing directory here that isn't exclusively yours could let another local user read or tamper with session data)");
         }
+        // Do not reject setgid/sticky bits by themselves. Android app-private
+        // directories commonly inherit setgid from their platform-managed
+        // parent (e.g. a child requested as 0700 appears as 2700). Those bits
+        // do not grant read/write/traverse access to group or other users; the
+        // six permission bits above are the actual confidentiality/integrity
+        // boundary we need to enforce.
         try
         {
             using var enumerator = Directory.EnumerateFileSystemEntries(dir).GetEnumerator();
