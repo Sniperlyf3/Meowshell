@@ -20,7 +20,10 @@ echo $! > /tmp/testderp.pid
 
 for _ in $(seq 1 100); do
 	if url=$(grep -oP 'TAILCAT_DERPMAP_URL=\K.*' "$LOG" 2>/dev/null) && [ -n "$url" ]; then
-		echo "TAILCAT_DERPMAP_URL=$url" >> "$GITHUB_ENV"
+		# Unset outside Actions: this script is also the documented way to
+		# run an E2E suite locally (see README.md), where there is no
+		# $GITHUB_ENV to export through and set -u would abort here.
+		echo "TAILCAT_DERPMAP_URL=$url" >> "${GITHUB_ENV:-/dev/null}"
 		echo "local DERP relay ready: $url"
 		exit 0
 	fi
