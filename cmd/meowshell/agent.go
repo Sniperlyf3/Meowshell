@@ -622,6 +622,11 @@ func (a *agentSession) dispatchOpenChannel(msg controlMessage) {
 			case <-done:
 				return
 			case <-timer.C:
+				select {
+				case <-done:
+					return
+				default:
+				}
 				// SSH's channel-open/session setup APIs have no context or
 				// per-request cancellation. Reclaim the slot, report the
 				// timed-out request, and fail the SSH transport itself so
@@ -692,6 +697,11 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 			case <-done:
 				return
 			case <-timer.C:
+				select {
+				case <-done:
+					return
+				default:
+				}
 				a.writeControl(0, controlMessage{
 					Msg:       "error",
 					RequestID: msg.RequestID,
@@ -882,7 +892,12 @@ func (a *agentSession) openChannel(msg controlMessage) {
 }
 
 func (a *agentSession) openShellChannel(msg controlMessage) {
-	session, err := a.client().NewSession()
+	client := a.client()
+	if client == nil {
+		a.writeOpenError(msg.RequestID, errConnectionLost, fmt.Errorf("SSH connection is no longer available"))
+		return
+	}
+	session, err := client.NewSession()
 	if err != nil {
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening session: %w", err))
 		return
