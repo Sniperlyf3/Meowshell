@@ -243,6 +243,8 @@ type agentSession struct {
 	sftpOpSlots   chan struct{}
 	sftpOpHandler func(controlMessage)
 
+	openChannelSlots chan struct{}
+
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
 	nextPromptID atomic.Uint64
@@ -260,11 +262,12 @@ type agentSession struct {
 
 func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 	return &agentSession{
-		in:          in,
-		out:         out,
-		chans:       make(map[uint32]*agentChannel),
-		prompts:     make(map[string]chan controlMessage),
-		sftpOpSlots: make(chan struct{}, 8),
+		in:               in,
+		out:              out,
+		chans:            make(map[uint32]*agentChannel),
+		prompts:          make(map[string]chan controlMessage),
+		sftpOpSlots:      make(chan struct{}, 8),
+		openChannelSlots: make(chan struct{}, 8),
 	}
 }
 
@@ -537,7 +540,7 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 	}
 	switch msg.Msg {
 	case "open_channel":
-		a.openChannel(msg)
+		a.dispatchOpenChannel(msg)
 	case "resize":
 		a.resize(channelID, msg)
 	case "close_channel":
@@ -561,6 +564,32 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 		case ch <- msg:
 		default:
 		}
+	}
+}
+
+// dispatchOpenChannel runs openChannel on its own goroutine instead of
+// inline in handleControl, which is called directly from serveFrames' sole
+// frame-reading loop (N2). openChannel's handlers all do blocking SSH work
+// against the remote destination -- NewSession/RequestPty/Start/Shell for a
+// shell/exec, sftp.Stat/Open for an upload/download, client.Listen for a
+// remote forward -- none of which is bounded by any timeout of its own the
+// way tcpDialTimeout already bounds a TCP dial. A slow or malicious SSH
+// server that simply never answers one of these left serveFrames unable to
+// read the next frame at all: not another open_channel, not a
+// prompt_response, not a resize or close_channel for a channel that opened
+// fine moments earlier -- the entire connection froze on that one pending
+// open. Bounded by openChannelSlots the same way dispatchSFTPOp already
+// bounds concurrent SFTP ops, so a client also can't force unbounded
+// goroutines by flooding open_channel requests.
+func (a *agentSession) dispatchOpenChannel(msg controlMessage) {
+	select {
+	case a.openChannelSlots <- struct{}{}:
+		go func() {
+			defer func() { <-a.openChannelSlots }()
+			a.openChannel(msg)
+		}()
+	default:
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("too many concurrent channel opens"))
 	}
 }
 
