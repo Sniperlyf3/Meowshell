@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/tailscale/tailcat"
@@ -18,7 +19,12 @@ import (
 // identity than the SSH connection did, silently failing authorization
 // against a destination's --allow list that only names the saved key.
 func TestTailcatKeyFromNameUsesSavedClientDefault(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configRoot := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", configRoot)
+	} else {
+		t.Setenv("XDG_CONFIG_HOME", configRoot)
+	}
 
 	t.Run("no saved client-default key: falls back to a fresh ephemeral key", func(t *testing.T) {
 		got, err := tailcatKeyFromName("")
