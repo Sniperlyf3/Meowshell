@@ -265,9 +265,13 @@ func stagingDir(home string) string {
 }
 
 func keyFromStdin(dir string) (string, error) {
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<16))
+	const maxKeyJSON = 64 << 10
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxKeyJSON+1))
 	if err != nil {
 		return "", fmt.Errorf("reading key from stdin: %w", err)
+	}
+	if len(data) > maxKeyJSON {
+		return "", fmt.Errorf("key from stdin exceeds %d bytes", maxKeyJSON)
 	}
 	if err := validateKey(data); err != nil {
 		return "", err
