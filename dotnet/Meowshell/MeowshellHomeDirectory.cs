@@ -46,10 +46,17 @@ internal static class MeowshellHomeDirectory
         {
             if (File.Exists(dir))
                 throw new IOException($"{dir} already exists as a file, not a directory");
-            Directory.CreateDirectory(dir);
-            if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(dir, OwnerOnly);
-            return;
+
+            if (OperatingSystem.IsWindows())
+                Directory.CreateDirectory(dir);
+            else
+                Directory.CreateDirectory(dir, OwnerOnly);
+
+            // Re-read after creation instead of trusting what we intended to
+            // create: another actor able to mutate an unsafe parent could
+            // have raced the path. The checks below reject a reparse point or
+            // broadened Unix mode rather than returning it as trusted HOME.
+            info.Refresh();
         }
 
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
