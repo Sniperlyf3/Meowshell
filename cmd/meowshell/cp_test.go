@@ -91,8 +91,11 @@ func TestFilepathRelFromSlash(t *testing.T) {
 			t.Errorf("filepathRelFromSlash(%q, %q) unexpected error: %v", tt.base, tt.target, err)
 			continue
 		}
-		if got != tt.want {
-			t.Errorf("filepathRelFromSlash(%q, %q) = %q; want %q", tt.base, tt.target, got, tt.want)
+		// tt.want is written with "/" for readability; filepathRelFromSlash
+		// returns a native filepath (backslash on Windows), by design, since
+		// callers feed it straight into filepath.Join for a local path.
+		if want := filepath.FromSlash(tt.want); got != want {
+			t.Errorf("filepathRelFromSlash(%q, %q) = %q; want %q", tt.base, tt.target, got, want)
 		}
 	}
 }
