@@ -18,7 +18,8 @@ internal sealed class TailcatListener : IAsyncDisposable
     private readonly TailcatDiagnostics _diagnostics = new();
     private JobObject? _job;
     private Task _exitObserver = Task.CompletedTask;
-    private int _exitObserverStarted;
+    private readonly object _exitObserverLock = new();
+    private bool _exitObserverStarted;
     private bool _stopped;
 
     internal Task ExitObserverForTests => _exitObserver;
@@ -67,8 +68,17 @@ internal sealed class TailcatListener : IAsyncDisposable
 
     private void StartExitObserver()
     {
-        if (Interlocked.Exchange(ref _exitObserverStarted, 1) != 0) return;
-        _exitObserver = ObserveExitAsync();
+        lock (_exitObserverLock)
+        {
+            if (_exitObserverStarted) return;
+            // Publish the task before publishing the started state. The old
+            // Interlocked flag was set first, leaving a small window where a
+            // concurrent DisposeAsync saw "started" but still awaited the
+            // initial Task.CompletedTask and could dispose Process while the
+            // real observer was only about to be assigned.
+            _exitObserver = ObserveExitAsync();
+            _exitObserverStarted = true;
+        }
     }
 
     private async Task ObserveExitAsync()
@@ -100,6 +110,9 @@ internal sealed class TailcatListener : IAsyncDisposable
     {
         if (!Process.HasExited) return;
         await Process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        // Match ObserveExitAsync: wait for asynchronous redirected-output
+        // callbacks to drain before snapshotting diagnostics.
+        Process.WaitForExit();
         throw new TailcatException(summary, Process.ExitCode, _diagnostics.Tail());
     }
 
