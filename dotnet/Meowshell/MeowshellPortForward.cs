@@ -24,6 +24,9 @@ public sealed class MeowshellPortForward : IAsyncDisposable
 {
     private readonly TailcatListener _listener;
 
+    /// <summary>The actual local listener addresses, in mapping order. A requested local port of 0 is replaced by the OS-assigned port.</summary>
+    public IReadOnlyList<string> BoundAddresses { get; }
+
     /// <summary>Completes when the process has exited. Succeeds after a <see cref="StopAsync"/> call; faults with a <see cref="TailcatException"/> if the process dies on its own first.</summary>
     public Task Completed => _listener.Completed;
 
@@ -34,18 +37,24 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         remove => _listener.Log -= value;
     }
 
-    private MeowshellPortForward(TailcatListener listener) => _listener = listener;
+    private MeowshellPortForward(TailcatListener listener, IReadOnlyList<string> boundAddresses)
+    {
+        _listener = listener;
+        BoundAddresses = boundAddresses;
+    }
 
     /// <summary>Starts forwarding.</summary>
     /// <exception cref="ArgumentException">No mappings were given.</exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
-    public static Task<MeowshellPortForward> StartAsync(
-        MeowshellPortForwardOptions options, Action<string>? onLog = null)
+    public static async Task<MeowshellPortForward> StartAsync(
+        MeowshellPortForwardOptions options, Action<string>? onLog = null,
+        CancellationToken cancellationToken = default)
     {
         if (options.Mappings.Count == 0)
         {
             throw new ArgumentException("At least one port mapping is required.", nameof(options));
         }
+        TimeSpanValidation.EnsurePositiveAndBounded(options.StartTimeout, nameof(options.StartTimeout));
         TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
@@ -81,14 +90,51 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         psi.Environment["TAILCAT_BIN"] = tailcat;
 
         var process = new Process { StartInfo = psi };
+        TailcatListener? listener = null;
+        var bound = new List<string>(options.Mappings.Count);
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void HandleLog(string line)
+        {
+            onLog?.Invoke(line);
+            const string marker = "forwarding ";
+            var at = line.IndexOf(marker, StringComparison.Ordinal);
+            if (at < 0) return;
+            var rest = line[(at + marker.Length)..];
+            var end = rest.IndexOf(' ');
+            if (end <= 0) return;
+            lock (bound)
+            {
+                if (bound.Count < options.Mappings.Count)
+                    bound.Add(rest[..end]);
+                if (bound.Count == options.Mappings.Count)
+                    ready.TrySetResult();
+            }
+        }
+
         try
         {
-            var listener = TailcatListener.Start(process, options.GracePeriod, onLog);
-            return Task.FromResult(new MeowshellPortForward(listener));
+            listener = TailcatListener.Start(process, options.GracePeriod, HandleLog);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(options.StartTimeout);
+            var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
+            var completed = await Task.WhenAny(ready.Task, listener.Completed, timeoutTask).ConfigureAwait(false);
+            if (completed == listener.Completed)
+                await listener.Completed.ConfigureAwait(false);
+            if (completed != ready.Task)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TimeoutException($"port forward did not bind all listeners within {options.StartTimeout}");
+            }
+            timeout.Cancel();
+            string[] snapshot;
+            lock (bound) snapshot = [.. bound];
+            return new MeowshellPortForward(listener, snapshot);
         }
         catch
         {
-            MeowshellProcessControl.TryKill(process);
+            if (listener is not null) await listener.DisposeAsync().ConfigureAwait(false);
+            else MeowshellProcessControl.TryKill(process);
             throw;
         }
     }
