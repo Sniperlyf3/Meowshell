@@ -245,7 +245,9 @@ public static class TailcatClient
         var result = await RunAsync(options, "resolve", address).ConfigureAwait(false);
         if (!result.Success) throw Failure("resolve", result);
         if (!result.Stdout.StartsWith("tc", StringComparison.Ordinal))
-            throw UnexpectedOutput("resolve", $"expected a tailcat address, got: {result.Stdout}");
+            throw UnexpectedOutput(
+                "resolve",
+                "expected a tailcat address; raw output was omitted because it may contain credential-like address material");
         return new TailcatAddress(result.Stdout);
     }
 
