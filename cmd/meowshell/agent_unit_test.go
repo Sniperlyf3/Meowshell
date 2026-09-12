@@ -281,3 +281,30 @@ func TestRegisterChannelSkipsZeroAndActiveIDs(t *testing.T) {
 		t.Fatal("active channel 1 was overwritten during ID wrap")
 	}
 }
+
+// TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures pins the one
+// distinction a client cannot recover any other way. "This host is new" is a
+// question worth putting to a user; "this host's key changed" is a warning;
+// and an untyped "unknown" is neither, which is what a declined or
+// unanswered host key prompt used to classify as. Both errors reach
+// classifyConnectError wrapped -- by dialSSHClient's own "connecting to %s"
+// and by the ssh handshake -- so the classification has to survive that.
+func TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want errorCode
+	}{
+		{"declined", &hostKeyUnknownError{hostname: "host:22", reason: "rejected"}, errHostKeyUnknown},
+		{"unanswered", &hostKeyUnknownError{hostname: "host:22", reason: "the prompt went unanswered"}, errHostKeyUnknown},
+		{"changed", &hostKeyChangedError{hostname: "host:22", err: fmt.Errorf("knownhosts: key mismatch")}, errHostKeyChanged},
+		{"anything else", fmt.Errorf("something else entirely"), errUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("connecting to %s: %w", "host:22", tc.err)
+			if got := classifyConnectError(wrapped); got != tc.want {
+				t.Errorf("classifyConnectError(%v) = %q, want %q", wrapped, got, tc.want)
+			}
+		})
+	}
+}

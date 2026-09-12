@@ -51,7 +51,7 @@ public sealed class TailcatSshSession : IAsyncDisposable
     /// <param name="requestPty">Whether to allocate a pseudo-terminal. Defaults to true for an interactive shell.</param>
     /// <param name="term">TERM to request for the pseudo-terminal. Defaults to "xterm-256color".</param>
     /// <param name="port">The server's SSH service port, when it isn't 22.</param>
-    /// <param name="onLog">Called for each line of meowshell/tailcat's own diagnostic output, in addition to <see cref="Log"/>.</param>
+    /// <param name="onLog">Called for each line of meowshell/tailcat's own diagnostic output, in addition to <see cref="Log"/>, starting with the connection setup's own lines -- including those of a connection that fails before this method returns.</param>
     /// <param name="cancellationToken">Cancels waiting for the connection to settle; does not cancel or stop the session itself once returned.</param>
     /// <exception cref="TailcatException">The session failed to connect within <see cref="TailcatClientOptions.Timeout"/>.</exception>
     public static async Task<TailcatSshSession> ConnectAsync(
@@ -59,9 +59,18 @@ public sealed class TailcatSshSession : IAsyncDisposable
         int columns = 80, int rows = 24, bool? requestPty = null, string? term = null, string? port = null,
         Action<string>? onLog = null, CancellationToken cancellationToken = default)
     {
+        // Subscribed through configureConnection, not on the returned object:
+        // ConnectAsync does not return until the handshake is over, so a
+        // subscriber attached afterwards misses every diagnostic line the
+        // connection setup produced -- which is all of them, and the only
+        // ones that exist at all on a connection that then fails, since that
+        // throws before a caller ever gets a reference to attach to. A
+        // caller passing onLog to find out why a connection is not working
+        // used to receive nothing whatsoever.
         var connection = await MeowshellAgentConnection.ConnectAsync(
-            options, destination, port: port, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (onLog is not null) connection.Log += onLog;
+            options, destination, port: port,
+            configureConnection: onLog is null ? null : connection => connection.Log += onLog,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         try
         {

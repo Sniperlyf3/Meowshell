@@ -11,7 +11,13 @@
 //     "channel_opened" (echoing the request's RequestID) -- giving a test a
 //     reliable window to cancel the call before that response arrives,
 //     instead of racing against however fast a real open happens to be.
-//  3. If a "close_channel" later arrives for that channel ID, append a line
+//  3. When invoked for the promptDestination destination, raise the prompts
+//     a real agent raises *during* the handshake -- a host key, then a
+//     password -- before replying "connected", recording each answer to its
+//     results file. That is the only way to test that a caller's handlers
+//     were attached in time to be asked at all: on a real agent those
+//     prompts happen inside ConnectAsync, before it returns.
+//  4. If a "close_channel" later arrives for that channel ID, append a line
 //     to its results file recording it, so a test can confirm the agent
 //     actually closed the channel it created after the caller gave up on
 //     it, rather than leaving it to leak for the life of the connection --
@@ -37,6 +43,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,6 +98,13 @@ type message struct {
 	RemoteAddr string   `json:"remote_addr,omitempty"`
 	Terminal   *bool    `json:"terminal,omitempty"`
 	Command    []string `json:"command,omitempty"`
+
+	PromptKind  string `json:"prompt_kind,omitempty"`
+	Remote      string `json:"remote,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Accept      bool   `json:"accept,omitempty"`
+	Answer      string `json:"answer,omitempty"`
+	Cancelled   bool   `json:"cancelled,omitempty"`
 }
 
 var falseVal = false
@@ -120,6 +134,69 @@ func writeData(w io.Writer, mu *sync.Mutex, channelID uint32, data []byte) error
 	return writeFrame(w, frame{Type: 1, ChannelID: channelID, Payload: payload})
 }
 
+// promptDestination is a magic destination -- the one piece of the agent's
+// argv a test controls, since ConnectAsync builds the rest itself -- that
+// asks this fake to prompt during the handshake instead of connecting
+// straight away. Every other destination keeps the original
+// configure-then-connected behavior, so tests that don't care about prompts
+// are unaffected.
+const promptDestination = "prompt-before-connect"
+
+const fakeFingerprint = "SHA256:fakeagentfakeagentfakeagentfakeagentfakeagent"
+
+// readPromptResponse reads frames until the answer to requestID arrives,
+// skipping anything else that turns up in the meantime. A real client sends
+// nothing else at this point in the handshake, but skipping rather than
+// failing keeps this from depending on that.
+func readPromptResponse(requestID string) (message, error) {
+	for {
+		f, err := readFrame(os.Stdin)
+		if err != nil {
+			return message{}, err
+		}
+		var msg message
+		if err := json.Unmarshal(f.Payload, &msg); err != nil {
+			continue
+		}
+		if msg.Msg == "prompt_response" && msg.RequestID == requestID {
+			return msg, nil
+		}
+	}
+}
+
+// handshakePrompts raises a host key prompt and then a password prompt,
+// recording each answer -- "ACCEPT true", "ANSWER hunter2", or "CANCELLED"
+// for a client with no handler attached (which is what
+// MeowshellAgentConnection sends when nobody is listening). Reports whether
+// the exchange completed; a caller that has gone away is not an error worth
+// reporting, just a reason to stop.
+func handshakePrompts(w io.Writer, mu *sync.Mutex, results *os.File) bool {
+	prompts := []message{
+		{Msg: "prompt_request", RequestID: "p1", PromptKind: "host_key", Remote: promptDestination, Fingerprint: fakeFingerprint},
+		{Msg: "prompt_request", RequestID: "p2", PromptKind: "password", Remote: promptDestination},
+	}
+	for _, prompt := range prompts {
+		if err := writeControl(w, mu, 0, prompt); err != nil {
+			return false
+		}
+		resp, err := readPromptResponse(prompt.RequestID)
+		if err != nil {
+			return false
+		}
+		label := strings.ToUpper(prompt.PromptKind)
+		switch {
+		case resp.Cancelled:
+			fmt.Fprintf(results, "%s CANCELLED\n", label)
+		case prompt.PromptKind == "host_key":
+			fmt.Fprintf(results, "%s ACCEPT %v\n", label, resp.Accept)
+		default:
+			fmt.Fprintf(results, "%s ANSWER %s\n", label, resp.Answer)
+		}
+		results.Sync()
+	}
+	return true
+}
+
 func main() {
 	var outMu sync.Mutex
 	var nextID uint32
@@ -137,6 +214,11 @@ func main() {
 	// enough for MeowshellAgentConnection.ConnectAsync to complete.
 	if _, err := readFrame(os.Stdin); err != nil {
 		return
+	}
+	if len(os.Args) > 1 && os.Args[len(os.Args)-1] == promptDestination {
+		if !handshakePrompts(os.Stdout, &outMu, results) {
+			return
+		}
 	}
 	if err := writeControl(os.Stdout, &outMu, 0, message{Msg: "connected"}); err != nil {
 		return

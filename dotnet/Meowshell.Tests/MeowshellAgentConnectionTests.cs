@@ -107,7 +107,8 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     /// every test below needs to, or returns null for the caller to no-op
     /// on when there's no Go toolchain to build it with.
     /// </summary>
-    private async Task<(MeowshellAgentConnection Connection, string ResultsPath)?> ConnectToFakeAgentAsync()
+    private async Task<(MeowshellAgentConnection Connection, string ResultsPath)?> ConnectToFakeAgentAsync(
+        string destination = "example.invalid", Action<MeowshellAgentConnection>? configureConnection = null)
     {
         var fakeAgent = await BuildFakeAgentAsync();
         if (fakeAgent is null) return null;
@@ -131,7 +132,7 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "home"),
             Timeout = TimeSpan.FromSeconds(10),
-        }, "example.invalid");
+        }, destination, configureConnection: configureConnection);
         return (connection, meowshellPath + ".results");
     }
 
@@ -390,6 +391,68 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
 
         Assert.True(started.Elapsed >= TimeSpan.FromMilliseconds(250),
             $"CloseAsync() returned after {started.Elapsed}, want it to have waited for the agent's delayed channel_closed acknowledgment (~300ms)");
+    }
+
+    /// <summary>
+    /// The destination e2e/fakeagent recognizes as "prompt during the
+    /// handshake instead of connecting straight away" -- see that program's
+    /// promptDestination.
+    /// </summary>
+    private const string PromptDestination = "prompt-before-connect";
+
+    /// <summary>
+    /// Regression test: every prompt hook is an instance event on the object
+    /// ConnectAsync returns, and ConnectAsync does not return until the
+    /// handshake is over -- so there was no instant at which a caller could
+    /// subscribe before those prompts were raised, and trust-on-first-use was
+    /// simply not implementable against this API. configureConnection is that
+    /// instant. Covers a password prompt as well as the host key one, since
+    /// the hook has to cover every prompt raised during the handshake, not
+    /// just the first.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureConnectionSubscribesInTimeForTheHandshakePrompts()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var fingerprints = new List<string>();
+        if (await ConnectToFakeAgentAsync(PromptDestination, connection =>
+        {
+            connection.HostKeyPromptRequested += (prompt, _) =>
+            {
+                fingerprints.Add(prompt.Fingerprint);
+                return Task.FromResult(true);
+            };
+            connection.PasswordRequested += (_, _) => Task.FromResult("hunter2");
+        }) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY ACCEPT true", TimeSpan.FromSeconds(5)),
+            "the host key prompt raised during the handshake never reached the handler configureConnection attached");
+        Assert.True(await WaitForResultAsync(resultsPath, "PASSWORD ANSWER hunter2", TimeSpan.FromSeconds(5)),
+            "the password prompt raised during the handshake never reached the handler configureConnection attached");
+        // The prompt's payload has to survive the trip, not just the
+        // subscription: a handler asked with an empty fingerprint has
+        // nothing to show a user deciding whether to trust the host.
+        Assert.NotEmpty(fingerprints);
+        Assert.All(fingerprints, fingerprint => Assert.StartsWith("SHA256:", fingerprint));
+    }
+
+    /// <summary>
+    /// The behavior configureConnection exists to fix, pinned so the two
+    /// halves stay distinguishable: with nobody subscribed, a prompt raised
+    /// during the handshake is answered "cancelled", which on the agent side
+    /// is what makes an unknown host key a host_key_unknown failure rather
+    /// than a silently accepted key.
+    /// </summary>
+    [Fact]
+    public async Task WithoutConfigureConnectionHandshakePromptsGoUnanswered()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync(PromptDestination) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY CANCELLED", TimeSpan.FromSeconds(5)),
+            "a host key prompt with no handler attached must be declined, never accepted by default");
     }
 
     private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>

@@ -121,11 +121,21 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="jumpHosts">Intermediate TCP SSH hosts to tunnel through first, closest-to-here first.</param>
     /// <param name="knownHostsPath">known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts).</param>
     /// <param name="proxyUrl">A SOCKS5 or HTTP CONNECT proxy to reach the first TCP hop through.</param>
+    /// <param name="configureConnection">
+    /// Runs on the new connection before any protocol traffic, and is the only place the prompts raised
+    /// during the handshake -- <see cref="HostKeyPromptRequested"/>, <see cref="PasswordRequested"/>,
+    /// <see cref="PassphraseRequested"/>, <see cref="KeyboardInteractiveRequested"/>,
+    /// <see cref="SignRequested"/> -- can be subscribed to in time to be asked: this method does not
+    /// return until the handshake has already been decided. Without it, a first connection to a host
+    /// absent from <paramref name="knownHostsPath"/> cannot be accepted by anyone, and fails with
+    /// <see cref="MeowshellErrorCode.HostKeyUnknown"/>. An exception thrown here fails the connection.
+    /// </param>
     /// <param name="cancellationToken">Cancels waiting for the connection to settle; does not cancel or stop the connection itself once returned.</param>
     /// <exception cref="TailcatException">The connection failed to establish within <see cref="TailcatClientOptions.Timeout"/>; <see cref="TailcatException.Code"/> names why when the agent reported a typed reason.</exception>
     public static async Task<MeowshellAgentConnection> ConnectAsync(
         TailcatClientOptions options, string destination, MeowshellAgentConfigureOptions? configure = null,
         string? port = null, IReadOnlyList<string>? jumpHosts = null, string? knownHostsPath = null, string? proxyUrl = null,
+        Action<MeowshellAgentConnection>? configureConnection = null,
         CancellationToken cancellationToken = default)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
@@ -155,6 +165,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var connection = new MeowshellAgentConnection(process, job);
         try
         {
+            // Before anything is written to the agent, and so before it can
+            // raise a single prompt: the handshake is over by the time this
+            // method returns, so a caller subscribing to HostKeyPromptRequested
+            // et al on the returned object is always too late to be asked --
+            // this is the one instant at which those handlers can be attached.
+            // Log subscribers get the same deal, catching the agent's stderr
+            // from its first line rather than from whenever the caller got a
+            // reference back.
+            configureConnection?.Invoke(connection);
+
             process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;

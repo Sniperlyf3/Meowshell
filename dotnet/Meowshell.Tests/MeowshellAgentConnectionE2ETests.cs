@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -330,6 +331,45 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
             Assert.Equal(0x02, await Socks5GreetAsync(rightCreds, [0x02], cts.Token));
             var status = await Socks5AuthAsync(rightCreds, forward.SocksUsername!, forward.SocksPassword!, cts.Token);
             Assert.Equal(0x00, status);
+        }
+    }
+
+    /// <summary>
+    /// Regression test: TailcatSshSession attached its onLog callback to the
+    /// connection ConnectAsync returned -- by which point the handshake, and
+    /// so every diagnostic line the setup produced, was already over. A
+    /// caller passing onLog (documented as receiving "each line of
+    /// meowshell/tailcat's own diagnostic output") got none of them: measured
+    /// at 0 lines of 53 on a verbose connection, and 0 on a failing one,
+    /// where the lines it missed were the ones naming the failure. Verbose is
+    /// what makes the count deterministic here; a quiet successful connection
+    /// legitimately produces nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task SessionLogCallbackSeesTheConnectionSetupsOwnDiagnostics()
+    {
+        var real = FindRealBinaries();
+        if (real is null) return;
+        var (bin, _) = real.Value;
+
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "server-home"),
+            WorkDirectory = Path.Combine(_dir, "server-work"),
+            InsecureNoAuth = true,
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        });
+        Mask(server.Address);
+
+        var lines = new ConcurrentQueue<string>();
+        await using (var session = await TailcatSshSession.ConnectAsync(
+            ClientOptions(bin) with { Verbose = true }, server.Address,
+            command: ["echo", "logged"], onLog: line => lines.Enqueue(line)))
+        {
+            Assert.False(lines.IsEmpty,
+                "onLog received nothing from the connection setup -- it is being attached after ConnectAsync has already finished handshaking");
         }
     }
 
