@@ -20,25 +20,35 @@ func runTailcat(bin string, argv, environ []string) error {
 	// thread can disappear while the host process remains perfectly healthy,
 	// causing a spurious SIGKILL. Managed launches pass the host process PID
 	// and the patched tailcat binary watches that process directly instead.
-	if shouldArmParentDeathSignal(environ, os.Getppid()) {
-		if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0); errno != 0 {
-			fmt.Fprintf(os.Stderr, "# warning: could not arm the parent-death signal: %v\n", errno)
+	if pid, ok := managedParentPID(environ); ok {
+		if pid != os.Getppid() {
+			return fmt.Errorf("managed parent process %d is no longer this process's parent", pid)
 		}
+		return syscall.Exec(bin, argv, environ)
+	}
+
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0); errno != 0 {
+		fmt.Fprintf(os.Stderr, "# warning: could not arm the parent-death signal: %v\n", errno)
 	}
 	return syscall.Exec(bin, argv, environ)
 }
 
-func shouldArmParentDeathSignal(environ []string, parentPID int) bool {
+func managedParentPID(environ []string) (int, bool) {
 	prefix := managedParentPIDEnv + "="
 	for _, entry := range environ {
 		if !strings.HasPrefix(entry, prefix) {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimPrefix(entry, prefix))
-		if err != nil {
-			return true
+		if err != nil || pid <= 0 {
+			return 0, false
 		}
-		return pid != parentPID
+		return pid, true
 	}
-	return true
+	return 0, false
+}
+
+func shouldArmParentDeathSignal(environ []string, parentPID int) bool {
+	pid, ok := managedParentPID(environ)
+	return !ok || pid != parentPID
 }
