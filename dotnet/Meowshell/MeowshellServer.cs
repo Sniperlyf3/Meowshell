@@ -237,6 +237,14 @@ public sealed class MeowshellServer : IAsyncDisposable
         TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         psi.Environment["TMPDIR"] = options.WorkDirectory;
         psi.Environment["TAILCAT_ADDR_FILE"] = addressFile;
+        if (options.ProcessEnvironmentOverrides is not null)
+        {
+            foreach (var (name, value) in options.ProcessEnvironmentOverrides)
+            {
+                if (value is null) psi.Environment.Remove(name);
+                else psi.Environment[name] = value;
+            }
+        }
 
         var process = new Process { StartInfo = psi };
         MeowshellServer? server = null;
