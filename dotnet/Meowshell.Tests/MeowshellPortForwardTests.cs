@@ -44,7 +44,12 @@ public sealed class MeowshellPortForwardTests : IDisposable
             Verbose = true,
         });
 
-        for (var i = 0; i < 100 && !File.Exists(argsFile); i++)
+        // Waiting on File.Exists alone races the fake shell script's own
+        // "printf ... > argsFile" line: the shell's stdout redirection
+        // creates (and truncates) the file before printf actually runs, so
+        // a poll landing in that gap can observe an existing but still-empty
+        // file and read back no args at all.
+        for (var i = 0; i < 100 && (!File.Exists(argsFile) || new FileInfo(argsFile).Length == 0); i++)
             await Task.Delay(50);
 
         var args = File.ReadAllLines(argsFile);
@@ -56,6 +61,52 @@ public sealed class MeowshellPortForwardTests : IDisposable
         Assert.Contains(options.Address, args);
         Assert.Contains("8080", args);
         Assert.Contains("0:9090", args);
+    }
+
+    // Regression test: StartAsync used to discard MeowshellBinaries.Locate's
+    // resolved tailcat path (var (meowshell, _) = ...), so the spawned
+    // "meowshell forward" process resolved tailcat on its own -- via an
+    // inherited TAILCAT_BIN, a sibling binary, or $PATH -- silently
+    // overriding whatever BinaryDirectory the caller explicitly selected.
+    // Sets a bogus inherited TAILCAT_BIN before starting and asserts the
+    // child still sees the BinaryDirectory-resolved path.
+    [Fact]
+    public async Task ResolvedTailcatBinaryOverridesInheritedTailcatBinEnvironmentVariable()
+    {
+        var bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        var envFile = Path.Combine(_dir, "env-" + Guid.NewGuid().ToString("N"));
+        var shell = Path.Combine(bin, "libmeowshell.so");
+        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\nexec sleep 300\n");
+        File.SetUnixFileMode(shell, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
+        var cat = Path.Combine(bin, "libtailcat.so");
+        File.WriteAllText(cat, "#!/bin/bash\ntrue\n");
+        File.SetUnixFileMode(cat, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
+
+        var options = new MeowshellPortForwardOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "home"),
+            Naming = BinaryNaming.Android,
+            Address = "tcTESTADDRESS000000000000",
+            Mappings = ["8080"],
+            GracePeriod = TimeSpan.FromSeconds(2),
+        };
+
+        Environment.SetEnvironmentVariable("TAILCAT_BIN", "/bogus/attacker/tailcat");
+        try
+        {
+            await using var forward = await MeowshellPortForward.StartAsync(options);
+
+            for (var i = 0; i < 100 && (!File.Exists(envFile) || new FileInfo(envFile).Length == 0); i++)
+                await Task.Delay(50);
+
+            Assert.Equal($"TAILCAT_BIN={cat}", File.ReadAllText(envFile).Trim());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TAILCAT_BIN", null);
+        }
     }
 
     [Fact]

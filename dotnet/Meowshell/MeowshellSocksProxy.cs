@@ -35,7 +35,7 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
     public static Task<MeowshellSocksProxy> StartAsync(
         MeowshellSocksOptions options, Action<string>? onLog = null)
     {
-        var (meowshell, _) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
+        var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
         Directory.CreateDirectory(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
@@ -56,6 +56,11 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
         if (options.Verbose)
             psi.ArgumentList.Add("--verbose");
         psi.Environment["HOME"] = options.HomeDirectory;
+        // See MeowshellPortForward.StartAsync: without this, the spawned
+        // "meowshell socks" resolves tailcat via an inherited TAILCAT_BIN /
+        // sibling-binary / $PATH search of its own, silently overriding the
+        // BinaryDirectory the caller explicitly selected.
+        psi.Environment["TAILCAT_BIN"] = tailcat;
 
         var process = new Process { StartInfo = psi };
         try

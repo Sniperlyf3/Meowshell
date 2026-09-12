@@ -41,7 +41,10 @@ public sealed class MeowshellSocksProxyTests : IDisposable
             Verbose = true,
         });
 
-        for (var i = 0; i < 100 && !File.Exists(argsFile); i++)
+        // See MeowshellPortForwardTests.AllFlagsAndMappingsArePassedThrough:
+        // File.Exists alone races the fake shell's own stdout-redirection
+        // line, which creates the file before printf actually writes to it.
+        for (var i = 0; i < 100 && (!File.Exists(argsFile) || new FileInfo(argsFile).Length == 0); i++)
             await Task.Delay(50);
 
         var args = File.ReadAllLines(argsFile);
@@ -50,6 +53,48 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         Assert.Contains("--key=client-default", args);
         Assert.Contains("--derpmap-url=https://derp.example/map.json", args);
         Assert.Contains("--verbose", args);
+    }
+
+    // Regression test: StartAsync used to discard MeowshellBinaries.Locate's
+    // resolved tailcat path (var (meowshell, _) = ...), so the spawned
+    // "meowshell socks" process resolved tailcat on its own -- via an
+    // inherited TAILCAT_BIN, a sibling binary, or $PATH -- silently
+    // overriding whatever BinaryDirectory the caller explicitly selected.
+    [Fact]
+    public async Task ResolvedTailcatBinaryOverridesInheritedTailcatBinEnvironmentVariable()
+    {
+        var bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        var envFile = Path.Combine(_dir, "env-" + Guid.NewGuid().ToString("N"));
+        var shell = Path.Combine(bin, "libmeowshell.so");
+        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\nexec sleep 300\n");
+        File.SetUnixFileMode(shell, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
+        var cat = Path.Combine(bin, "libtailcat.so");
+        File.WriteAllText(cat, "#!/bin/bash\ntrue\n");
+        File.SetUnixFileMode(cat, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
+
+        var options = new MeowshellSocksOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "home"),
+            Naming = BinaryNaming.Android,
+            GracePeriod = TimeSpan.FromSeconds(2),
+        };
+
+        Environment.SetEnvironmentVariable("TAILCAT_BIN", "/bogus/attacker/tailcat");
+        try
+        {
+            await using var proxy = await MeowshellSocksProxy.StartAsync(options);
+
+            for (var i = 0; i < 100 && (!File.Exists(envFile) || new FileInfo(envFile).Length == 0); i++)
+                await Task.Delay(50);
+
+            Assert.Equal($"TAILCAT_BIN={cat}", File.ReadAllText(envFile).Trim());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TAILCAT_BIN", null);
+        }
     }
 
     [Fact]

@@ -47,7 +47,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
             throw new ArgumentException("At least one port mapping is required.", nameof(options));
         }
 
-        var (meowshell, _) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
+        var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
         Directory.CreateDirectory(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
@@ -71,6 +71,13 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         foreach (var mapping in options.Mappings)
             psi.ArgumentList.Add(mapping);
         psi.Environment["HOME"] = options.HomeDirectory;
+        // Without this, the spawned "meowshell forward" resolves tailcat via
+        // an inherited TAILCAT_BIN / sibling-binary / $PATH search of its
+        // own, silently overriding whatever BinaryDirectory the caller just
+        // explicitly selected -- letting an inherited environment variable
+        // substitute a different native binary for the one the caller
+        // trusted.
+        psi.Environment["TAILCAT_BIN"] = tailcat;
 
         var process = new Process { StartInfo = psi };
         try
