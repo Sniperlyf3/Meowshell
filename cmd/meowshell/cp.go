@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -197,32 +199,47 @@ func uploadFile(sf *sftp.Client, localPath, remotePath string, preserve bool) er
 		return err
 	}
 	defer src.Close()
-	dst, err := sf.Create(remotePath)
+
+	// Staged to a sibling path and committed via commitUpload (an atomic
+	// rename when the server supports it) rather than sf.Create(remotePath)
+	// truncating the destination immediately: a transfer that failed
+	// partway through used to leave a half-written file in place of
+	// whatever good file was already there, destroying it for nothing.
+	dst, tempPath, err := createUploadTemp(sf, remotePath)
 	if err != nil {
-		return fmt.Errorf("creating %s on the server: %w", remotePath, err)
+		return fmt.Errorf("staging upload of %s: %w", remotePath, err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			sf.Remove(tempPath)
+		}
+	}()
+
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
 		return err
 	}
-	// Checked explicitly, not deferred: some SFTP servers only surface a
-	// write/flush failure here, on Close, well after io.Copy itself
-	// reported success -- a deferred Close swallowing that would mean cp
-	// reports success for an upload the server never actually completed.
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("finishing upload of %s: %w", remotePath, err)
 	}
-	if !preserve {
-		return nil
+	if preserve {
+		fi, err := src.Stat()
+		if err != nil {
+			return err
+		}
+		if err := sf.Chtimes(tempPath, fi.ModTime(), fi.ModTime()); err != nil {
+			return err
+		}
+		if err := sf.Chmod(tempPath, fi.Mode().Perm()); err != nil {
+			return err
+		}
 	}
-	fi, err := src.Stat()
-	if err != nil {
-		return err
+	if err := commitUpload(sf, tempPath, remotePath); err != nil {
+		return fmt.Errorf("committing upload of %s: %w", remotePath, err)
 	}
-	if err := sf.Chtimes(remotePath, fi.ModTime(), fi.ModTime()); err != nil {
-		return err
-	}
-	return sf.Chmod(remotePath, fi.Mode().Perm())
+	committed = true
+	return nil
 }
 
 func download(sf *sftp.Client, remotePath, localPath string, recursive, preserve bool) error {
@@ -303,10 +320,25 @@ func downloadFile(sf *sftp.Client, remotePath, localPath string, fi os.FileInfo,
 		return err
 	}
 	defer src.Close()
-	dst, err := os.Create(localPath)
+
+	// Staged next to the final destination and committed with os.Rename
+	// (same-directory, so same filesystem, so atomic on both POSIX and
+	// Windows) rather than os.Create truncating localPath immediately: a
+	// transfer that fails partway through used to leave a half-written
+	// file in place of whatever good file was already there, destroying
+	// it for nothing.
+	dst, err := os.CreateTemp(filepath.Dir(localPath), filepath.Base(localPath)+".meowshell-download-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("staging download of %s: %w", localPath, err)
 	}
+	tempPath := dst.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(tempPath)
+		}
+	}()
+
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
 		return err
@@ -319,30 +351,67 @@ func downloadFile(sf *sftp.Client, remotePath, localPath string, fi os.FileInfo,
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("finishing download of %s: %w", localPath, err)
 	}
-	if !preserve {
-		return nil
+	if preserve {
+		if err := os.Chtimes(tempPath, fi.ModTime(), fi.ModTime()); err != nil {
+			return err
+		}
+		if err := os.Chmod(tempPath, fi.Mode().Perm()); err != nil {
+			return err
+		}
 	}
-	if err := os.Chtimes(localPath, fi.ModTime(), fi.ModTime()); err != nil {
-		return err
+	if err := os.Rename(tempPath, localPath); err != nil {
+		return fmt.Errorf("committing download of %s: %w", localPath, err)
 	}
-	return os.Chmod(localPath, fi.Mode().Perm())
+	committed = true
+	return nil
+}
+
+// createRootTemp creates a uniquely-named staging file next to finalRelPath,
+// both resolved within root -- the os.Root equivalent of os.CreateTemp,
+// which has no root-scoped counterpart of its own.
+func createRootTemp(root *os.Root, finalRelPath string) (*os.File, string, error) {
+	for i := 0; i < 8; i++ {
+		var nonce [12]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, "", err
+		}
+		tempPath := fmt.Sprintf("%s.meowshell-download-%x", finalRelPath, nonce[:])
+		f, err := root.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, tempPath, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("could not allocate a unique download staging path")
 }
 
 // downloadFileInRoot is downloadFile's counterpart for a recursive download:
 // relPath is resolved against root (localPath) instead of being an absolute
 // path, so os.Root's own symlink-escape checks apply to every path
 // component, not just the textual one filepathRelFromSlash already
-// validated.
+// validated. Also staged-then-committed the same way downloadFile is, for
+// the same reason: a transfer that fails partway through must not destroy
+// whatever good file was already at relPath.
 func downloadFileInRoot(sf *sftp.Client, remotePath string, root *os.Root, relPath string, fi os.FileInfo, preserve bool) error {
 	src, err := sf.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	dst, err := root.Create(relPath)
+
+	dst, tempPath, err := createRootTemp(root, relPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("staging download of %s: %w", relPath, err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			root.Remove(tempPath)
+		}
+	}()
+
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
 		return err
@@ -353,13 +422,19 @@ func downloadFileInRoot(sf *sftp.Client, remotePath string, root *os.Root, relPa
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("finishing download of %s: %w", relPath, err)
 	}
-	if !preserve {
-		return nil
+	if preserve {
+		if err := root.Chtimes(tempPath, fi.ModTime(), fi.ModTime()); err != nil {
+			return err
+		}
+		if err := root.Chmod(tempPath, fi.Mode().Perm()); err != nil {
+			return err
+		}
 	}
-	if err := root.Chtimes(relPath, fi.ModTime(), fi.ModTime()); err != nil {
-		return err
+	if err := root.Rename(tempPath, relPath); err != nil {
+		return fmt.Errorf("committing download of %s: %w", relPath, err)
 	}
-	return root.Chmod(relPath, fi.Mode().Perm())
+	committed = true
+	return nil
 }
 
 func filepathRelFromSlash(base, target string) (string, error) {

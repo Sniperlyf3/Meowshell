@@ -29,16 +29,20 @@ func (p pipeRWC) Close() error {
 
 // newInProcessSFTPClient wires an sftp.Client to a real sftp.Server rooted
 // at a temp directory, connected by in-memory pipes -- no SSH, no
-// subprocess. Returns the client (already installed as session.sftpClient)
-// and a breakTransport func that severs the client's write side, so a test
-// can make the next client-initiated request fail deterministically,
-// simulating a write (or any other) failure partway through a transfer.
-func newInProcessSFTPClient(t *testing.T) (session *agentSession, client *sftp.Client, breakTransport func()) {
+// subprocess. Returns the client (already installed as session.sftpClient),
+// the server's root directory (for a test that needs to inspect the backing
+// filesystem directly -- e.g. after severing the transport, when the client
+// itself can no longer be used to check anything), and a breakTransport
+// func that severs the client's write side, so a test can make the next
+// client-initiated request fail deterministically, simulating a write (or
+// any other) failure partway through a transfer.
+func newInProcessSFTPClient(t *testing.T) (session *agentSession, client *sftp.Client, rootDir string, breakTransport func()) {
 	t.Helper()
 	clientRead, serverWrite := io.Pipe()
 	serverRead, clientWrite := io.Pipe()
 
-	svr, err := sftp.NewServer(pipeRWC{serverRead, serverWrite}, sftp.WithServerWorkingDirectory(t.TempDir()))
+	rootDir = t.TempDir()
+	svr, err := sftp.NewServer(pipeRWC{serverRead, serverWrite}, sftp.WithServerWorkingDirectory(rootDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +64,7 @@ func newInProcessSFTPClient(t *testing.T) (session *agentSession, client *sftp.C
 	session.sftpClient = client
 	session.chans = make(map[uint32]*agentChannel)
 
-	return session, client, func() { clientWrite.Close() }
+	return session, client, rootDir, func() { clientWrite.Close() }
 }
 
 func readControlFrames(t *testing.T, buf *bytes.Buffer) []controlMessage {
@@ -91,7 +95,7 @@ func readControlFrames(t *testing.T, buf *bytes.Buffer) []controlMessage {
 // failed Write to an upload's file must be remembered on the channel (not
 // just reported once and forgotten), so finalizeUpload can see it later.
 func TestHandleDataRecordsAWriteFailure(t *testing.T) {
-	session, client, breakTransport := newInProcessSFTPClient(t)
+	session, client, _, breakTransport := newInProcessSFTPClient(t)
 
 	f, err := client.Create("up.bin")
 	if err != nil {
@@ -136,7 +140,7 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 // success-despite-a-prior-failure bug from whether Close() happens to fail
 // too (which a broken-transport simulation can't rule out on its own).
 func TestFinalizeUploadReportsRecordedWriteFailureNotSuccess(t *testing.T) {
-	session, client, _ := newInProcessSFTPClient(t)
+	session, client, _, _ := newInProcessSFTPClient(t)
 
 	f, err := client.Create("up2.bin")
 	if err != nil {
@@ -167,7 +171,7 @@ func TestFinalizeUploadReportsRecordedWriteFailureNotSuccess(t *testing.T) {
 // (and stop erroring about it again) instead of continuing to call Write on
 // a file finalizeUpload is already going to report as failed.
 func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
-	session, client, breakTransport := newInProcessSFTPClient(t)
+	session, client, _, breakTransport := newInProcessSFTPClient(t)
 
 	f, err := client.Create("up2.bin")
 	if err != nil {
@@ -237,7 +241,7 @@ func openedChannelID(t *testing.T, out *bytes.Buffer) uint32 {
 // lands in a sibling staging file and the existing destination is replaced
 // only at finalization via the server's POSIX rename extension.
 func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
-	session, client, _ := newInProcessSFTPClient(t)
+	session, client, _, _ := newInProcessSFTPClient(t)
 	old, err := client.Create("atomic.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +278,7 @@ func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
 // close_channel with Cancelled set must discard the staging file instead of
 // finalizing a partial upload over a previously valid remote file.
 func TestCancelledUploadPreservesExistingDestination(t *testing.T) {
-	session, client, _ := newInProcessSFTPClient(t)
+	session, client, _, _ := newInProcessSFTPClient(t)
 	old, err := client.Create("keep.txt")
 	if err != nil {
 		t.Fatal(err)
