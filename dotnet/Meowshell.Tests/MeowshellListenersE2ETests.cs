@@ -163,15 +163,50 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         using var registration = cts.Token.Register(() => boundAddressFound.TrySetCanceled());
         var boundAddress = await boundAddressFound.Task;
 
-        using var socket = new TcpClient();
-        await socket.ConnectAsync(IPEndPoint.Parse(boundAddress), cts.Token);
-        using var readCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var buffer = new byte[256];
-        var total = 0;
-        int n;
-        while (total < buffer.Length && (n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), readCts.Token)) > 0)
-            total += n;
-        var got = System.Text.Encoding.UTF8.GetString(buffer, 0, total);
-        Assert.Equal(backendReply, got);
+        // "forwarding <addr> -> ..." means only that tailcat's local listener
+        // is bound.  The client-side tailcat connection is lazy: the first
+        // accepted TCP connection is what brings the DERP/WireGuard path up.
+        // Under load that first attempt can legitimately lose the race and
+        // close with EOF before the exit-node route is ready (upstream
+        // tailcat's analogous exit-node-forward test documents the same
+        // transient reset).  Treat this as readiness probing, not as the one
+        // and only assertion attempt.  A real regression still fails after
+        // the bounded overall deadline.
+        var endpoint = IPEndPoint.Parse(boundAddress);
+        var attempts = new List<string>();
+        string? got = null;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (DateTime.UtcNow < deadline && got != backendReply)
+        {
+            try
+            {
+                using var socket = new TcpClient();
+                using var attemptCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await socket.ConnectAsync(endpoint, attemptCts.Token);
+
+                var buffer = new byte[256];
+                var total = 0;
+                while (total < buffer.Length)
+                {
+                    var n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), attemptCts.Token);
+                    if (n == 0) break;
+                    total += n;
+                    if (total >= System.Text.Encoding.UTF8.GetByteCount(backendReply)) break;
+                }
+                got = System.Text.Encoding.UTF8.GetString(buffer, 0, total);
+                attempts.Add($"received {total} bytes: {got ?? "<null>"}");
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException)
+            {
+                attempts.Add($"{ex.GetType().Name}: {ex.Message}");
+            }
+
+            if (got != backendReply)
+                await Task.Delay(200);
+        }
+
+        Assert.True(
+            got == backendReply,
+            $"exit-node forward never became end-to-end ready; last={got ?? "<null>"}; attempts: {string.Join(" | ", attempts)}");
     }
 }
