@@ -8,7 +8,7 @@ public sealed class MeowshellSocksProxyTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private (MeowshellSocksOptions options, string argsFile) Fake(string script = "exec sleep 300\n")
+    private (MeowshellSocksOptions options, string argsFile) Fake(string script = "echo 'SOCKS running at socks5h://127.0.0.1:1080' >&2\nexec sleep 300\n")
     {
         var bin = Path.Combine(_dir, "bin");
         Directory.CreateDirectory(bin);
@@ -53,6 +53,7 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         Assert.Contains("--key=client-default", args);
         Assert.Contains("--derpmap-url=https://derp.example/map.json", args);
         Assert.Contains("--verbose", args);
+        Assert.Equal("127.0.0.1:1080", proxy.ListenAddress);
     }
 
     // Regression test: StartAsync used to discard MeowshellBinaries.Locate's
@@ -67,7 +68,7 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         Directory.CreateDirectory(bin);
         var envFile = Path.Combine(_dir, "env-" + Guid.NewGuid().ToString("N"));
         var shell = Path.Combine(bin, "libmeowshell.so");
-        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\nexec sleep 300\n");
+        File.WriteAllText(shell, $"#!/bin/bash\necho \"TAILCAT_BIN=$TAILCAT_BIN\" > {envFile}\necho 'SOCKS running at socks5h://127.0.0.1:1080' >&2\nexec sleep 300\n");
         File.SetUnixFileMode(shell, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite);
         var cat = Path.Combine(bin, "libtailcat.so");
         File.WriteAllText(cat, "#!/bin/bash\ntrue\n");
@@ -132,13 +133,26 @@ public sealed class MeowshellSocksProxyTests : IDisposable
     }
 
     [Fact]
-    public async Task CompletedFaultsWhenTheProxyCrashesOnItsOwn()
+    public async Task StartAsyncFailsWhenTheProxyCrashesBeforeBinding()
     {
         var (options, _) = Fake("sleep 0.2\necho 'listen: address already in use' >&2\nexit 1\n");
-        await using var proxy = await MeowshellSocksProxy.StartAsync(options);
-
-        var ex = await Assert.ThrowsAsync<TailcatException>(() => proxy.Completed);
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => MeowshellSocksProxy.StartAsync(options));
         Assert.Equal(1, ex.ExitCode);
         Assert.Contains("address already in use", ex.Diagnostics);
+    }
+
+    [Fact]
+    public async Task StartAsyncDoesNotReturnUntilTheProxyIsBound()
+    {
+        var (options, _) = Fake("sleep 0.3\necho 'SOCKS running at socks5h://127.0.0.1:23456' >&2\nexec sleep 300\n");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await using var proxy = await MeowshellSocksProxy.StartAsync(options with
+        {
+            StartTimeout = TimeSpan.FromSeconds(3),
+        });
+        sw.Stop();
+
+        Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(250), $"StartAsync returned before SOCKS was ready: {sw.Elapsed}");
+        Assert.Equal("127.0.0.1:23456", proxy.ListenAddress);
     }
 }
