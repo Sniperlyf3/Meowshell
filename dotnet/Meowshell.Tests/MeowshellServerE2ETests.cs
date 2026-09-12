@@ -100,7 +100,7 @@ public sealed class MeowshellServerE2ETests : IDisposable
         };
 
         var logs = new List<string>();
-        await using var server = await MeowshellServer.StartAsync(options);
+        await using var server = await RelayE2E.StartServerAsync(options);
         server.Log += line => { lock (logs) logs.Add(line); };
 
         Assert.False(string.IsNullOrWhiteSpace(server.Address));
@@ -158,7 +158,7 @@ public sealed class MeowshellServerE2ETests : IDisposable
                 StartTimeout = TimeSpan.FromSeconds(30),
             };
 
-            await using var server = await MeowshellServer.StartAsync(options);
+            await using var server = await RelayE2E.StartServerAsync(options);
             Mask(server.Address);
 
             var provisionedIdentity = await IdentityAsync(tailcatPath, provisioned);
