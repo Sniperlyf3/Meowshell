@@ -79,7 +79,6 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
 
         void HandleLog(string line)
         {
-            onLog?.Invoke(line);
             const string marker = "SOCKS running at ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
             if (at < 0) return;
