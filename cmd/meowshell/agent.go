@@ -205,6 +205,8 @@ type agentChannel struct {
 	writeStopOnce sync.Once
 	writePending  sync.WaitGroup
 	writeFailOnce sync.Once
+	writeMu       sync.Mutex
+	writeClosed   bool
 
 	sftpFile       *sftp.File
 	ctx            context.Context
@@ -755,16 +757,22 @@ func (a *agentSession) handleData(channelID uint32, payload []byte) {
 
 	// readFrame owns payload only until this call returns. Copy before handing
 	// it to a channel worker, then enqueue without blocking the sole frame
-	// reader. If this bounded queue is full, fail only this channel rather than
-	// allowing one non-reading remote peer to freeze every multiplexed channel.
+	// reader. writeMu closes the enqueue-vs-stop race: once stopChannelWriter
+	// marks writeClosed, no later frame can increment writePending or enter the
+	// queue after the worker has exited.
 	p := append([]byte(nil), payload...)
+	ch.writeMu.Lock()
+	if ch.writeClosed {
+		ch.writeMu.Unlock()
+		return
+	}
 	ch.writePending.Add(1)
 	select {
 	case ch.writeQueue <- p:
-	case <-ch.writeStop:
-		ch.writePending.Done()
+		ch.writeMu.Unlock()
 	default:
 		ch.writePending.Done()
+		ch.writeMu.Unlock()
 		err := fmt.Errorf("channel %d remote input is not being consumed fast enough", channelID)
 		a.writeError(channelID, errUnknown, err)
 		a.failChannelWrite(channelID, ch, err)
@@ -787,22 +795,46 @@ func (a *agentSession) startChannelWriter(channelID uint32, ch *agentChannel) {
 				}
 				ch.writePending.Done()
 				if err != nil {
+					// Mark the writer closed before draining so no concurrent
+					// handleData can enqueue a new item after the drain. Every
+					// item already accepted into writeQueue gets a matching
+					// Done, which prevents close_channel's upload finalizer
+					// from waiting forever after a failed queued write.
+					stopChannelWriter(ch)
+					drainPendingChannelWrites(ch)
 					a.writeError(channelID, classifyChannelWriteError(ch, err), err)
 					a.failChannelWrite(channelID, ch, err)
 					return
 				}
 			case <-ch.writeStop:
+				drainPendingChannelWrites(ch)
 				return
 			}
 		}
 	}()
 }
 
+func drainPendingChannelWrites(ch *agentChannel) {
+	for {
+		select {
+		case <-ch.writeQueue:
+			ch.writePending.Done()
+		default:
+			return
+		}
+	}
+}
+
 func stopChannelWriter(ch *agentChannel) {
 	if ch == nil || ch.writeStop == nil {
 		return
 	}
-	ch.writeStopOnce.Do(func() { close(ch.writeStop) })
+	ch.writeStopOnce.Do(func() {
+		ch.writeMu.Lock()
+		ch.writeClosed = true
+		close(ch.writeStop)
+		ch.writeMu.Unlock()
+	})
 }
 
 func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
