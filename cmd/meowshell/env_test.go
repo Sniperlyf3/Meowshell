@@ -21,7 +21,8 @@ func fakeFS(goos string, env map[string]string, files, dirs []string) *resolver 
 		isFile:   func(p string) bool { return f[p] },
 		isDir:    func(p string) bool { return d[p] },
 		writable: func(p string) bool { return true },
-		mkdirAll: func(p string) error { d[p] = true; return nil },
+		mkdirAll:   func(p string) error { d[p] = true; return nil },
+		privateDir: func(p string) error { d[p] = true; return nil },
 		realpath: func(p string) string {
 			if p == "/bin" && d["/system/bin"] {
 				return "/system/bin"
@@ -29,6 +30,7 @@ func fakeFS(goos string, env map[string]string, files, dirs []string) *resolver 
 			return p
 		},
 		goos: goos,
+		uid:  12345,
 	}
 }
 
@@ -95,8 +97,8 @@ func TestHomeCreatedWhenUnset(t *testing.T) {
 	if got == "" {
 		t.Fatal("home() returned an empty path")
 	}
-	if got != "/data/local/tmp/meowshell" {
-		t.Errorf("home() = %q, want the Android scratch dir", got)
+	if got != "/data/local/tmp/meowshell-12345" {
+		t.Errorf("home() = %q, want the private per-UID Android scratch dir", got)
 	}
 }
 
