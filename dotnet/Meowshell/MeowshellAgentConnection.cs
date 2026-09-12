@@ -879,6 +879,12 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         });
     private readonly Task _pumpTask;
 
+    // Touched only from OnDataAsync/OnControlAsync, which the read loop
+    // (RunReadLoopAsync -> HandleDataAsync/HandleControlAsync) only ever
+    // calls one frame at a time on itself -- no concurrent callers, so a
+    // plain bool is enough.
+    private bool _failed;
+
     public AgentChannelDataPump(IAgentChannelSink inner)
     {
         _inner = inner;
@@ -916,16 +922,48 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         }
     }
 
+    // N1: OnDataAsync/OnControlAsync used to await the bounded queue's own
+    // WriteAsync, which blocks once the queue is full (32 items) until this
+    // channel's own RunAsync pump has drained some of it. That awaited
+    // WriteAsync ran directly inside RunReadLoopAsync's single shared frame
+    // loop (via HandleDataAsync/HandleControlAsync), so one channel whose
+    // consumer stalled -- a forward's peer that stops reading, an upload's
+    // destination file starved for disk I/O, anything downstream of
+    // _inner.OnDataAsync -- froze delivery for every other multiplexed
+    // channel on the same connection, not just its own. TryWrite never
+    // blocks: when the queue is already full, this channel alone is failed
+    // (matching the Go agent's own handleData, which does the same "fail
+    // only this channel" thing for the mirror-image direction -- see
+    // agent.go's own comment on failChannelWrite) instead of the shared read
+    // loop ever waiting on it.
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
     {
-        return _queue.Writer.WriteAsync(new QueueItem(true, stream, data, null)).AsTask();
+        if (!TryEnqueue(new QueueItem(true, stream, data, null)))
+            FailBackpressure();
+        return Task.CompletedTask;
     }
 
-    public async Task OnControlAsync(AgentMessage msg)
+    public Task OnControlAsync(AgentMessage msg)
     {
-        await _queue.Writer.WriteAsync(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)).ConfigureAwait(false);
-        if (msg.Msg is "exit_status" or "error")
-            _queue.Writer.TryComplete();
+        if (TryEnqueue(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)))
+        {
+            if (msg.Msg is "exit_status" or "error")
+                _queue.Writer.TryComplete();
+        }
+        else
+        {
+            FailBackpressure();
+        }
+        return Task.CompletedTask;
+    }
+
+    private bool TryEnqueue(QueueItem item) => !_failed && _queue.Writer.TryWrite(item);
+
+    private void FailBackpressure()
+    {
+        if (_failed) return;
+        _failed = true;
+        OnFault(new TailcatException("channel data is not being consumed fast enough", 0, ""));
     }
 
     public void OnFault(Exception ex)
