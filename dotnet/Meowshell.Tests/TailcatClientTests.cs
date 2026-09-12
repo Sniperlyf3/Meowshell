@@ -59,6 +59,37 @@ public sealed class TailcatClientTests : IDisposable
         };
     }
 
+
+    [Fact]
+    public void ApplyHomeOverridesInheritedPlatformConfigRoot()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        var home = Path.Combine(_dir, "isolated-home");
+
+        if (OperatingSystem.IsWindows())
+        {
+            psi.Environment["APPDATA"] = @"C:\\attacker\\roaming";
+            psi.Environment["LOCALAPPDATA"] = @"C:\\attacker\\local";
+        }
+        else
+        {
+            psi.Environment["XDG_CONFIG_HOME"] = "/tmp/attacker-config";
+        }
+
+        TailcatProcessEnvironment.ApplyHome(psi, home);
+
+        Assert.Equal(home, psi.Environment["HOME"]);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(Path.Combine(home, "AppData", "Roaming"), psi.Environment["APPDATA"]);
+            Assert.Equal(Path.Combine(home, "AppData", "Local"), psi.Environment["LOCALAPPDATA"]);
+        }
+        else
+        {
+            Assert.Equal(Path.Combine(home, ".config"), psi.Environment["XDG_CONFIG_HOME"]);
+        }
+    }
+
     // Regression test for N13: the low-level RunAsync used to hand Timeout
     // straight to `new CancellationTokenSource(timeout)` after the process
     // was already started (`using var process = ...; using var job =
