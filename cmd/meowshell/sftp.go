@@ -57,8 +57,15 @@ func (c *pipeConn) Close() error {
 		select {
 		case c.err = <-done:
 		case <-time.After(pipeConnCloseGrace):
-			c.cmd.Process.Kill()
-			c.err = <-done
+			if err := c.cmd.Process.Kill(); err != nil {
+				c.err = fmt.Errorf("killing tailcat subprocess after close timeout: %w", err)
+				break
+			}
+			select {
+			case c.err = <-done:
+			case <-time.After(pipeConnCloseGrace):
+				c.err = fmt.Errorf("tailcat subprocess did not exit within %s after SIGKILL", pipeConnCloseGrace)
+			}
 		}
 		var exitErr *exec.ExitError
 		if errors.As(c.err, &exitErr) {
