@@ -448,4 +448,55 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
                 "127.0.0.1:0", socksUsername: tooLong, socksPassword: "password"));
     }
 
+
+    private sealed class BlockingDataSink(TaskCompletionSource entered, TaskCompletionSource release) : IAgentChannelSink
+    {
+        public async Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
+        {
+            entered.TrySetResult();
+            await release.Task;
+        }
+
+        public Task OnControlAsync(AgentMessage msg) => Task.CompletedTask;
+        public void OnFault(Exception ex) { }
+    }
+
+    [Fact]
+    public async Task ReceiveBackpressureRequestsRemoteChannelCleanupExactlyOnce()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var backpressure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCount = 0;
+
+        var pump = new AgentChannelDataPump(
+            new BlockingDataSink(entered, release),
+            () =>
+            {
+                Interlocked.Increment(ref callbackCount);
+                backpressure.TrySetResult();
+            });
+
+        // The pump consumes the first item and blocks in the inner sink.
+        await pump.OnDataAsync(0, new byte[] { 1 });
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Fill its 32-entry bounded queue, then overflow it. Every producer
+        // call must return synchronously; the overflow faults only this
+        // channel and asks the owner to close the remote side.
+        for (var i = 0; i < 40; i++)
+            await pump.OnDataAsync(0, new byte[] { 2 });
+
+        await backpressure.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, Volatile.Read(ref callbackCount));
+
+        // Further frames for the failed channel must not request repeated
+        // close operations.
+        for (var i = 0; i < 10; i++)
+            await pump.OnDataAsync(0, new byte[] { 3 });
+        Assert.Equal(1, Volatile.Read(ref callbackCount));
+
+        release.TrySetResult();
+    }
+
 }
