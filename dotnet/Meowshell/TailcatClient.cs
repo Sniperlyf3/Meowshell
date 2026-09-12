@@ -232,7 +232,7 @@ public static class TailcatClient
         }
         catch (JsonException ex)
         {
-            throw UnexpectedOutput("parse", $"couldn't parse its JSON ({ex.Message}): {result.Stdout}");
+            throw UnexpectedOutput("parse", $"couldn't parse its JSON ({ex.Message}); raw decoded address data was omitted because it can contain a preshared key");
         }
     }
 
