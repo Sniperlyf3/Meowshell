@@ -388,6 +388,7 @@ func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
 	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com", true); err == nil {
 		t.Fatal("malformed tailcat TXT record was accepted")
 	}
+}
 
 func TestProxyDialerRejectsCredentialsOverPlainHTTP(t *testing.T) {
 	_, err := proxyDialer("http://user:secret@127.0.0.1:8080", "backend.example:22")
@@ -397,6 +398,4 @@ func TestProxyDialerRejectsCredentialsOverPlainHTTP(t *testing.T) {
 	if strings.Contains(err.Error(), "secret") {
 		t.Fatalf("proxy rejection exposed password: %v", err)
 	}
-}
-
 }
