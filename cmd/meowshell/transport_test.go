@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,11 +64,17 @@ func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
 // a hostile or unresponsive jump host during TestJumpDialerRespectsContext.
 type blockingJumpClient struct {
 	unblock chan struct{}
+	once    sync.Once
 }
 
 func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
 	<-b.unblock
 	return nil, errors.New("dial finished after being unblocked, too late to matter")
+}
+
+func (b *blockingJumpClient) Close() error {
+	b.once.Do(func() { close(b.unblock) })
+	return nil
 }
 
 // TestJumpDialerRespectsContext is a regression test: jumpDialer's returned
@@ -77,9 +84,10 @@ func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
 // timeout dialSSHClient thinks it's enforcing.
 func TestJumpDialerRespectsContext(t *testing.T) {
 	unblock := make(chan struct{})
-	t.Cleanup(func() { close(unblock) })
+	client := &blockingJumpClient{unblock: unblock}
+	t.Cleanup(func() { _ = client.Close() })
 
-	dial := jumpDialer(&blockingJumpClient{unblock: unblock}, "host:22")
+	dial := jumpDialer(client, "host:22")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
