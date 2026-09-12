@@ -388,4 +388,15 @@ func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
 	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com", true); err == nil {
 		t.Fatal("malformed tailcat TXT record was accepted")
 	}
+
+func TestProxyDialerRejectsCredentialsOverPlainHTTP(t *testing.T) {
+	_, err := proxyDialer("http://user:secret@127.0.0.1:8080", "backend.example:22")
+	if err == nil {
+		t.Fatal("proxyDialer accepted credentials over plaintext HTTP")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("proxy rejection exposed password: %v", err)
+	}
+}
+
 }
