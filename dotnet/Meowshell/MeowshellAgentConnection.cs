@@ -522,11 +522,26 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         // closed.
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingCloses[id] = tcs;
+        var closeSent = false;
         try
         {
             await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            closeSent = true;
             using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
             await tcs.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancellation should stop the caller waiting, not leave a
+            // listener running remotely. If the token fired before the
+            // close frame made it onto the wire, send one best-effort with
+            // an uncancelled token; duplicate close_channel is harmless on
+            // the agent side if a partial/canceled write actually got through.
+            if (!closeSent)
+            {
+                try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
+            }
+            throw;
         }
         finally
         {
