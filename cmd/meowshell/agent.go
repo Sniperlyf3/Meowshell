@@ -275,11 +275,15 @@ func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 
 func (a *agentSession) client() *ssh.Client { return a.scPtr.Load() }
 
-func (a *agentSession) forwardClient() interface {
+func (a *agentSession) forwardClient() (interface {
 	Dial(network, addr string) (net.Conn, error)
-} {
+}, error) {
 	if a.tcAddr == "" {
-		return a.client()
+		client := a.client()
+		if client == nil {
+			return nil, fmt.Errorf("SSH connection is no longer available")
+		}
+		return client, nil
 	}
 	a.tcMu.Lock()
 	defer a.tcMu.Unlock()
@@ -290,7 +294,7 @@ func (a *agentSession) forwardClient() interface {
 			DERPMapURL: a.tcDERPMapURL,
 		}
 	}
-	return &tailcatForwardClient{cl: a.tcClient}
+	return &tailcatForwardClient{cl: a.tcClient}, nil
 }
 
 func (a *agentSession) readConfigure() (controlMessage, error) {
