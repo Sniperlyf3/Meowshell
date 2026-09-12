@@ -7,3 +7,8 @@ package main
 func withRestrictedUmask(fn func() error) error {
 	return fn()
 }
+
+
+func validateSocketParent(path string) error {
+	return nil
+}
