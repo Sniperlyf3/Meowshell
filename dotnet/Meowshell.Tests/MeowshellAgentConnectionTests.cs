@@ -418,4 +418,34 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             return false;
         }
     }
+
+    [Fact]
+    public async Task OpenLocalForwardRejectsAnExcessiveMaxConnections()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => connection.OpenLocalForwardAsync(
+                "127.0.0.1:0", "10.0.0.1:80", maxConnections: 65_536));
+    }
+
+    [Fact]
+    public async Task SocksAuthRejectsPartialOrOversizedCredentials()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => connection.OpenSocksForwardAsync(
+                "127.0.0.1:0", socksUsername: "only-user", socksPassword: null));
+
+        var tooLong = new string('x', 256);
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => connection.OpenSocksForwardAsync(
+                "127.0.0.1:0", socksUsername: tooLong, socksPassword: "password"));
+    }
+
 }
