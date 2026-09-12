@@ -101,6 +101,18 @@ type controlMessage struct {
 
 	Code    errorCode `json:"code,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Terminal disambiguates an "error" message (N5): some (a shell/exec
+	// channel dying unexpectedly with no exit_status to follow, an upload's
+	// write failure, a cancelled/failed download) end the channel; others
+	// (a failed agent-forwarding setup, a rejected resize request) report a
+	// problem on a channel that stays alive and keeps working. Always set
+	// explicitly by writeError (true) or writeWarning (false) -- never left
+	// to its zero value -- so a nil Terminal on the wire only ever means an
+	// older sender that predates this field, which a receiver should treat
+	// as terminal (the safer of the two: a truly-dead channel a client
+	// wrongly treats as terminal is merely tidied up unnecessarily; a
+	// truly-dead channel a client wrongly treats as alive is a silent hang).
+	Terminal *bool `json:"terminal,omitempty"`
 
 	RequestID string `json:"request_id,omitempty"`
 

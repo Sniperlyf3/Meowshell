@@ -702,21 +702,22 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         if (_channels.TryGetValue(channelId, out var sink))
             await sink.OnControlAsync(msg).ConfigureAwait(false);
 
-        // "exit_status" is the one message the agent guarantees to send
-        // exactly once, terminally, for a channel that finished running --
-        // safe to remove on unconditionally (harmless if Upload/DownloadAsync
-        // already did, in their own finally blocks). A per-channel "error" is
-        // deliberately NOT treated the same way here: the agent can send one
-        // for a still-alive shell channel (e.g. a failed agent-forwarding
-        // setup, logged but not fatal to the session) as well as for a
-        // genuinely dead one, and the wire protocol doesn't distinguish the
-        // two -- removing on every "error" would silently drop all further
-        // data/control traffic for a channel that's actually still running.
-        // Without this, _channels only ever grows for the life of the
-        // connection: nothing else ever removes a shell/exec entry once
-        // opened, which is a real, unbounded leak on a long-lived connection
-        // that opens many short commands.
-        if (msg.Msg == "exit_status")
+        // "exit_status" always ends a channel, safe to remove on
+        // unconditionally (harmless if Upload/DownloadAsync already did, in
+        // their own finally blocks). A per-channel "error" only ends it when
+        // the agent explicitly says so (N5, see AgentMessage.EndsChannel and
+        // controlMessage.Terminal's own comment on the Go side): some (a
+        // failed agent-forwarding setup, a rejected resize) leave the
+        // channel alive, others (a shell/exec channel dying unexpectedly
+        // with no exit_status to follow) are the only terminal signal that
+        // channel ever gets. Removing on every "error" used to silently drop
+        // all further data/control traffic for a channel that was actually
+        // still running; never removing on one used to leak every channel
+        // whose only terminal signal was an "error" for the life of the
+        // connection -- nothing else ever removed a shell/exec entry once
+        // opened otherwise, on a long-lived connection that opens many short
+        // commands.
+        if (msg.EndsChannel)
             _channels.TryRemove(channelId, out _);
     }
 
@@ -947,7 +948,14 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     {
         if (TryEnqueue(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)))
         {
-            if (msg.Msg is "exit_status" or "error")
+            // N5: used to complete on every "error", terminal or not -- a
+            // non-terminal one (a failed agent-forwarding setup, a rejected
+            // resize) closed this queue for writing regardless, so the very
+            // next OnDataAsync/OnControlAsync call for this otherwise
+            // perfectly healthy channel would TryWrite against an already-
+            // completed channel and fail, wrongly faulting it. EndsChannel
+            // is the one shared rule for what actually ends a channel.
+            if (msg.EndsChannel)
                 _queue.Writer.TryComplete();
         }
         else
@@ -1085,10 +1093,21 @@ public sealed class MeowshellAgentShellChannel : IAgentChannelSink, IAsyncDispos
                 _exitCode.TrySetResult(msg.ExitCode);
                 break;
             case "error":
-                var ex = new TailcatException("session failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code));
-                _stdout.Writer.Complete(ex);
-                _stderr.Writer.Complete(ex);
-                _exitCode.TrySetException(ex);
+                // N5: only a terminal "error" (no exit_status will ever
+                // follow for this channel) faults Completed/Output/Error --
+                // a non-terminal one (a failed agent-forwarding setup, a
+                // rejected resize) reports a problem on a channel that's
+                // still running and will still send a real exit_status
+                // later; treating it as fatal here used to end this
+                // channel's public API over a hiccup that never actually
+                // stopped it.
+                if (msg.EndsChannel)
+                {
+                    var ex = new TailcatException("session failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code));
+                    _stdout.Writer.Complete(ex);
+                    _stderr.Writer.Complete(ex);
+                    _exitCode.TrySetException(ex);
+                }
                 break;
         }
         return Task.CompletedTask;

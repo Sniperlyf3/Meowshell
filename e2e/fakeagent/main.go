@@ -82,14 +82,18 @@ func readFrame(r io.Reader) (frame, error) {
 }
 
 type message struct {
-	Msg        string `json:"msg"`
-	RequestID  string `json:"request_id,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Path       string `json:"path,omitempty"`
-	Code       string `json:"code,omitempty"`
-	Message    string `json:"message,omitempty"`
-	RemoteAddr string `json:"remote_addr,omitempty"`
+	Msg        string   `json:"msg"`
+	RequestID  string   `json:"request_id,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Code       string   `json:"code,omitempty"`
+	Message    string   `json:"message,omitempty"`
+	RemoteAddr string   `json:"remote_addr,omitempty"`
+	Terminal   *bool    `json:"terminal,omitempty"`
+	Command    []string `json:"command,omitempty"`
 }
+
+var falseVal = false
 
 // delayCloseRemoteAddr is a magic RemoteAddr an open_channel request can set
 // (irrelevant to a real agent, which would just fail to dial it -- this fake
@@ -156,12 +160,26 @@ func main() {
 				delayClose[id] = true
 				delayCloseMu.Unlock()
 			}
-			go func(requestID, kind, path string, id uint32) {
+			go func(requestID, kind, path string, command []string, id uint32) {
 				time.Sleep(openDelay)
 				writeControl(os.Stdout, &outMu, id, message{Msg: "channel_opened", RequestID: requestID})
 				if kind == "sftp_download" && path == "partial-then-error" {
 					writeData(os.Stdout, &outMu, id, []byte("partial-new-data"))
 					writeControl(os.Stdout, &outMu, id, message{Msg: "error", Code: "unknown", Message: "synthetic download failure"})
+					return
+				}
+				// N5 regression coverage: a non-terminal "error" (Terminal:
+				// false) on an otherwise perfectly healthy channel -- the
+				// real agent sends one of these for a failed
+				// agent-forwarding setup or a rejected resize, and the
+				// channel keeps working normally afterward either way. A
+				// test opts in via this magic path so every other
+				// shell/exec test above keeps its existing, simpler
+				// behavior.
+				if (kind == "shell" || kind == "exec") && len(command) > 0 && command[0] == "warn-then-finish" {
+					writeControl(os.Stdout, &outMu, id, message{Msg: "error", Code: "unknown", Message: "synthetic non-terminal warning", Terminal: &falseVal})
+					writeData(os.Stdout, &outMu, id, []byte("still works"))
+					writeControl(os.Stdout, &outMu, id, message{Msg: "exit_status"})
 					return
 				}
 				// Only kinds that realistically finish on their own in the
@@ -179,7 +197,7 @@ func main() {
 				case "", "shell", "exec", "sftp_upload":
 					writeControl(os.Stdout, &outMu, id, message{Msg: "exit_status"})
 				}
-			}(msg.RequestID, msg.Kind, msg.Path, id)
+			}(msg.RequestID, msg.Kind, msg.Path, msg.Command, id)
 		case "close_channel":
 			fmt.Fprintf(results, "CLOSED %d\n", f.ChannelID)
 			results.Sync()

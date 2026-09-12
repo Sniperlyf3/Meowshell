@@ -16,6 +16,58 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// TestNonTerminalErrorDoesNotEndTheChannel is a regression test for N5: a
+// non-terminal "error" (a rejected resize request, here -- agent-forwarding
+// setup failure is the other real-world case) used to be wire-indistinguishable
+// from a terminal one, and MeowshellAgentConnection's AgentChannelDataPump
+// treated every "error" as ending the channel's own data queue regardless.
+// Sends an invalid resize for a channel that's still very much alive and
+// confirms both that the error carries Terminal: false, and that the channel
+// keeps working normally afterward (a real exec command run against it still
+// completes and returns its output).
+func TestNonTerminalErrorDoesNotEndTheChannel(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	addr, _, stop := startTestSSHServer(t, echoCommandHandler)
+	defer stop()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+	defer stopAgent(t, cmd, stdin)
+
+	f := mustReadFrame(t, out)
+	msg := decodeControl(t, f)
+	if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+		t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+	}
+	send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Accept: true})
+	expectConnected(t, out)
+
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "shell", RequestID: "req1"})
+	id := expectChannelOpened(t, out)
+
+	send(t, stdin, id, controlMessage{Msg: "resize", Cols: -1, Rows: -1})
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("resize with invalid cols/rows = %+v, want an \"error\"", msg)
+	}
+	if msg.Terminal == nil || *msg.Terminal {
+		t.Errorf("resize error Terminal = %v, want a non-nil false: a rejected resize must not end the channel", msg.Terminal)
+	}
+
+	// Prove the channel is still alive and tracked (not removed as a side
+	// effect of the "error" above) by triggering the same rejection again:
+	// if the channel had wrongly been removed, resize() would find nothing
+	// under this ID and send nothing back at all, so this would time out
+	// instead of promptly getting a second "error".
+	send(t, stdin, id, controlMessage{Msg: "resize", Cols: -1, Rows: -1})
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("second resize after the first was rejected = %+v, want another \"error\" (the channel must still be tracked)", msg)
+	}
+}
+
 func TestAgentTCPEndToEnd(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 

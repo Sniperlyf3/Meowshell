@@ -320,6 +320,32 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         Assert.Equal(before, connection.ChannelCountForTests);
     }
 
+    /// <summary>Regression test for N5: a non-terminal "error" (Terminal:
+    /// false -- the real agent sends one of these for a failed
+    /// agent-forwarding setup or a rejected resize request) on an otherwise
+    /// healthy shell/exec channel used to be wire-indistinguishable from a
+    /// terminal one, so MeowshellAgentShellChannel's OnControlAsync faulted
+    /// Completed/Output/Error over it, and AgentChannelDataPump completed its
+    /// own internal queue -- both as if the channel had actually died, even
+    /// though the agent kept sending real data and a real exit_status for it
+    /// afterward. e2e/fakeagent's "warn-then-finish" command sends exactly
+    /// that sequence (a non-terminal error, then data, then exit_status).</summary>
+    [Fact]
+    public async Task NonTerminalErrorDoesNotFaultTheChannel()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await using var shell = await connection.OpenExecAsync(["warn-then-finish"]);
+
+        var output = await new StreamReader(shell.Output).ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var exitCode = await shell.Completed.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("still works", output);
+        Assert.Equal(0, exitCode);
+    }
+
     /// <summary>Regression test for N14: maxConnections is meant to bound the
     /// agent's per-forward accept concurrency (see forwarding.go's
     /// acceptForwardedConns), so a negative value has no coherent meaning and

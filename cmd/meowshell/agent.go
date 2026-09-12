@@ -488,8 +488,24 @@ func (a *agentSession) writeData(channelID uint32, stream byte, p []byte) error 
 	return writeFrame(a.out, frame{Type: frameTypeData, ChannelID: channelID, Payload: payload})
 }
 
+var (
+	terminalTrue  = true
+	terminalFalse = false
+)
+
+// writeError reports a failure that ends channelID: the caller must have
+// already removed it (or be about to, as part of the same failure path) --
+// see controlMessage.Terminal's own comment for why this distinction exists
+// and what a client does differently for each.
 func (a *agentSession) writeError(channelID uint32, code errorCode, err error) error {
-	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error()})
+	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error(), Terminal: &terminalTrue})
+}
+
+// writeWarning reports a problem on channelID that does not end it -- e.g. a
+// failed post-open step like agent-forwarding setup, or a rejected resize
+// request. The channel keeps working normally afterward.
+func (a *agentSession) writeWarning(channelID uint32, code errorCode, err error) error {
+	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error(), Terminal: &terminalFalse})
 }
 
 // writeOpenError reports a failure to open a channel, before any channel ID
@@ -862,7 +878,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	}
 
 	if forwardingErr != nil {
-		a.writeError(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", forwardingErr))
+		a.writeWarning(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", forwardingErr))
 	}
 
 	var wg sync.WaitGroup
@@ -913,11 +929,11 @@ func (a *agentSession) resize(channelID uint32, msg controlMessage) {
 		return
 	}
 	if msg.Cols <= 0 || msg.Rows <= 0 {
-		a.writeError(channelID, errProtocolError, fmt.Errorf("resize needs positive cols/rows, got %dx%d", msg.Cols, msg.Rows))
+		a.writeWarning(channelID, errProtocolError, fmt.Errorf("resize needs positive cols/rows, got %dx%d", msg.Cols, msg.Rows))
 		return
 	}
 	if err := ch.session.WindowChange(msg.Rows, msg.Cols); err != nil {
-		a.writeError(channelID, errUnknown, fmt.Errorf("resizing: %w", err))
+		a.writeWarning(channelID, errUnknown, fmt.Errorf("resizing: %w", err))
 	}
 }
 
