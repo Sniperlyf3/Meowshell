@@ -57,7 +57,7 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
             psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
         if (options.Verbose)
             psi.ArgumentList.Add("--verbose");
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         // See MeowshellPortForward.StartAsync: without this, the spawned
         // "meowshell socks" resolves tailcat via an inherited TAILCAT_BIN /
         // sibling-binary / $PATH search of its own, silently overriding the
