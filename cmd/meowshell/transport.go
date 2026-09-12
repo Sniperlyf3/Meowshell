@@ -37,9 +37,12 @@ func tailcatDialer(tailcatBin string, argv []string) dialer {
 		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
+			_ = stdin.Close()
 			return nil, err
 		}
 		if err := cmd.Start(); err != nil {
+			_ = stdin.Close()
+			_ = stdout.Close()
 			return nil, err
 		}
 		return &pipeConn{cmd: cmd, stdout: stdout, stdin: stdin}, nil
@@ -76,6 +79,11 @@ func jumpDialer(via jumpClient, hostPort string) dialer {
 		case res := <-ch:
 			return res.conn, res.err
 		case <-ctx.Done():
+			// Closing the jump SSH transport is the only available
+			// cancellation primitive for *ssh.Client.Dial. It forces the
+			// in-flight channel-open to unwind instead of leaking one
+			// goroutine per timed-out attempt.
+			_ = via.Close()
 			go func() {
 				if res := <-ch; res.conn != nil {
 					res.conn.Close()
@@ -88,6 +96,7 @@ func jumpDialer(via jumpClient, hostPort string) dialer {
 
 type jumpClient interface {
 	Dial(network, addr string) (net.Conn, error)
+	Close() error
 }
 
 func splitUserHost(dest, defaultPort string) (username, hostPort string) {
@@ -125,7 +134,8 @@ func proxyDialer(proxyURL, hostPort string) (dialer, error) {
 	}
 	switch u.Scheme {
 	case "socks5", "socks5h":
-		d, err := proxy.SOCKS5("tcp", u.Host, proxyAuthFromURL(u), proxy.Direct)
+		base := &net.Dialer{Timeout: tcpDialTimeout}
+		d, err := proxy.SOCKS5("tcp", u.Host, proxyAuthFromURL(u), base)
 		if err != nil {
 			return nil, fmt.Errorf("configuring SOCKS5 proxy %q: %w", u.Redacted(), err)
 		}
