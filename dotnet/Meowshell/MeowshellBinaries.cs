@@ -1,3 +1,7 @@
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
+
 #nullable enable
 
 namespace Meowshell;
@@ -29,11 +33,15 @@ internal static class MeowshellBinaries
 
     private static void EnsureExecutable(string path)
     {
-        if (OperatingSystem.IsWindows()) return;
-
         var info = new FileInfo(path);
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
             throw new IOException($"refusing native binary symlink/reparse point: {path}");
+
+        if (OperatingSystem.IsWindows())
+        {
+            ValidateWindowsExecutable(info);
+            return;
+        }
 
         var mode = File.GetUnixFileMode(path);
         const UnixFileMode writeByOthers =
@@ -53,4 +61,51 @@ internal static class MeowshellBinaries
             File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
         }
     }
+
+    [SupportedOSPlatform("windows")]
+    private static void ValidateWindowsExecutable(FileInfo info)
+    {
+        var security = info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier
+            ?? throw new IOException($"refusing native binary {info.FullName}: Windows ACL has no owner SID");
+
+        using var identity = WindowsIdentity.GetCurrent();
+        var current = identity.User
+            ?? throw new IOException($"refusing native binary {info.FullName}: current Windows identity has no user SID");
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+
+        bool Trusted(IdentityReference sid) =>
+            sid.Equals(current) || sid.Equals(admins) || sid.Equals(system);
+
+        if (!Trusted(owner))
+            throw new IOException(
+                $"refusing native binary {info.FullName}: not owned by the current user, Administrators, or SYSTEM");
+
+        const FileSystemRights writeCapable =
+            FileSystemRights.Write |
+            FileSystemRights.Modify |
+            FileSystemRights.FullControl |
+            FileSystemRights.ChangePermissions |
+            FileSystemRights.TakeOwnership |
+            FileSystemRights.Delete |
+            FileSystemRights.AppendData |
+            FileSystemRights.WriteAttributes |
+            FileSystemRights.WriteExtendedAttributes;
+
+        var rules = security.GetAccessRules(
+            includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType != AccessControlType.Allow)
+                continue;
+            if ((rule.FileSystemRights & writeCapable) == 0)
+                continue;
+            if (Trusted(rule.IdentityReference))
+                continue;
+            throw new IOException(
+                $"refusing native binary {info.FullName}: grants write-capable access to {rule.IdentityReference.Value}");
+        }
+    }
+
 }
