@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+"github.com/tailscale/tailcat"
 	"golang.org/x/net/proxy"
 )
 
@@ -277,10 +278,9 @@ func resolveAgentDestination(ctx context.Context, dest string, allowTXT bool) (s
 }
 
 func looksLikeTailcatAddress(dest string) bool {
-	rest, ok := strings.CutPrefix(dest, "tc")
-	if !ok || rest == "" {
+	if !strings.HasPrefix(dest, "tc") {
 		return false
 	}
-	_, err := base64.RawURLEncoding.DecodeString(rest)
+	_, err := tailcat.ParseAddr(tailcat.Addr(dest))
 	return err == nil
 }
