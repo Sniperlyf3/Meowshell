@@ -26,6 +26,18 @@ func (a *agentSession) sftpClientFor() (*sftp.Client, error) {
 	return sf, nil
 }
 
+func (a *agentSession) resetSFTPClient(expected *sftp.Client) {
+	a.sftpMu.Lock()
+	sf := a.sftpClient
+	if sf == nil || (expected != nil && sf != expected) {
+		a.sftpMu.Unlock()
+		return
+	}
+	a.sftpClient = nil
+	a.sftpMu.Unlock()
+	_ = sf.Close()
+}
+
 func classifySFTPError(err error) errorCode {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -43,7 +55,11 @@ func (a *agentSession) sftpOp(msg controlMessage) {
 		a.writeControl(0, controlMessage{Msg: "error", RequestID: msg.RequestID, Code: errUnknown, Message: err.Error()})
 		return
 	}
+	a.sftpOpWithClient(sf, msg)
+}
 
+func (a *agentSession) sftpOpWithClient(sf *sftp.Client, msg controlMessage) {
+	var err error
 	resp := controlMessage{Msg: "sftp_result", RequestID: msg.RequestID}
 	switch msg.Op {
 	case "ls":
