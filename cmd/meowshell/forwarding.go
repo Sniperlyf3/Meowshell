@@ -109,6 +109,10 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 
 func (a *agentSession) openRemoteForward(msg controlMessage) {
 	client := a.client()
+	if client == nil {
+		a.writeOpenError(msg.RequestID, errConnectionLost, fmt.Errorf("SSH connection is no longer available"))
+		return
+	}
 	ln, err := client.Listen("tcp", msg.ListenAddr)
 	if err != nil {
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
