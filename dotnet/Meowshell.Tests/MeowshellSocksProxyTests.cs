@@ -155,4 +155,16 @@ public sealed class MeowshellSocksProxyTests : IDisposable
         Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(250), $"StartAsync returned before SOCKS was ready: {sw.Elapsed}");
         Assert.Equal("127.0.0.1:23456", proxy.ListenAddress);
     }
+
+    [Fact]
+    public async Task ThrowingStartupLogCallbackDoesNotHideReadiness()
+    {
+        var (options, _) = Fake();
+        await using var proxy = await MeowshellSocksProxy.StartAsync(
+            options with { StartTimeout = TimeSpan.FromSeconds(3) },
+            _ => throw new InvalidOperationException("application logger failed"));
+
+        Assert.Equal("127.0.0.1:1080", proxy.ListenAddress);
+    }
+
 }
