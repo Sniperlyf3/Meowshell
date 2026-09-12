@@ -24,4 +24,10 @@ internal static class RelayE2E
 
     public static MeowshellOptions HermeticServer(MeowshellOptions options) =>
         options with { ProcessEnvironmentOverrides = HermeticServerEnvironment };
+
+    public static Task<MeowshellServer> StartServerAsync(
+        MeowshellOptions options,
+        CancellationToken cancellationToken = default,
+        Action<string>? onLog = null) =>
+        MeowshellServer.StartAsync(HermeticServer(options), cancellationToken, onLog);
 }
