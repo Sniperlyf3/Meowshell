@@ -8,6 +8,7 @@ internal static class MeowshellProcessControl
 {
     private const int ETXTBSY = 26;
     internal const string ParentJobEnvironmentVariable = "MEOWSHELL_PARENT_JOB";
+    internal const string ManagedParentPidEnvironmentVariable = "MEOWSHELL_MANAGED_PARENT_PID";
 
     public static JobObject? Start(Process process)
     {
@@ -16,6 +17,17 @@ internal static class MeowshellProcessControl
         {
             job = JobObject.CreateForChild();
             process.StartInfo.Environment[ParentJobEnvironmentVariable] = job.Name!;
+        }
+        else if (OperatingSystem.IsLinux() || OperatingSystem.IsAndroid())
+        {
+            // PR_SET_PDEATHSIG is tied to the specific parent *thread* that
+            // created the child, not to this managed host process as a whole.
+            // Under the .NET thread pool that can SIGKILL a healthy child
+            // when only the spawning worker thread disappears. Pass the host
+            // process PID instead; meowshell/tailcat use a process-level
+            // watchdog for managed launches.
+            process.StartInfo.Environment[ManagedParentPidEnvironmentVariable] =
+                Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         try
