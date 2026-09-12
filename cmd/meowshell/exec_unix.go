@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 const managedParentPIDEnv = "MEOWSHELL_MANAGED_PARENT_PID"
@@ -33,6 +34,31 @@ func consumeManagedHostPID() int {
 		return 0
 	}
 	return pid
+}
+
+func startManagedParentWatchdog() {
+	if managedHostPID <= 0 {
+		return
+	}
+	if managedParentGone(managedHostPID, os.Getppid()) {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		return
+	}
+	go func(parentPID int) {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !managedParentGone(parentPID, os.Getppid()) {
+				continue
+			}
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			return
+		}
+	}(managedHostPID)
+}
+
+func managedParentGone(expected, actual int) bool {
+	return expected > 0 && actual != expected
 }
 
 func runTailcat(bin string, argv, environ []string) error {
