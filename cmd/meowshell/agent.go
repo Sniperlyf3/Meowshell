@@ -660,31 +660,38 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 	select {
 	case a.sftpOpSlots <- struct{}{}:
 		done := make(chan struct{})
+		usedClient := make(chan *sftp.Client, 1)
 		var releaseOnce sync.Once
 		release := func() { releaseOnce.Do(func() { <-a.sftpOpSlots }) }
+
 		go func() {
 			defer close(done)
 			defer release()
 			if a.sftpOpHandler != nil {
+				usedClient <- nil
 				a.sftpOpHandler(msg)
 				return
 			}
-			a.sftpOp(msg)
+			sf, err := a.sftpClientFor()
+			if err != nil {
+				usedClient <- nil
+				a.writeControl(0, controlMessage{
+					Msg: "error", RequestID: msg.RequestID,
+					Code: errUnknown, Message: err.Error(),
+				})
+				return
+			}
+			usedClient <- sf
+			a.sftpOpWithClient(sf, msg)
 		}()
+
 		go func() {
+			timer := time.NewTimer(sftpOpTimeout)
+			defer timer.Stop()
 			select {
 			case <-done:
-				// Finished within the bound; the op above already sent its
-				// own response and released the slot via defer.
-			case <-time.After(sftpOpTimeout):
-				// The op is still outstanding with no way to actually stop
-				// it. Report the timeout now and reclaim the slot
-				// immediately rather than waiting on a response that may
-				// never come; the abandoned goroutine keeps running
-				// harmlessly in the background and, if it does eventually
-				// finish, its late response finds nobody still waiting on
-				// this requestID (dropped, the same as any other orphaned
-				// late response elsewhere in this protocol).
+				return
+			case <-timer.C:
 				a.writeControl(0, controlMessage{
 					Msg:       "error",
 					RequestID: msg.RequestID,
@@ -692,6 +699,28 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 					Message:   fmt.Sprintf("sftp %s did not finish within %s", msg.Op, sftpOpTimeout),
 				})
 				release()
+
+				if a.sftpOpHandler != nil {
+					// Unit-test hook: there is no real subsystem to reset.
+					return
+				}
+				select {
+				case sf := <-usedClient:
+					if sf != nil {
+						// Closing the exact shared SFTP client forces any
+						// requests blocked in pkg/sftp to return. The field is
+						// cleared only if this is still the active instance,
+						// so a later timeout cannot accidentally close a newer
+						// replacement client.
+						a.resetSFTPClient(sf)
+						return
+					}
+				default:
+					// Even NewClient itself has not completed. There is no
+					// narrower handle to cancel, so fail the SSH transport;
+					// that is the only reliable way to unwind subsystem setup.
+					a.reportConnectionLost(fmt.Errorf("SFTP subsystem setup timed out after %s", sftpOpTimeout))
+				}
 			}
 		}()
 	default:
