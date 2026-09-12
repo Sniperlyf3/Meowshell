@@ -391,13 +391,22 @@ func findTailcat(explicit string) (string, error) {
 			return "", false
 		}
 		tried = append(tried, p)
-		fi, err := os.Stat(p)
-		if err != nil || fi.IsDir() {
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 {
 			return "", false
 		}
 
-		if runtimeGOOS != "windows" && fi.Mode()&0o111 == 0 {
-			return "", false
+		if runtimeGOOS != "windows" {
+			if fi.Mode()&0o111 == 0 {
+				return "", false
+			}
+			// TAILCAT_BIN and PATH are inherited process inputs. Refuse an
+			// executable another local user/group can modify, otherwise a
+			// privileged or service-hosted meowshell can be redirected into
+			// attacker-controlled native code without changing its arguments.
+			if fi.Mode().Perm()&0o022 != 0 {
+				return "", false
+			}
 		}
 		return p, true
 	}
@@ -417,7 +426,9 @@ func findTailcat(explicit string) (string, error) {
 		}
 	}
 	if p, err := exec.LookPath("tailcat"); err == nil {
-		return p, nil
+		if p, ok := check(p); ok {
+			return p, nil
+		}
 	}
 	tried = append(tried, "$PATH")
 	return "", fmt.Errorf("no tailcat binary found (looked in %s); set $TAILCAT_BIN or pass --tailcat", strings.Join(tried, ", "))
