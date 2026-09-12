@@ -81,6 +81,24 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "tailcat" }
 func (pipeAddr) String() string  { return "tailcat" }
 
+// modernSSHAlgorithms restricts key exchange, cipher, MAC, and host-key
+// algorithm negotiation to golang.org/x/crypto/ssh's own SupportedAlgorithms
+// set (N11): without this, an unconfigured ssh.ClientConfig falls back to
+// the package's *default* lists, which -- for compatibility with very old
+// servers -- still include algorithms the same package classifies as
+// insecure (SHA-1 key exchange, 96-bit truncated HMAC, DSA and ssh-rsa/SHA-1
+// host keys). Explicitly restricting to SupportedAlgorithms() means a server
+// that only offers those legacy algorithms fails the handshake instead of
+// silently downgrading to them.
+func modernSSHAlgorithms() (ssh.Config, []string) {
+	algos := ssh.SupportedAlgorithms()
+	return ssh.Config{
+		KeyExchanges: algos.KeyExchanges,
+		Ciphers:      algos.Ciphers,
+		MACs:         algos.MACs,
+	}, algos.HostKeys
+}
+
 func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, hostKeyCallback ssh.HostKeyCallback, auth []ssh.AuthMethod) (*ssh.Client, error) {
 	handshakeCtx, cancel := context.WithTimeout(ctx, sshHandshakeTimeout)
 	defer cancel()
@@ -88,12 +106,15 @@ func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, ho
 	if err != nil {
 		return nil, err
 	}
+	cryptoConfig, hostKeyAlgos := modernSSHAlgorithms()
 	stopCancellation := context.AfterFunc(handshakeCtx, func() { conn.Close() })
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, remoteAddr, &ssh.ClientConfig{
-		User:            user,
-		HostKeyCallback: hostKeyCallback,
-		Auth:            auth,
-		Timeout:         sshHandshakeTimeout,
+		Config:            cryptoConfig,
+		HostKeyAlgorithms: hostKeyAlgos,
+		User:              user,
+		HostKeyCallback:   hostKeyCallback,
+		Auth:              auth,
+		Timeout:           sshHandshakeTimeout,
 	})
 	stoppedCancellation := stopCancellation()
 	if err != nil {

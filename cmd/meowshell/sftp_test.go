@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,6 +27,53 @@ func TestDialSSHClientHonorsContextDuringHandshake(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("handshake cancellation took %s, want under 1s", elapsed)
+	}
+}
+
+// TestModernSSHAlgorithmsExcludesKnownInsecureOnes is the N11 regression:
+// without an explicit Config/HostKeyAlgorithms, golang.org/x/crypto/ssh
+// falls back to its own default lists, which still include algorithms the
+// same package's own InsecureAlgorithms() names -- SHA-1 key exchange, a
+// 96-bit truncated HMAC, and DSA/ssh-rsa (SHA-1) host keys -- for
+// compatibility with very old servers. dialSSHClient must restrict
+// negotiation to SupportedAlgorithms() instead, so a server offering only
+// those legacy algorithms fails the handshake rather than silently
+// downgrading to them.
+func TestModernSSHAlgorithmsExcludesKnownInsecureOnes(t *testing.T) {
+	cryptoConfig, hostKeyAlgos := modernSSHAlgorithms()
+	supported := ssh.SupportedAlgorithms()
+	insecure := ssh.InsecureAlgorithms()
+
+	for _, tt := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"KeyExchanges", cryptoConfig.KeyExchanges, supported.KeyExchanges},
+		{"Ciphers", cryptoConfig.Ciphers, supported.Ciphers},
+		{"MACs", cryptoConfig.MACs, supported.MACs},
+		{"HostKeyAlgorithms", hostKeyAlgos, supported.HostKeys},
+	} {
+		if !slices.Equal(tt.got, tt.want) {
+			t.Errorf("%s = %q, want ssh.SupportedAlgorithms()'s %q", tt.name, tt.got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		name string
+		got  []string
+		bad  []string
+	}{
+		{"KeyExchanges", cryptoConfig.KeyExchanges, insecure.KeyExchanges},
+		{"Ciphers", cryptoConfig.Ciphers, insecure.Ciphers},
+		{"MACs", cryptoConfig.MACs, insecure.MACs},
+		{"HostKeyAlgorithms", hostKeyAlgos, insecure.HostKeys},
+	} {
+		for _, bad := range tt.bad {
+			if slices.Contains(tt.got, bad) {
+				t.Errorf("%s unexpectedly includes insecure algorithm %q", tt.name, bad)
+			}
+		}
 	}
 }
 

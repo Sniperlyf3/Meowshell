@@ -136,6 +136,13 @@ type controlMessage struct {
 
 	DisableAgent bool `json:"disable_agent,omitempty"`
 
+	// AllowLegacyKeyAlgorithms opts a keystore-held key back into offering
+	// the ssh-rsa (SHA-1) signature format as a fallback, for a server that
+	// predates RFC 8332 and rejects the SHA-2 RSA formats keystoreSigner
+	// otherwise offers exclusively (N11). Left unset, a keystore RSA key
+	// never offers ssh-rsa.
+	AllowLegacyKeyAlgorithms bool `json:"allow_legacy_key_algorithms,omitempty"`
+
 	Keys         [][]byte `json:"keys,omitempty"`
 	Certificates [][]byte `json:"certificates,omitempty"`
 

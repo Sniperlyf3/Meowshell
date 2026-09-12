@@ -200,17 +200,19 @@ func ed25519TestPublicKey(t *testing.T) ssh.PublicKey {
 
 func TestKeystoreSignerAlgorithms(t *testing.T) {
 	tests := []struct {
-		name string
-		pub  ssh.PublicKey
-		want []string
+		name        string
+		pub         ssh.PublicKey
+		allowLegacy bool
+		want        []string
 	}{
-		{"rsa offers SHA-2 before SHA-1", rsaTestPublicKey(t), []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}},
-		{"ecdsa offers only its own type", ecdsaTestPublicKey(t), []string{ssh.KeyAlgoECDSA256}},
-		{"ed25519 offers only its own type", ed25519TestPublicKey(t), []string{ssh.KeyAlgoED25519}},
+		{"rsa excludes SHA-1 ssh-rsa by default (N11)", rsaTestPublicKey(t), false, []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}},
+		{"rsa offers SHA-1 ssh-rsa only when allowed", rsaTestPublicKey(t), true, []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}},
+		{"ecdsa offers only its own type", ecdsaTestPublicKey(t), false, []string{ssh.KeyAlgoECDSA256}},
+		{"ed25519 offers only its own type", ed25519TestPublicKey(t), false, []string{ssh.KeyAlgoED25519}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			signer := &keystoreSigner{keyID: "k", pub: tt.pub}
+			signer := &keystoreSigner{keyID: "k", pub: tt.pub, allowLegacy: tt.allowLegacy}
 			if got := signer.Algorithms(); !slices.Equal(got, tt.want) {
 				t.Errorf("Algorithms() = %q, want %q", got, tt.want)
 			}
@@ -274,6 +276,47 @@ func TestKeystoreSignerEmptyAlgorithmUsesFirstPreference(t *testing.T) {
 	}
 	if sig.Format != ssh.KeyAlgoRSASHA512 {
 		t.Errorf("signature format = %q, want %q", sig.Format, ssh.KeyAlgoRSASHA512)
+	}
+}
+
+// TestKeystoreSignerRejectsLegacyRSAUnlessAllowed is the N11 regression: a
+// keystore RSA key must refuse ssh-rsa (SHA-1) by default -- without ever
+// prompting the user to approve a signature that then gets rejected -- and
+// must only produce one once allowLegacy opts back into it.
+func TestKeystoreSignerRejectsLegacyRSAUnlessAllowed(t *testing.T) {
+	session, fromAgent, _ := testAuthSession(t)
+	signer := &keystoreSigner{session: session, keyID: "keystore-rsa", pub: rsaTestPublicKey(t)}
+
+	prompted := make(chan struct{})
+	go func() {
+		if _, err := readFrame(fromAgent); err == nil {
+			close(prompted)
+		}
+	}()
+
+	if _, err := signer.SignWithAlgorithm(nil, []byte("data"), ssh.KeyAlgoRSA); err == nil {
+		t.Fatal("signing with ssh-rsa succeeded despite allowLegacy being unset")
+	}
+
+	select {
+	case <-prompted:
+		t.Fatal("a sign prompt was sent for ssh-rsa despite allowLegacy being unset")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	legacySession, legacyFromAgent, legacyToAgent := testAuthSession(t)
+	legacySigner := &keystoreSigner{session: legacySession, keyID: "keystore-rsa", pub: rsaTestPublicKey(t), allowLegacy: true}
+	asked := answerSignPrompt(t, legacyFromAgent, legacyToAgent, []byte("fake-signature-bytes"))
+
+	sig, err := legacySigner.SignWithAlgorithm(nil, []byte("data"), ssh.KeyAlgoRSA)
+	if err != nil {
+		t.Fatalf("SignWithAlgorithm with allowLegacy: %v", err)
+	}
+	if got := <-asked; got != ssh.KeyAlgoRSA {
+		t.Errorf("prompt algorithm = %q, want %q", got, ssh.KeyAlgoRSA)
+	}
+	if sig.Format != ssh.KeyAlgoRSA {
+		t.Errorf("signature format = %q, want %q", sig.Format, ssh.KeyAlgoRSA)
 	}
 }
 

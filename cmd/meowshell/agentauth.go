@@ -55,7 +55,12 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 		if err != nil {
 			return nil, fmt.Errorf("parsing keystore public key %q: %w", keyID, err)
 		}
-		signers = append(signers, &keystoreSigner{session: a, keyID: keyID, pub: pub})
+		signers = append(signers, &keystoreSigner{
+			session:     a,
+			keyID:       keyID,
+			pub:         pub,
+			allowLegacy: cfg.AllowLegacyKeyAlgorithms,
+		})
 	}
 
 	var methods []ssh.AuthMethod
@@ -128,9 +133,10 @@ func (a *agentSession) keyboardInteractive(name, instruction string, questions [
 // package can only ever offer the key's own type, which for RSA means the SHA-1
 // ssh-rsa form that servers have rejected by default since OpenSSH 8.8.
 type keystoreSigner struct {
-	session *agentSession
-	keyID   string
-	pub     ssh.PublicKey
+	session     *agentSession
+	keyID       string
+	pub         ssh.PublicKey
+	allowLegacy bool
 }
 
 var _ ssh.MultiAlgorithmSigner = (*keystoreSigner)(nil)
@@ -150,12 +156,19 @@ func (s *keystoreSigner) PublicKey() ssh.PublicKey { return s.pub }
 // list is derived from the public key rather than being a free choice: the
 // hardware holds one key, and no amount of negotiation can make it produce a
 // signature of another key's type.
+//
+// ssh-rsa (N11) means SHA-1 and is excluded by default -- OpenSSH itself has
+// refused it by default since 8.8 -- and is only offered when the caller has
+// explicitly set allowLegacy for a server known to predate RFC 8332's SHA-2
+// RSA formats.
 func (s *keystoreSigner) Algorithms() []string {
 	switch s.pub.Type() {
 	case ssh.KeyAlgoRSA:
-		// SHA-2 first. ssh-rsa means SHA-1 and is retained only for servers
-		// predating RFC 8332; OpenSSH has refused it by default since 8.8.
-		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+		algos := []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}
+		if s.allowLegacy {
+			algos = append(algos, ssh.KeyAlgoRSA)
+		}
+		return algos
 	default:
 		return []string{s.pub.Type()}
 	}
