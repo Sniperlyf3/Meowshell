@@ -18,7 +18,11 @@ func (a *agentSession) sftpClientFor() (*sftp.Client, error) {
 	if a.sftpClient != nil {
 		return a.sftpClient, nil
 	}
-	sf, err := sftp.NewClient(a.client())
+	client := a.client()
+	if client == nil {
+		return nil, fmt.Errorf("SSH connection is no longer available")
+	}
+	sf, err := sftp.NewClient(client)
 	if err != nil {
 		return nil, fmt.Errorf("opening SFTP session: %w", err)
 	}
