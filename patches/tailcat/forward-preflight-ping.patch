@@ -1,7 +1,7 @@
 diff --git a/cmd/tailcat/forward.go b/cmd/tailcat/forward.go
 --- a/cmd/tailcat/forward.go
 +++ b/cmd/tailcat/forward.go
-@@ -13,6 +13,7 @@ import (
+@@ -13,7 +13,8 @@ import (
  	"strconv"
  	"strings"
  	"sync"
@@ -10,7 +10,7 @@ diff --git a/cmd/tailcat/forward.go b/cmd/tailcat/forward.go
  
  	"github.com/peterbourgon/ff/v4"
  	"github.com/tailscale/tailcat"
-@@ -75,6 +76,17 @@ func runForward(ctx context.Context, logf logger.Logf, bind string, args []string
+@@ -77,5 +78,18 @@ func runForward(ctx context.Context, logf logger.Logf, bind string, args []string
  	}
  
  	cl := newClient(logf, tailcatAddrArg(args[0]), clientKey())
