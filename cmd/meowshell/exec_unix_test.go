@@ -42,4 +42,17 @@ func TestManagedExecMarkerCanBeReinsertedExplicitly(t *testing.T) {
 	if !found {
 		t.Fatalf("reinserted exec environment %v does not contain %q", env, want)
 	}
+
+func TestManagedParentGoneTracksProcessParentNotThreadLifetime(t *testing.T) {
+	if managedParentGone(4242, 4242) {
+		t.Fatal("matching host process PID was treated as dead")
+	}
+	if !managedParentGone(4242, 1) {
+		t.Fatal("reparented managed child did not detect host-process death")
+	}
+	if managedParentGone(0, 1) {
+		t.Fatal("standalone launch without a managed host should not enable watchdog semantics")
+	}
+}
+
 }
