@@ -123,6 +123,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="jumpHosts">Intermediate TCP SSH hosts to tunnel through first, closest-to-here first.</param>
     /// <param name="knownHostsPath">known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts).</param>
     /// <param name="proxyUrl">A SOCKS5 or HTTP CONNECT proxy to reach the first TCP hop through.</param>
+    /// <param name="configureConnection">Runs after the native process starts but before any protocol traffic is sent, allowing callers to attach prompt and log handlers in time for the handshake.</param>
     /// <param name="cancellationToken">Cancels waiting for the connection to settle; does not cancel or stop the connection itself once returned.</param>
     /// <exception cref="TailcatException">The connection failed to establish within <see cref="TailcatClientOptions.Timeout"/>; <see cref="TailcatException.Code"/> names why when the agent reported a typed reason.</exception>
     public static async Task<MeowshellAgentConnection> ConnectAsync(
