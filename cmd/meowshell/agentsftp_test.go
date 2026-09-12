@@ -341,4 +341,32 @@ func TestCancelledUploadPreservesExistingDestination(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("cancelled upload changed destination or left staging file behind")
+
+func TestResetSFTPClientDoesNotCloseNewerReplacement(t *testing.T) {
+	session, current, _, _ := newInProcessSFTPClient(t)
+	stale := &sftp.Client{}
+
+	session.resetSFTPClient(stale)
+
+	session.sftpMu.Lock()
+	got := session.sftpClient
+	session.sftpMu.Unlock()
+	if got != current {
+		t.Fatal("timeout for a stale SFTP client cleared the newer active client")
+	}
+}
+
+func TestResetSFTPClientClearsMatchedClient(t *testing.T) {
+	session, current, _, _ := newInProcessSFTPClient(t)
+
+	session.resetSFTPClient(current)
+
+	session.sftpMu.Lock()
+	got := session.sftpClient
+	session.sftpMu.Unlock()
+	if got != nil {
+		t.Fatal("matched SFTP client was not cleared")
+	}
+}
+
 }
