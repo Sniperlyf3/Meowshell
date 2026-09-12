@@ -684,7 +684,7 @@ public sealed class TailcatClientTests : IDisposable
         {
             var mode = File.GetUnixFileMode(Path.Combine(bin, naming.FileName(name)));
             Assert.True((mode & UnixFileMode.UserExecute) != 0);
-            Assert.Equal(0, mode & (UnixFileMode.GroupExecute | UnixFileMode.OtherExecute));
+            Assert.Equal((UnixFileMode)0, mode & (UnixFileMode.GroupExecute | UnixFileMode.OtherExecute));
         }
     }
 
