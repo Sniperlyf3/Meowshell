@@ -342,7 +342,29 @@ certificates as bytes, never written to disk; Keystore-backed keys that
 never leave the app at all, signing through the `SignRequested` event
 instead) plus prompt events answered asynchronously: `HostKeyPromptRequested`,
 `PasswordRequested`, `PassphraseRequested`, `KeyboardInteractiveRequested`.
-Subscribe before calling `ConnectAsync`, since a prompt can fire mid-call.
+
+Subscribe to them through `ConnectAsync`'s `configureConnection` callback,
+which runs on the new connection before a single byte reaches the agent —
+every one of these prompts is raised *during* the handshake, which
+`ConnectAsync` completes before it returns, so a handler attached to the
+object it hands back is always too late to be asked:
+
+```csharp
+await using var connection = await MeowshellAgentConnection.ConnectAsync(
+    options, "user@host.example", configureConnection: c =>
+    {
+        c.HostKeyPromptRequested += (prompt, ct) =>
+            AskTheUserAsync($"trust {prompt.Remote}, {prompt.Fingerprint}?", ct);
+        c.PasswordRequested += (remote, ct) => AskForPasswordAsync(remote, ct);
+    });
+```
+
+A prompt nobody is listening for is declined, which is what makes
+trust-on-first-use a decision and not a default: a first connection to a host
+absent from `known_hosts` fails with `MeowshellErrorCode.HostKeyUnknown` until
+someone answers. That is a different thing to tell a user than
+`HostKeyChanged` — a host whose recorded key no longer matches, which is never
+a question worth asking, only a warning.
 
 The full SFTP verb set (`MkdirAsync`, `RenameAsync`, `ChmodAsync`,
 `SymlinkAsync`, `TruncateAsync`, ...) is here too, alongside

@@ -129,6 +129,60 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 	})
 }
 
+// TestUnknownHostKeyIsReportedAsHostKeyUnknown covers the other half of the
+// host key story. A changed key (above) already reported host_key_changed,
+// but a host simply absent from known_hosts whose key nobody accepted came
+// back as the untyped "unknown" -- indistinguishable from a DNS failure or a
+// dead port, when it is in fact the one connection failure a client can do
+// something about by asking the user. Both ways of not accepting the key are
+// the same answer and must classify the same: an explicit "no", and a prompt
+// nothing was listening to (what MeowshellAgentConnection sends when no
+// HostKeyPromptRequested handler is attached).
+func TestUnknownHostKeyIsReportedAsHostKeyUnknown(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	addr, _, stopServer := startTestSSHServer(t, echoCommandHandler)
+	defer stopServer()
+
+	for _, tc := range []struct {
+		name     string
+		response controlMessage
+	}{
+		{"the user declines the key", controlMessage{Accept: false}},
+		{"nothing is listening to answer", controlMessage{Cancelled: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+			cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+			defer stopAgent(t, cmd, stdin)
+
+			msg := decodeControl(t, mustReadFrame(t, out))
+			if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+				t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+			}
+			response := tc.response
+			response.Msg = "prompt_response"
+			response.RequestID = msg.RequestID
+			send(t, stdin, 0, response)
+
+			msg = decodeControl(t, mustReadFrame(t, out))
+			if msg.Msg != "error" || msg.Code != errHostKeyUnknown {
+				t.Fatalf("connecting without accepting the host key = %+v, want an error with code %q", msg, errHostKeyUnknown)
+			}
+
+			// A key that was never accepted must never be recorded: the
+			// error code is only half the contract, and a file written
+			// here would silently trust the host on the next attempt.
+			recorded, err := os.ReadFile(knownHosts)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if len(recorded) != 0 {
+				t.Errorf("known_hosts = %q after a key that was not accepted, want it left empty", recorded)
+			}
+		})
+	}
+}
+
 // TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError is a
 // regression test: openShellChannel used to send channel_opened before
 // calling session.Start/session.Shell, so a failure there produced a
