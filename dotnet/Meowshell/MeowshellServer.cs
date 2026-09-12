@@ -182,8 +182,8 @@ public sealed class MeowshellServer : IAsyncDisposable
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
 
-        Directory.CreateDirectory(options.WorkDirectory);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.WorkDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var addressFile = Path.Combine(
             options.WorkDirectory, $"tailcat-addr-{Guid.NewGuid():N}");
 
