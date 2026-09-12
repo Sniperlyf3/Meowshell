@@ -329,10 +329,14 @@ jobs:
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-        run: >-
-          dotnet test dotnet/Meowshell.sln -c Release --nologo
-          --logger "trx;LogFileName=meowshell-tests.trx"
-          --results-directory test-results
+        run: |
+          for i in $(seq 1 10); do
+            echo "::group::.NET stress pass $i/10"
+            dotnet test dotnet/Meowshell.sln -c Release --nologo \
+              --logger "trx;LogFileName=meowshell-tests-$i.trx" \
+              --results-directory test-results
+            echo "::endgroup::"
+          done
 
       - name: Upload .NET test diagnostics
         if: failure()
