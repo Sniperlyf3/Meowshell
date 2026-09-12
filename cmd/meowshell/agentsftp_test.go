@@ -35,9 +35,10 @@ func (p pipeRWC) Close() error {
 // the server's root directory (for a test that needs to inspect the backing
 // filesystem directly -- e.g. after severing the transport, when the client
 // itself can no longer be used to check anything), and a breakTransport
-// func that severs the client's write side, so a test can make the next
-// client-initiated request fail deterministically, simulating a write (or
-// any other) failure partway through a transfer.
+// func that severs both halves of the client's transport, so an in-flight
+// request cannot remain blocked forever waiting for a reply after its write
+// side has been cut. This makes transfer-failure tests deterministic under
+// repetition instead of occasionally hanging in pkg/sftp's request wait.
 func newInProcessSFTPClient(t *testing.T) (session *agentSession, client *sftp.Client, rootDir string, breakTransport func()) {
 	t.Helper()
 	clientRead, serverWrite := io.Pipe()
@@ -66,7 +67,10 @@ func newInProcessSFTPClient(t *testing.T) (session *agentSession, client *sftp.C
 	session.sftpClient = client
 	session.chans = make(map[uint32]*agentChannel)
 
-	return session, client, rootDir, func() { clientWrite.Close() }
+	return session, client, rootDir, func() {
+		_ = clientWrite.Close()
+		_ = clientRead.Close()
+	}
 }
 
 func readControlFrames(t *testing.T, buf *bytes.Buffer) []controlMessage {
