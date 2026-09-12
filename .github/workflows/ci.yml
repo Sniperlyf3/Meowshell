@@ -83,6 +83,27 @@ jobs:
           ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
         run: ./build.sh
 
+      # The "Vet and test meowshell" step above runs before ./build.sh, so
+      # dist/ does not exist yet and every test gated on findE2EBinary --
+      # 22 of them, the whole agent E2E suite -- skips silently there. They
+      # have therefore never run in CI at all. Run them here instead, where
+      # the binaries they need have just been built.
+      #
+      # MEOWSHELL/TAILCAT are set rather than left to findE2EBinary's
+      # ../../dist fallback deliberately: the fallback skips when the file
+      # is missing, while an explicit path is returned unchecked, so a
+      # binary that fails to build fails these tests loudly instead of
+      # quietly reverting them to the no-op they have been.
+      #
+      # -count=1, not the 10 above: these drive real subprocesses, servers
+      # and sockets, and one honest pass of each is the point.
+      - name: End-to-end test the agent against the binaries just built
+        env:
+          GOTOOLCHAIN: auto
+          MEOWSHELL: ${{ github.workspace }}/dist/meowshell_linux_amd64
+          TAILCAT: ${{ github.workspace }}/dist/tailcat_linux_amd64
+        run: go test ./cmd/meowshell/ -count=1
+
       - name: Scan the patched tailcat build input for known vulnerabilities
         env:
           GOTOOLCHAIN: auto

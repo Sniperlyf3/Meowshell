@@ -28,7 +28,12 @@ The patches are not optional for E2E work: `key-from-stdin` is what makes
 
 ```sh
 go vet ./... && go test ./...              # needs .tailcat-src (above)
-go build -o dist/meowshell_linux_amd64 ./cmd/meowshell   # Go E2E tests skip without this
+
+# The 22 agent E2E tests skip unless both real binaries exist. ./build.sh
+# makes them, or just the two this host needs:
+go build -o dist/meowshell_linux_amd64 ./cmd/meowshell
+(cd .tailcat-src && go build -tags "$(tr -d '[:space:]' < build-tags.txt)" \
+    -o ../dist/tailcat_linux_amd64 ./cmd/tailcat)   # build-tags.txt is tailcat's own
 
 mkdir -p nupkg                             # NuGet.config names it as a local source;
 dotnet build dotnet/Meowshell.sln          # restore fails outright if it doesn't exist
@@ -42,6 +47,17 @@ Tests that need real binaries or a toolchain they can't find **no-op silently**
 rather than failing (`FindRealBinaries`, `BuildFakeAgentAsync`, `findE2EBinary`).
 A green run does not by itself mean your new test ran — mutate it and watch it
 fail once before believing it.
+
+Both E2E suites are wired into CI, but only just: the `dotnet` job sets
+`DOTNET_E2E_*`, and the `build` job runs the Go agent E2E tests in a step
+*after* `./build.sh`, because the `go test ./...` step before it has no `dist/`
+yet and skipped all 22 for as long as they existed. Those two steps are the
+only reason any of it runs — `findE2EBinary`'s `../../dist` fallback skips on a
+missing file, while an explicit `$MEOWSHELL`/`$TAILCAT` is returned unchecked,
+so keep setting them and a broken binary fails loudly instead of going quiet.
+Windows is still dark: `windows-e2e` also runs `go test` before fetching the
+artifact, and the dist name `findE2EBinary` falls back to is hardcoded
+`linux_amd64`.
 
 ## E2E tests and the DERP relay
 
