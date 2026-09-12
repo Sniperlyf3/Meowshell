@@ -145,7 +145,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         psi.ArgumentList.Add(destination);
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var job = MeowshellProcessControl.Start(process);
