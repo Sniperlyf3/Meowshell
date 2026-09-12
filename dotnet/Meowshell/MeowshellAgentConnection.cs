@@ -404,29 +404,55 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     }
 
     /// <summary>"-L": listens locally, forwarding each connection to <paramref name="remoteAddress"/> through the SSH client. A ":0" port in <paramref name="listenAddress"/> gets an OS-assigned one. Refuses to bind anything other than loopback unless <paramref name="allowNonLoopbackBind"/> is true.</summary>
-    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="listenAddress">Local <c>[address]:port</c> to listen on.</param>
+    /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
+    /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
+    /// <param name="maxConnections">Caps how many connections this forward services at once; further connections queue in the listen backlog (or get refused once that fills) instead of piling up unbounded goroutines and file descriptors on the agent. Zero (the default) means unlimited.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-L" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port -- the recommended local endpoint whenever the caller can hand the path to whatever will connect to it.</summary>
-    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="socketPath">Local Unix domain socket path to listen on.</param>
+    /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-R": asks the remote to listen on <paramref name="listenAddress"/>, forwarding each connection it accepts to <paramref name="localAddress"/> on this machine.</summary>
-    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="listenAddress">Remote <c>[address]:port</c> for the server to listen on.</param>
+    /// <param name="localAddress">Local destination <c>host:port</c> to forward accepted connections to.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-D": runs a local SOCKS5 proxy on <paramref name="listenAddress"/>. By default requires RFC 1929 SOCKS5 auth with a random token -- read it back from <see cref="MeowshellForward.SocksUsername"/>/<see cref="MeowshellForward.SocksPassword"/>.</summary>
-    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default)
+    /// <param name="listenAddress">Local <c>[address]:port</c> to listen on.</param>
+    /// <param name="requireAuth">Require SOCKS5 username/password auth.</param>
+    /// <param name="socksUsername">Fixed SOCKS5 username, instead of a generated one.</param>
+    /// <param name="socksPassword">Fixed SOCKS5 password, instead of a generated one.</param>
+    /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
-        return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, cancellationToken);
+        return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, maxConnections, cancellationToken);
     }
 
     /// <summary>"-D" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port. <paramref name="requireAuth"/> defaults to false here, unlike the TCP overload.</summary>
-    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, CancellationToken cancellationToken = default)
+    /// <param name="socketPath">Local Unix domain socket path to listen on.</param>
+    /// <param name="requireAuth">Require SOCKS5 username/password auth.</param>
+    /// <param name="socksUsername">Fixed SOCKS5 username, instead of a generated one.</param>
+    /// <param name="socksPassword">Fixed SOCKS5 password, instead of a generated one.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, int maxConnections = 0, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
-        return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, cancellationToken);
+        return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, maxConnections, cancellationToken);
     }
 
     private static (string? Username, string? Password) ResolveSocksAuth(bool requireAuth, string? username, string? password)
@@ -440,13 +466,17 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         (Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(9)),
          Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(18)));
 
-    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, CancellationToken cancellationToken)
+    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, int maxConnections, CancellationToken cancellationToken)
     {
+        if (maxConnections < 0)
+            throw new ArgumentOutOfRangeException(nameof(maxConnections), maxConnections, "maxConnections must not be negative (0 means unlimited).");
+
         var request = new AgentMessage
         {
             Msg = "open_channel", Kind = kind, ListenAddr = listenAddress, RemoteAddr = remoteAddress,
             ListenNetwork = listenNetwork, AllowNonLoopbackBind = allowNonLoopbackBind,
             SocksUsername = socksUsername, SocksPassword = socksPassword,
+            MaxConnections = maxConnections,
         };
         return OpenChannelAsync(request, (id, opened) =>
         {

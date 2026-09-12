@@ -100,17 +100,11 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go proxyForwardedConn(conn, func() (net.Conn, error) {
-				return dialWithTimeout(client.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
-			})
-		}
-	}()
+	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+		proxyForwardedConn(conn, func() (net.Conn, error) {
+			return dialWithTimeout(client.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
+		})
+	})
 }
 
 func (a *agentSession) openRemoteForward(msg controlMessage) {
@@ -128,17 +122,11 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go proxyForwardedConn(conn, func() (net.Conn, error) {
-				return dialWithTimeout(net.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
-			})
-		}
-	}()
+	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+		proxyForwardedConn(conn, func() (net.Conn, error) {
+			return dialWithTimeout(net.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
+		})
+	})
 }
 
 func (a *agentSession) openSOCKSForward(msg controlMessage) {
@@ -156,13 +144,46 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
+	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+		serveSOCKS5(conn, client, msg.SocksUsername, msg.SocksPassword)
+	})
+}
+
+// acceptForwardedConns runs ln's accept loop on its own goroutine, handing
+// each accepted connection to handle on a further goroutine of its own so
+// one slow connection can't hold up accepting the next. maxConnections, when
+// positive, bounds how many of those handler goroutines may be in flight at
+// once: the accept loop blocks acquiring a slot before calling Accept again,
+// so once the limit is reached, further connections simply queue in the
+// listen backlog (or get refused once that fills) instead of an unbounded
+// number of goroutines, file descriptors, and dial attempts piling up for a
+// single forward. Zero (the default) means unlimited, matching every
+// forward's behavior before this limit existed.
+func acceptForwardedConns(ln net.Listener, maxConnections int, handle func(net.Conn)) {
+	var sem chan struct{}
+	if maxConnections > 0 {
+		sem = make(chan struct{}, maxConnections)
+	}
 	go func() {
 		for {
+			if sem != nil {
+				sem <- struct{}{}
+			}
 			conn, err := ln.Accept()
 			if err != nil {
+				if sem != nil {
+					<-sem
+				}
 				return
 			}
-			go serveSOCKS5(conn, client, msg.SocksUsername, msg.SocksPassword)
+			go func() {
+				defer func() {
+					if sem != nil {
+						<-sem
+					}
+				}()
+				handle(conn)
+			}()
 		}
 	}()
 }

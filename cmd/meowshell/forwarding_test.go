@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -200,6 +201,163 @@ func TestServeSOCKS5RejectsNoAuthWhenNotOffered(t *testing.T) {
 		t.Fatalf("method-selection reply = % x, want 05 ff (no acceptable methods) -- "+
 			"the server must never select a method the client didn't offer", reply)
 	}
+}
+
+// TestAcceptForwardedConnsLimitsConcurrency is a regression test for N14:
+// openLocalForward/openRemoteForward/openSOCKSForward used to spawn an
+// unbounded goroutine per accepted connection, so a forward under heavy (or
+// hostile) load could pile up unlimited goroutines, file descriptors, and
+// dial attempts. Drives more connections than the configured limit and
+// checks both that the limit is actually enforced while connections are
+// held open, and that every connection still eventually gets served once
+// slots free up (the limit throttles, it doesn't drop).
+func TestAcceptForwardedConnsLimitsConcurrency(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	const maxConnections = 3
+	const totalConns = 8
+
+	var mu sync.Mutex
+	cur, peak := 0, 0
+	release := make(chan struct{})
+	handled := make(chan struct{}, totalConns)
+
+	acceptForwardedConns(ln, maxConnections, func(conn net.Conn) {
+		defer conn.Close()
+		mu.Lock()
+		cur++
+		if cur > peak {
+			peak = cur
+		}
+		mu.Unlock()
+
+		<-release
+
+		mu.Lock()
+		cur--
+		mu.Unlock()
+		handled <- struct{}{}
+	})
+
+	var dialWG sync.WaitGroup
+	for i := 0; i < totalConns; i++ {
+		dialWG.Add(1)
+		go func() {
+			defer dialWG.Done()
+			conn, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			io.Copy(io.Discard, conn)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		reached := cur == maxConnections
+		mu.Unlock()
+		if reached {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	gotCur := cur
+	mu.Unlock()
+	if gotCur != maxConnections {
+		t.Fatalf("in-flight handlers = %d, want exactly %d (the configured limit) with %d connections pending",
+			gotCur, maxConnections, totalConns)
+	}
+
+	close(release)
+	for i := 0; i < totalConns; i++ {
+		select {
+		case <-handled:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d connections were ever handled -- the limit must throttle, not drop", i, totalConns)
+		}
+	}
+
+	mu.Lock()
+	gotPeak := peak
+	mu.Unlock()
+	if gotPeak > maxConnections {
+		t.Fatalf("peak concurrent handlers = %d, want at most %d", gotPeak, maxConnections)
+	}
+
+	dialWG.Wait()
+}
+
+// TestAcceptForwardedConnsZeroMeansUnlimited is the flip side of the above:
+// the zero value (what every message from a client that predates this field
+// deserializes to) must not throttle at all, preserving prior behavior.
+func TestAcceptForwardedConnsZeroMeansUnlimited(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	const totalConns = 20
+	var mu sync.Mutex
+	cur, peak := 0, 0
+	release := make(chan struct{})
+	handled := make(chan struct{}, totalConns)
+
+	acceptForwardedConns(ln, 0, func(conn net.Conn) {
+		defer conn.Close()
+		mu.Lock()
+		cur++
+		if cur > peak {
+			peak = cur
+		}
+		mu.Unlock()
+		<-release
+		handled <- struct{}{}
+	})
+
+	var dialWG sync.WaitGroup
+	for i := 0; i < totalConns; i++ {
+		dialWG.Add(1)
+		go func() {
+			defer dialWG.Done()
+			conn, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			io.Copy(io.Discard, conn)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		reached := cur == totalConns
+		mu.Unlock()
+		if reached {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	gotCur := cur
+	mu.Unlock()
+	if gotCur != totalConns {
+		t.Fatalf("in-flight handlers = %d, want all %d accepted at once with maxConnections=0 (unlimited)", gotCur, totalConns)
+	}
+
+	close(release)
+	for i := 0; i < totalConns; i++ {
+		<-handled
+	}
+	dialWG.Wait()
 }
 
 // TestServeSOCKS5EnforcesHandshakeDeadline is a regression test: a client

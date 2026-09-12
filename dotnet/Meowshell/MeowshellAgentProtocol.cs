@@ -166,6 +166,8 @@ internal sealed class AgentMessage
 
     public string? SocksUsername { get; set; }
     public string? SocksPassword { get; set; }
+
+    public int MaxConnections { get; set; }
 }
 
 internal sealed class AgentSftpEntry

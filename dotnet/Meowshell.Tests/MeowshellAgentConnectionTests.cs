@@ -320,6 +320,25 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         Assert.Equal(before, connection.ChannelCountForTests);
     }
 
+    /// <summary>Regression test for N14: maxConnections is meant to bound the
+    /// agent's per-forward accept concurrency (see forwarding.go's
+    /// acceptForwardedConns), so a negative value has no coherent meaning and
+    /// must be rejected here rather than silently reaching the agent as some
+    /// other value entirely (JSON has no unsigned int type on the wire, so a
+    /// negative int would otherwise just serialize as-is).</summary>
+    [Fact]
+    public async Task OpenLocalForwardRejectsANegativeMaxConnections()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var before = connection.ChannelCountForTests;
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80", maxConnections: -1));
+        Assert.Equal(before, connection.ChannelCountForTests);
+    }
+
     private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
     {
         public void Report(T value) => report(value);

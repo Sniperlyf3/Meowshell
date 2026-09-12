@@ -159,6 +159,12 @@ type controlMessage struct {
 
 	SocksUsername string `json:"socks_username,omitempty"`
 	SocksPassword string `json:"socks_password,omitempty"`
+
+	// MaxConnections caps how many connections a forward_local/forward_remote/
+	// forward_socks channel will service at once; zero (the default, and
+	// what every existing client that predates this field sends) means
+	// unlimited, preserving prior behavior for anyone who doesn't opt in.
+	MaxConnections int `json:"max_connections,omitempty"`
 }
 
 type sftpEntry struct {
