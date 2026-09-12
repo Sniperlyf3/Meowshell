@@ -658,4 +658,50 @@ public sealed class TailcatClientTests : IDisposable
         Assert.DoesNotContain(secretPath, label);
     }
 
+
+    [Fact]
+    public void BinaryLocatorAddsOnlyOwnerExecutePermission()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var bin = Path.Combine(_dir, "perm-bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var path = Path.Combine(bin, naming.FileName(name));
+            File.WriteAllText(path, "stub");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        _ = MeowshellBinaries.Locate(bin, naming);
+
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var mode = File.GetUnixFileMode(Path.Combine(bin, naming.FileName(name)));
+            Assert.True((mode & UnixFileMode.UserExecute) != 0);
+            Assert.Equal(0, mode & (UnixFileMode.GroupExecute | UnixFileMode.OtherExecute));
+        }
+    }
+
+    [Fact]
+    public void BinaryLocatorRejectsGroupWritableNativeBinary()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var bin = Path.Combine(_dir, "unsafe-bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var path = Path.Combine(bin, naming.FileName(name));
+            File.WriteAllText(path, "stub");
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                UnixFileMode.GroupWrite);
+        }
+
+        Assert.Throws<IOException>(() => MeowshellBinaries.Locate(bin, naming));
+    }
+
 }
