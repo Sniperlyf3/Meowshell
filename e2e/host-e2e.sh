@@ -33,20 +33,6 @@ mask() { [ -n "$1" ] && printf '::add-mask::%s\n' "$1"; }
 # one genkey printed; the identity inside is what has to match.
 identity() { "$TAILCAT" parse "$1" | sed -n 's/.*"ServerPublic": "\([^"]*\)".*/\1/p'; }
 
-# Every server below runs in tailcat's own hermetic local-DERP mode, the
-# same one the .NET E2E tests use (RelayE2E.HermeticServer) and the Go ones
-# set per-test: the server starts a loopback DERP relay, waits for it, and
-# publishes an address that embeds it, so the whole exchange stays on this
-# machine. Without it these sessions bootstrap over the public Tailscale
-# relay, whose load is outside this repo's control -- the direct cause of
-# the "tailcat Ping: context deadline exceeded" flake. "none" makes any
-# accidental external DERP-map lookup fail loudly rather than silently
-# reaching for that relay again.
-#
-# Applied per server process, never exported: genkey below resolves a real
-# region from the public DERP map, and would fail outright against "none".
-hermetic=(TS_DEBUG_TAILCAT_LOCAL_DERP=1 TAILCAT_DERPMAP_URL=none)
-
 # Resolve before exporting: TAILCAT may already be absolute, and joining it
 # onto $PWD would produce a path that exists nowhere.
 TAILCAT=$(realpath "$TAILCAT")
@@ -94,8 +80,7 @@ mask "$provisioned"
 keyfile=$work/config/tailcat/keys/host-e2e.private.json
 pass "provisioned a key (address is ${#provisioned} chars)"
 
-env "${hermetic[@]}" TAILCAT_ADDR_FILE=$work/addr \
-	"$MEOWSHELL" serve --key-stdin --insecure-no-auth \
+TAILCAT_ADDR_FILE=$work/addr "$MEOWSHELL" serve --key-stdin --insecure-no-auth \
 	> "$work/server.log" 2>&1 < "$keyfile" &
 server_pid=$!
 
@@ -116,12 +101,7 @@ else
 	fail "published address is a different identity from the provisioned one"
 fi
 
-# Dial the address the server published, not the one genkey printed. A
-# local-DERP server replaces the key's recorded region with its own
-# loopback one, so the published address is the only one naming a relay
-# that is actually running; the identity check above is what ties it back
-# to the key handed over on stdin.
-if out=$(timeout 90 "$TAILCAT" ssh "$addr" "echo $MARKER; echo P=\$PATH" 2>&1); then
+if out=$(timeout 90 "$TAILCAT" ssh "$provisioned" "echo $MARKER; echo P=\$PATH" 2>&1); then
 	indent "$out"
 	assert_grep "remote command ran"           "$MARKER"  "$out"
 	assert_grep "remote command had a PATH"    "P=/.*bin" "$out"
@@ -171,8 +151,7 @@ serverkey=$work/config/tailcat/keys/authed.private.json
 authed=$("$TAILCAT" genkey --key=authed | tail -1)
 mask "$authed"
 
-env "${hermetic[@]}" TAILCAT_ADDR_FILE=$work/addr2 \
-	"$MEOWSHELL" serve \
+TAILCAT_ADDR_FILE=$work/addr2 "$MEOWSHELL" serve \
 	--key="$serverkey" \
 	--allow="$clientpub" \
 	--authorized-keys="$work/authorized_keys" \

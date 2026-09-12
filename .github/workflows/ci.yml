@@ -203,11 +203,25 @@ jobs:
           name: tailcat-binaries
           path: dist
 
+      # A shared loopback relay, not the per-server TS_DEBUG_TAILCAT_LOCAL_DERP
+      # the .NET and Go E2E tests use: this suite provisions a key with genkey
+      # and dials the address genkey printed, exactly as a user does, and that
+      # only works while genkey and the server resolve their region from the
+      # same DERP map. A server-side local relay is invented after the key is
+      # made and overrides the key's region, which would leave the printed
+      # address naming a relay nobody is on. See ../e2e/README.md.
+      - name: Start a local DERP relay for the E2E tests
+        run: ./e2e/start-testderp.sh
+
       - name: End-to-end test on this host
         env:
           TAILCAT: dist/tailcat_linux_${{ matrix.arch }}
           MEOWSHELL: dist/meowshell_linux_${{ matrix.arch }}
         run: ./e2e/host-e2e.sh
+
+      - name: Stop the local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
   # The only place the Windows binaries are executed. meowshell is a
   # launcher there, so this covers the launcher, the session, and the key
