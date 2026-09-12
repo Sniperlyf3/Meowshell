@@ -105,4 +105,44 @@ public sealed class TailcatListenerTests : IDisposable
         await listener.DisposeAsync();
     }
 
+
+    // Regression test for a fast-exit diagnostics race: Process.Exited can
+    // fire before BeginErrorReadLine has dispatched the final buffered stderr
+    // callback. Completed must not report an exception whose Diagnostics omit
+    // the process's actual fatal line.
+    [Fact]
+    public async Task FastExitDiagnosticsIncludeFinalBufferedStderrLine()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var script = Path.Combine(_dir, "fast-stderr-exit.sh");
+        var body = new System.Text.StringBuilder("#!/bin/sh\n");
+        for (var i = 0; i < 256; i++)
+            body.AppendLine($"echo prelude-{i} >&2");
+        body.AppendLine("echo FATAL-SENTINEL-FINAL-LINE >&2");
+        body.AppendLine("exit 23");
+        await File.WriteAllTextAsync(script, body.ToString());
+        File.SetUnixFileMode(script,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(script)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                RedirectStandardInput = true,
+            },
+        };
+        await using var listener = TailcatListener.Start(
+            process, TimeSpan.FromSeconds(5), onLog: null);
+
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => listener.Completed.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(23, ex.ExitCode);
+        Assert.Contains("FATAL-SENTINEL-FINAL-LINE", ex.Diagnostics);
+    }
+
 }
