@@ -234,7 +234,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         psi.Environment["TMPDIR"] = options.WorkDirectory;
         psi.Environment["TAILCAT_ADDR_FILE"] = addressFile;
 
