@@ -280,6 +280,7 @@ func TestRegisterChannelSkipsZeroAndActiveIDs(t *testing.T) {
 	if session.chans[1] != existing {
 		t.Fatal("active channel 1 was overwritten during ID wrap")
 	}
+}
 
 func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) {
 	oldTimeout := openChannelTimeout
