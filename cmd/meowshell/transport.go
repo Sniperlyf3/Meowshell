@@ -120,6 +120,9 @@ func proxyDialer(proxyURL, hostPort string) (dialer, error) {
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("invalid --proxy URL: missing host")
 	}
+	if u.Scheme == "http" && u.User != nil {
+		return nil, fmt.Errorf("refusing proxy credentials over plaintext http; use https or socks5")
+	}
 	switch u.Scheme {
 	case "socks5", "socks5h":
 		d, err := proxy.SOCKS5("tcp", u.Host, proxyAuthFromURL(u), proxy.Direct)
