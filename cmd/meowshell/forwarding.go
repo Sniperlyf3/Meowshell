@@ -61,6 +61,9 @@ func listenUnix(path string) (net.Listener, error) {
 	if path == "" {
 		return nil, fmt.Errorf("a unix listen_network needs a non-empty socket path")
 	}
+	if err := validateSocketParent(path); err != nil {
+		return nil, err
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("refusing to remove non-socket path %s", path)
