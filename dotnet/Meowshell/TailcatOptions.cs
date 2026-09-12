@@ -41,6 +41,12 @@ public abstract record TailcatOptions
 
     /// <summary>Passed to tailcat's own <c>--verbose</c>.</summary>
     public bool Verbose { get; init; }
+
+    // Test-only escape hatch for process-scoped native environment knobs such
+    // as TS_DEBUG_TAILCAT_LOCAL_DERP. Keeping this internal prevents callers
+    // from turning arbitrary environment injection into part of the public
+    // API while allowing E2E tests to scope debug knobs to exactly one child.
+    internal IReadOnlyDictionary<string, string?>? ProcessEnvironmentOverrides { get; init; }
 }
 
 /// <summary>Configuration shared by every long-lived listener this library wraps, on top of <see cref="TailcatOptions"/>.</summary>
