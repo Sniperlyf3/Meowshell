@@ -141,34 +141,20 @@ public sealed class MeowshellListenersE2ETests : IDisposable
             StartTimeout = TimeSpan.FromSeconds(30),
         }, onLog: serverLogs.Enqueue);
 
-        // Register the startup log callback before the forward process starts.
-        // Subscribing through forward.Log after StartAsync returns has its own
-        // race: tailcat can bind and print the one-shot "forwarding ..." line
-        // before the caller gets the returned wrapper.
+        // StartAsync now has a production readiness contract: it returns
+        // only after tailcat has bound every requested local listener, and
+        // exposes the actual OS-assigned address directly. Applications no
+        // longer need to parse diagnostic logs or race listener startup.
         var forwardLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        var boundAddressFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnForwardLog(string line)
-        {
-            forwardLogs.Enqueue(line);
-            var marker = "forwarding ";
-            var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var rest = line[(at + marker.Length)..];
-            var end = rest.IndexOf(' ');
-            if (end > 0) boundAddressFound.TrySetResult(rest[..end]);
-        }
-
         await using var forward = await MeowshellPortForward.StartAsync(new MeowshellPortForwardOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "forward-home"),
             Address = server.Address,
             Mappings = [$"0:{backendPort}"],
-        }, OnForwardLog);
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        using var registration = cts.Token.Register(() => boundAddressFound.TrySetCanceled());
-        var boundAddress = await boundAddressFound.Task;
+            StartTimeout = TimeSpan.FromSeconds(30),
+        }, forwardLogs.Enqueue);
+        var boundAddress = Assert.Single(forward.BoundAddresses);
 
         // "forwarding <addr> -> ..." means only that tailcat's local listener
         // is bound.  The client-side tailcat connection is lazy: the first
