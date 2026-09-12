@@ -27,6 +27,15 @@ func (e *hostKeyChangedError) Error() string {
 }
 func (e *hostKeyChangedError) Unwrap() error { return e.err }
 
+type hostKeyUnknownError struct {
+	hostname string
+	reason   string
+}
+
+func (e *hostKeyUnknownError) Error() string {
+	return fmt.Sprintf("host key for %s is not in known_hosts and was not accepted: %s", e.hostname, e.reason)
+}
+
 type hostKeyPrompter func(hostname string, remote net.Addr, key ssh.PublicKey) (accept bool, err error)
 
 func tcpHostKeyCallback(knownHostsPath string, prompt hostKeyPrompter) (ssh.HostKeyCallback, error) {
@@ -78,7 +87,7 @@ func tcpHostKeyCallback(knownHostsPath string, prompt hostKeyPrompter) (ssh.Host
 			return perr
 		}
 		if !accept {
-			return fmt.Errorf("host key for %s rejected", hostname)
+			return &hostKeyUnknownError{hostname: hostname, reason: "rejected"}
 		}
 
 		// Another connection may have completed TOFU while this prompt was
