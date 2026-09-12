@@ -11,7 +11,14 @@ import (
 	"time"
 )
 
+const maxForwardConnections = 65_535
+
 func (a *agentSession) openForwardChannel(msg controlMessage) {
+	if msg.MaxConnections < 0 || msg.MaxConnections > maxForwardConnections {
+		a.writeOpenError(msg.RequestID, errProtocolError,
+			fmt.Errorf("max_connections must be between 0 (unlimited) and %d", maxForwardConnections))
+		return
+	}
 	switch msg.Kind {
 	case "forward_local":
 		a.openLocalForward(msg)
