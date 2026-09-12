@@ -165,44 +165,31 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         // transient reset).  Treat this as readiness probing, not as the one
         // and only assertion attempt.  A real regression still fails after
         // the bounded overall deadline.
+        // StartAsync now waits for the forward listener to bind, and the
+        // patched tailcat forward preflights the Tailcat peer before it ever
+        // publishes that readiness. The first application connection must
+        // therefore work immediately; retrying here would hide a real runtime
+        // readiness regression that programmatic callers would still hit.
         var endpoint = IPEndPoint.Parse(boundAddress);
-        var attempts = new List<string>();
-        string? got = null;
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (DateTime.UtcNow < deadline && got != backendReply)
+        using var socket = new TcpClient();
+        using var attemptCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await socket.ConnectAsync(endpoint, attemptCts.Token);
+
+        var buffer = new byte[256];
+        var total = 0;
+        while (total < buffer.Length)
         {
-            try
-            {
-                using var socket = new TcpClient();
-                using var attemptCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                await socket.ConnectAsync(endpoint, attemptCts.Token);
-
-                var buffer = new byte[256];
-                var total = 0;
-                while (total < buffer.Length)
-                {
-                    var n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), attemptCts.Token);
-                    if (n == 0) break;
-                    total += n;
-                    if (total >= System.Text.Encoding.UTF8.GetByteCount(backendReply)) break;
-                }
-                got = System.Text.Encoding.UTF8.GetString(buffer, 0, total);
-                attempts.Add($"received {total} bytes: {got ?? "<null>"}");
-            }
-            catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException)
-            {
-                attempts.Add($"{ex.GetType().Name}: {ex.Message}");
-            }
-
-            if (got != backendReply)
-                await Task.Delay(200);
+            var n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), attemptCts.Token);
+            if (n == 0) break;
+            total += n;
+            if (total >= System.Text.Encoding.UTF8.GetByteCount(backendReply)) break;
         }
+        var got = System.Text.Encoding.UTF8.GetString(buffer, 0, total);
 
         Assert.True(
             got == backendReply,
-            "exit-node forward never became end-to-end ready; " +
-            $"last={got ?? "<null>"}; attempts: {string.Join(" | ", attempts)}; " +
-            $"forward logs: {string.Join(" || ", forwardLogs)}; " +
+            "first connection after StartAsync was not ready; " +
+            $"received={got}; forward logs: {string.Join(" || ", forwardLogs)}; " +
             $"server logs: {string.Join(" || ", serverLogs)}");
     }
 }
