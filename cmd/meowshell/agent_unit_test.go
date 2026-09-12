@@ -383,3 +383,24 @@ func TestChannelWriterFailureDrainsPendingWaitGroup(t *testing.T) {
 		t.Fatal("stale data after writer stop reintroduced an unbalanced pending write")
 	}
 }
+
+
+func TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want errorCode
+	}{
+		{"declined", &hostKeyUnknownError{hostname: "host:22", reason: "rejected"}, errHostKeyUnknown},
+		{"unanswered", &hostKeyUnknownError{hostname: "host:22", reason: "the prompt went unanswered"}, errHostKeyUnknown},
+		{"changed", &hostKeyChangedError{hostname: "host:22", err: fmt.Errorf("knownhosts: key mismatch")}, errHostKeyChanged},
+		{"anything else", fmt.Errorf("something else entirely"), errUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("connecting to %s: %w", "host:22", tc.err)
+			if got := classifyConnectError(wrapped); got != tc.want {
+				t.Errorf("classifyConnectError(%v) = %q, want %q", wrapped, got, tc.want)
+			}
+		})
+	}
+}
