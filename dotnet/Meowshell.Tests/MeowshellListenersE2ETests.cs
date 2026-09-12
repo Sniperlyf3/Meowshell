@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Meowshell;
@@ -67,29 +66,30 @@ public sealed class MeowshellListenersE2ETests : IDisposable
     {
         var real = RealBinaries();
         if (real is null) return;
-        var (bin, tailcatPath) = real.Value;
+        var (bin, _) = real.Value;
 
-        var configDir = Path.Combine(_dir, "keyconfig");
-        Directory.CreateDirectory(configDir);
-        var genkeyPsi = new ProcessStartInfo(tailcatPath)
+        // tailcat forward now pings the remote peer before announcing
+        // readiness (it no longer trusts a bound local listener alone --
+        // the first accepted connection used to be what actually brought
+        // the DERP/WireGuard path up, which could lose that race). A bare
+        // genkey'd address with nothing listening behind it can no longer
+        // stand in for "a forward target"; this needs a real, reachable
+        // server the same way every other real-binary E2E here does.
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        };
-        genkeyPsi.ArgumentList.Add("genkey");
-        genkeyPsi.ArgumentList.Add("--key=forward-e2e");
-        genkeyPsi.Environment["XDG_CONFIG_HOME"] = configDir;
-        using var genkey = Process.Start(genkeyPsi)!;
-        var address = (await genkey.StandardOutput.ReadToEndAsync()).Trim();
-        var exited = await Task.Run(() => genkey.WaitForExit(30_000));
-        Assert.True(exited, "tailcat genkey did not exit in time");
-        Assert.NotEmpty(address);
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "server-home"),
+            WorkDirectory = Path.Combine(_dir, "server-work"),
+            InsecureNoAuth = true,
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        });
 
         await using var forward = await MeowshellPortForward.StartAsync(new MeowshellPortForwardOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "home2"),
-            Address = address,
+            Address = server.Address,
             Mappings = ["0:80"],
         });
 
