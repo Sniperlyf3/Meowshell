@@ -68,4 +68,38 @@ func TestListenUnixSocketIsNeverWiderThanOwnerPermissions(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Errorf("socket file permissions = %#o, want %#o", got, 0o600)
 	}
+
+func TestListenUnixRejectsNonStickyWritableParent(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "sock")
+	if _, err := listenUnix(path); err == nil {
+		t.Fatal("listenUnix accepted a non-sticky group/other-writable parent")
+	}
+}
+
+func TestListenUnixAllowsRootOwnedStickyTmpStyleParent(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a root-owned test parent")
+	}
+	parent := filepath.Join(t.TempDir(), "sticky")
+	if err := os.Mkdir(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "sock")
+	ln, err := listenUnix(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.Close()
+}
+
 }
