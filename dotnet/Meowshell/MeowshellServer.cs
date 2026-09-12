@@ -53,9 +53,6 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     /// <summary>Contents of a tailcat *.private.json, supplied at runtime rather than stored on the device. Piped to meowshell on stdin, never exists as a named file.</summary>
     public string? PrivateKeyJson { get; init; }
 
-    /// <summary>How long to wait for the server to publish its address.</summary>
-    public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
-
     /// <summary>Embed the DERP server's own info in the published address instead of a region reference. Passed to tailcat's own <c>--full-address</c>.</summary>
     public bool FullAddress { get; init; }
 
@@ -157,7 +154,7 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// <exception cref="ArgumentException">Both authentication modes were set, nothing was chosen to serve, or <see cref="MeowshellOptions.Files"/> was combined with a forced command on the ssh/no-auth-ssh service.</exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
     /// <exception cref="TailcatException">tailcat exited before publishing an address.</exception>
-    /// <exception cref="TimeoutException">No address appeared within <see cref="MeowshellOptions.StartTimeout"/>.</exception>
+    /// <exception cref="TimeoutException">No address appeared within <see cref="TailcatListenerOptions.StartTimeout"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
