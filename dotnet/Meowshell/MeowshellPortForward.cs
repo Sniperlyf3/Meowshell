@@ -71,7 +71,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         psi.ArgumentList.Add(options.Address);
         foreach (var mapping in options.Mappings)
             psi.ArgumentList.Add(mapping);
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         // Without this, the spawned "meowshell forward" resolves tailcat via
         // an inherited TAILCAT_BIN / sibling-binary / $PATH search of its
         // own, silently overriding whatever BinaryDirectory the caller just
