@@ -113,7 +113,16 @@ internal static class MeowshellHomeDirectory
             throw new IOException(
                 $"refusing to use {info.FullName}: directory is not owned by the current user, Administrators, or SYSTEM");
 
-        const FileSystemRights writeCapable =
+        // HOME can contain saved Tailcat client keys and other private
+        // session state, so confidentiality matters as much as integrity.
+        // Unix enforces this with mode 0700; Windows must likewise reject
+        // untrusted principals that can read/list/traverse the directory,
+        // not only principals that can modify it.
+        const FileSystemRights sensitiveAccess =
+            FileSystemRights.Read |
+            FileSystemRights.ReadAndExecute |
+            FileSystemRights.ListDirectory |
+            FileSystemRights.Traverse |
             FileSystemRights.Write |
             FileSystemRights.Modify |
             FileSystemRights.FullControl |
@@ -133,12 +142,12 @@ internal static class MeowshellHomeDirectory
         {
             if (rule.AccessControlType != AccessControlType.Allow)
                 continue;
-            if ((rule.FileSystemRights & writeCapable) == 0)
+            if ((rule.FileSystemRights & sensitiveAccess) == 0)
                 continue;
             if (Trusted(rule.IdentityReference))
                 continue;
             throw new IOException(
-                $"refusing to use {info.FullName}: grants write-capable access to {rule.IdentityReference.Value}");
+                $"refusing to use {info.FullName}: grants read/write access to {rule.IdentityReference.Value}");
         }
     }
 
