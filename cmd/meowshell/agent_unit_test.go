@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -179,6 +180,71 @@ func TestSlowSFTPOperationDoesNotBlockFrameReader(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("serveFrames did not finish")
+	}
+}
+
+// TestDispatchSFTPOpFreesSlotsAfterTimeoutEvenIfOpsNeverReturn is a
+// regression test for N6: pkg/sftp's per-call methods (Stat, Rename,
+// MkdirAll, ...) take no context and offer no way to actually cancel an
+// in-flight request, so a client giving up on a call only ever stops that
+// client from waiting -- the goroutine dispatchSFTPOp spawned, and the
+// sftpOpSlots slot it holds, used to keep running until the remote server
+// actually responded. Against a slow or malicious server that never does,
+// enough of these piled up to permanently exhaust sftpOpSlots, degrading
+// every future SFTP operation on the connection. Fills every slot with an
+// op that never returns at all, confirms a further one is rejected while
+// they're all still hung, then confirms that after sftpOpTimeout elapses,
+// every slot is free again -- even though none of the original ops ever
+// actually finished.
+func TestDispatchSFTPOpFreesSlotsAfterTimeoutEvenIfOpsNeverReturn(t *testing.T) {
+	oldTimeout := sftpOpTimeout
+	sftpOpTimeout = 200 * time.Millisecond
+	defer func() { sftpOpTimeout = oldTimeout }()
+
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	session.sftpOpHandler = func(controlMessage) {
+		select {} // simulates a remote server that never responds at all
+	}
+
+	const slots = 8 // matches newAgentSession's sftpOpSlots capacity
+	for i := 0; i < slots; i++ {
+		session.dispatchSFTPOp(controlMessage{Msg: "sftp_op", Op: "stat", Path: "x", RequestID: fmt.Sprintf("hang%d", i)})
+	}
+
+	// All slots are held by permanently-hung ops -- a further one must be
+	// rejected immediately (dispatchSFTPOp's own default branch runs
+	// synchronously, no goroutine involved).
+	session.dispatchSFTPOp(controlMessage{Msg: "sftp_op", Op: "stat", Path: "y", RequestID: "rejected-while-full"})
+	msgs := readControlFrames(t, &out)
+	if len(msgs) != 1 || msgs[0].RequestID != "rejected-while-full" {
+		t.Fatalf("messages while all slots are held = %+v, want exactly one rejection for the 9th request", msgs)
+	}
+
+	// Give every hung op's timeout watcher a chance to fire and release its
+	// slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(readControlFrames(t, &out)) < slots+1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	msgs = readControlFrames(t, &out)
+	timeouts := 0
+	for _, m := range msgs[1:] {
+		if m.Code == errTimeout {
+			timeouts++
+		}
+	}
+	if timeouts != slots {
+		t.Fatalf("got %d timeout errors for the %d originally-hung ops, want %d; messages = %+v", timeouts, slots, slots, msgs)
+	}
+
+	// The slots must now be free: a fresh op is accepted (no synchronous
+	// "too many concurrent operations" rejection) even though nothing ever
+	// actually finished server-side.
+	session.dispatchSFTPOp(controlMessage{Msg: "sftp_op", Op: "stat", Path: "z", RequestID: "accepted-after-timeouts"})
+	msgs = readControlFrames(t, &out)
+	if len(msgs) != slots+1 {
+		t.Fatalf("a request right after the timeouts got an extra synchronous response = %+v, want no new message (accepted, not rejected)", msgs)
 	}
 }
 

@@ -609,16 +609,59 @@ func (a *agentSession) dispatchOpenChannel(msg controlMessage) {
 	}
 }
 
+// sftpOpTimeout bounds a metadata op (ls/stat/mkdir/rename/...) against the
+// remote server. pkg/sftp's per-call methods (Stat, Rename, MkdirAll, ...)
+// take no context and offer no way to actually cancel an in-flight request,
+// so a caller giving up (cancelling the .NET-side call) only ever stops that
+// caller from waiting -- the goroutine here, and the sftpOpSlots slot it
+// holds, otherwise keeps running until the remote server actually responds.
+// Against a slow or malicious server that never does, enough
+// client-cancelled-but-still-hung ops pile up to permanently exhaust
+// sftpOpSlots (N6), degrading every future SFTP operation on the connection.
+// This can't cancel the request either -- there's nothing here to cancel it
+// with -- but it does guarantee the slot itself is freed after a bounded
+// time regardless, the same tradeoff dialWithTimeout already makes for a
+// forwarding dial with no timeout of its own. A var, not a const, so a test
+// can shrink it rather than waiting out the real 30s to exercise the bound.
+var sftpOpTimeout = 30 * time.Second
+
 func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 	select {
 	case a.sftpOpSlots <- struct{}{}:
+		done := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { <-a.sftpOpSlots }) }
 		go func() {
-			defer func() { <-a.sftpOpSlots }()
+			defer close(done)
+			defer release()
 			if a.sftpOpHandler != nil {
 				a.sftpOpHandler(msg)
 				return
 			}
 			a.sftpOp(msg)
+		}()
+		go func() {
+			select {
+			case <-done:
+				// Finished within the bound; the op above already sent its
+				// own response and released the slot via defer.
+			case <-time.After(sftpOpTimeout):
+				// The op is still outstanding with no way to actually stop
+				// it. Report the timeout now and reclaim the slot
+				// immediately rather than waiting on a response that may
+				// never come; the abandoned goroutine keeps running
+				// harmlessly in the background and, if it does eventually
+				// finish, its late response finds nobody still waiting on
+				// this requestID (dropped, the same as any other orphaned
+				// late response elsewhere in this protocol).
+				a.writeControl(0, controlMessage{
+					Msg:       "error",
+					RequestID: msg.RequestID,
+					Code:      errTimeout,
+					Message:   fmt.Sprintf("sftp %s did not finish within %s", msg.Op, sftpOpTimeout),
+				})
+				release()
+			}
 		}()
 	default:
 		a.writeControl(0, controlMessage{
