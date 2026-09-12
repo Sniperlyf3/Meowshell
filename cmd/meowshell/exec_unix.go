@@ -6,24 +6,41 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"syscall"
 )
 
 const managedParentPIDEnv = "MEOWSHELL_MANAGED_PARENT_PID"
 
+var managedHostPID = consumeManagedHostPID()
+
+// consumeManagedHostPID deliberately removes the marker from Meowshell's
+// process environment as soon as the process starts. Long-lived commands such
+// as "agent" spawn their own Tailcat subprocesses; those descendants are not
+// direct children of the managed .NET host and must never inherit a marker
+// that would make the Tailcat watchdog mistake the agent for a dead host.
+//
+// Exec-replacement commands (serve/forward/socks) re-add the marker explicitly
+// in runTailcat below because the exec preserves this process PID and its
+// direct parent really is the .NET host.
+func consumeManagedHostPID() int {
+	raw := os.Getenv(managedParentPIDEnv)
+	if raw == "" {
+		return 0
+	}
+	_ = os.Unsetenv(managedParentPIDEnv)
+	pid, err := strconv.Atoi(raw)
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
 func runTailcat(bin string, argv, environ []string) error {
-	// Linux PR_SET_PDEATHSIG is tied to the specific parent thread/task that
-	// created this process, not to the parent process as a whole. That is a
-	// good crash backstop for ordinary native CLI launches, but it is unsafe
-	// for children created by a managed thread pool: the spawning worker
-	// thread can disappear while the host process remains perfectly healthy,
-	// causing a spurious SIGKILL. Managed launches pass the host process PID
-	// and the patched tailcat binary watches that process directly instead.
-	if pid, ok := managedParentPID(environ); ok {
-		if pid != os.Getppid() {
-			return fmt.Errorf("managed parent process %d is no longer this process's parent", pid)
+	if managedHostPID > 0 {
+		if managedHostPID != os.Getppid() {
+			return fmt.Errorf("managed parent process %d is no longer this process's parent", managedHostPID)
 		}
+		environ = setEnv(environ, [][2]string{{managedParentPIDEnv, strconv.Itoa(managedHostPID)}})
 		return syscall.Exec(bin, argv, environ)
 	}
 
@@ -31,24 +48,4 @@ func runTailcat(bin string, argv, environ []string) error {
 		fmt.Fprintf(os.Stderr, "# warning: could not arm the parent-death signal: %v\n", errno)
 	}
 	return syscall.Exec(bin, argv, environ)
-}
-
-func managedParentPID(environ []string) (int, bool) {
-	prefix := managedParentPIDEnv + "="
-	for _, entry := range environ {
-		if !strings.HasPrefix(entry, prefix) {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimPrefix(entry, prefix))
-		if err != nil || pid <= 0 {
-			return 0, false
-		}
-		return pid, true
-	}
-	return 0, false
-}
-
-func shouldArmParentDeathSignal(environ []string, parentPID int) bool {
-	pid, ok := managedParentPID(environ)
-	return !ok || pid != parentPID
 }
