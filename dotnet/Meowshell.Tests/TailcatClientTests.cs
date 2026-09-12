@@ -151,7 +151,8 @@ public sealed class TailcatClientTests : IDisposable
         var ex = await Assert.ThrowsAsync<TailcatException>(() =>
             TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions { Name = "key" }));
         Assert.Equal(0, ex.ExitCode);
-        Assert.Contains("not-an-address", ex.Message);
+        Assert.DoesNotContain("not-an-address", ex.Message);
+        Assert.Contains("raw output was omitted", ex.Message);
     }
 
     [Fact]
@@ -264,9 +265,12 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ResolveThrowsOnUnexpectedOutputShape()
     {
-        var (options, _) = Fake("echo not-an-address\n");
+        const string secretLike = "tcSECRET-CAPABILITY";
+        var (options, _) = Fake($"echo prefix-{secretLike}\n");
         var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.ResolveAsync(options, "tcSHORT"));
         Assert.Equal(0, ex.ExitCode);
+        Assert.DoesNotContain(secretLike, ex.ToString());
+        Assert.Contains("raw output was omitted", ex.ToString());
     }
 
     [Fact]
