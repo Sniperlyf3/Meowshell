@@ -128,6 +128,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     public static async Task<MeowshellAgentConnection> ConnectAsync(
         TailcatClientOptions options, string destination, MeowshellAgentConfigureOptions? configure = null,
         string? port = null, IReadOnlyList<string>? jumpHosts = null, string? knownHostsPath = null, string? proxyUrl = null,
+        Action<MeowshellAgentConnection>? configureConnection = null,
         CancellationToken cancellationToken = default)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
@@ -157,6 +158,8 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var connection = new MeowshellAgentConnection(process, job);
         try
         {
+            configureConnection?.Invoke(connection);
+
             process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;
