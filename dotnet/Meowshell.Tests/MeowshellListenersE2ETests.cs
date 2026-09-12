@@ -130,7 +130,7 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         var backendPort = ((IPEndPoint)backend.LocalEndpoint).Port;
 
         var serverLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
