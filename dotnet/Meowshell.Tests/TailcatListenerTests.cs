@@ -34,12 +34,18 @@ public sealed class TailcatListenerTests : IDisposable
         };
         var process = new Process { StartInfo = psi };
         var lines = new List<string>();
-        var listener = TailcatListener.Start(process, TimeSpan.FromSeconds(5), onLog: null);
-        listener.Log += line =>
+        // Passed as onLog (invoked from inside Start's own OutputDataReceived
+        // handler, wired up before BeginOutputReadLine) rather than
+        // subscribed to listener.Log afterward: the script is short-lived
+        // enough that subscribing post-Start raced actual delivery on a
+        // fast/loaded CI runner -- output could arrive (and be missed
+        // entirely, since Log has no replay for a late subscriber) before
+        // this test's next line even ran.
+        var listener = TailcatListener.Start(process, TimeSpan.FromSeconds(5), onLog: line =>
         {
             if (line == "throw-me") throw new InvalidOperationException("boom from a Log subscriber");
             lock (lines) lines.Add(line);
-        };
+        });
 
         // The script exits on its own (StopAsync was never called), which
         // TailcatListener treats as "exited unexpectedly" and reports as a
@@ -49,7 +55,20 @@ public sealed class TailcatListenerTests : IDisposable
         // it through.
         await Assert.ThrowsAnyAsync<Exception>(() => listener.Completed.WaitAsync(TimeSpan.FromSeconds(5)));
 
-        Assert.Contains("after", lines);
+        // Completed (via Process.Exited) can settle before every buffered
+        // OutputDataReceived callback has actually been dispatched -- a
+        // known .NET Process quirk (the exit notification and the
+        // redirected-stream read completions are independent), not
+        // something either Completed or this fix controls. Poll for the
+        // output to actually arrive instead of assuming Completed settling
+        // implies it already has.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (lines) { if (lines.Contains("after")) break; }
+            await Task.Delay(25);
+        }
+        lock (lines) Assert.Contains("after", lines);
 
         await listener.DisposeAsync();
     }
