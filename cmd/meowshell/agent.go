@@ -925,6 +925,15 @@ func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 		}
 	case ch.listener != nil:
 		ch.listener.Close()
+		// The only terminal signal a forward channel ever gets (see
+		// CloseForwardAsync's own comment on the .NET side): unlike
+		// exec/shell, there's no exit_status to tell a caller the listener
+		// has actually stopped. By the time this control message is sent,
+		// ch.listener.Close() above has already returned, so the caller's
+		// CloseAsync() can now safely rely on the port genuinely being free
+		// again (e.g. to rebind it) instead of only knowing the close
+		// request was sent.
+		a.writeControl(channelID, controlMessage{Msg: "channel_closed"})
 	}
 }
 

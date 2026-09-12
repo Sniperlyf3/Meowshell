@@ -14,7 +14,15 @@
 //  3. If a "close_channel" later arrives for that channel ID, append a line
 //     to its results file recording it, so a test can confirm the agent
 //     actually closed the channel it created after the caller gave up on
-//     it, rather than leaving it to leak for the life of the connection.
+//     it, rather than leaving it to leak for the life of the connection --
+//     then reply "channel_closed", the same acknowledgment the real agent
+//     sends once a forward's listener has actually stopped (see
+//     closeChannel in forwarding.go). MeowshellForward.CloseAsync waits on
+//     it, so a fake agent that never sent it would just hang any test that
+//     closes a forward. Sent unconditionally, not only for forward
+//     channels: harmless for a shell/exec close (nothing is waiting on that
+//     channel ID in _pendingCloses), and this fake doesn't track kind per
+//     channel ID after opening it anyway.
 //
 // No flags: MeowshellAgentConnection.ConnectAsync builds its own argv for
 // the "meowshell agent" invocation and gives a caller no way to inject
@@ -36,6 +44,13 @@ import (
 const frameHeaderLength = 5
 
 const openDelay = 300 * time.Millisecond
+
+// closeDelay mirrors openDelay for close_channel: a test wanting to prove
+// CloseAsync() actually waits for "channel_closed" (N15), rather than
+// returning as soon as the close request is written, needs a reliable gap
+// between the two -- racing against however fast this fake replies wouldn't
+// tell the two behaviors apart.
+const closeDelay = 300 * time.Millisecond
 
 type frame struct {
 	Type      byte
@@ -67,13 +82,22 @@ func readFrame(r io.Reader) (frame, error) {
 }
 
 type message struct {
-	Msg       string `json:"msg"`
-	RequestID string `json:"request_id,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Path      string `json:"path,omitempty"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Msg        string `json:"msg"`
+	RequestID  string `json:"request_id,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message,omitempty"`
+	RemoteAddr string `json:"remote_addr,omitempty"`
 }
+
+// delayCloseRemoteAddr is a magic RemoteAddr an open_channel request can set
+// (irrelevant to a real agent, which would just fail to dial it -- this fake
+// never actually dials anything) to mark that channel's eventual
+// close_channel as needing a delayed "channel_closed" reply. Existing tests
+// that don't care about close timing get an immediate reply as before;
+// closeDelay only applies to a channel that opts into it this way.
+const delayCloseRemoteAddr = "delay-close-ack"
 
 func writeControl(w io.Writer, mu *sync.Mutex, channelID uint32, msg message) error {
 	body, err := json.Marshal(msg)
@@ -95,6 +119,8 @@ func writeData(w io.Writer, mu *sync.Mutex, channelID uint32, data []byte) error
 func main() {
 	var outMu sync.Mutex
 	var nextID uint32
+	var delayCloseMu sync.Mutex
+	delayClose := make(map[uint32]bool)
 
 	results, err := os.OpenFile(os.Args[0]+".results", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -125,6 +151,11 @@ func main() {
 		case "open_channel":
 			nextID++
 			id := nextID
+			if msg.RemoteAddr == delayCloseRemoteAddr {
+				delayCloseMu.Lock()
+				delayClose[id] = true
+				delayCloseMu.Unlock()
+			}
 			go func(requestID, kind, path string, id uint32) {
 				time.Sleep(openDelay)
 				writeControl(os.Stdout, &outMu, id, message{Msg: "channel_opened", RequestID: requestID})
@@ -152,6 +183,15 @@ func main() {
 		case "close_channel":
 			fmt.Fprintf(results, "CLOSED %d\n", f.ChannelID)
 			results.Sync()
+			delayCloseMu.Lock()
+			delayed := delayClose[f.ChannelID]
+			delayCloseMu.Unlock()
+			go func(channelID uint32) {
+				if delayed {
+					time.Sleep(closeDelay)
+				}
+				writeControl(os.Stdout, &outMu, channelID, message{Msg: "channel_closed"})
+			}(f.ChannelID)
 		}
 	}
 }

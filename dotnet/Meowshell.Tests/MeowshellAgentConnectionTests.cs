@@ -339,6 +339,33 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         Assert.Equal(before, connection.ChannelCountForTests);
     }
 
+    /// <summary>Regression test for N15: CloseAsync used to return as soon as
+    /// the close_channel request was written, with no acknowledgment that the
+    /// agent had actually stopped the listener -- so a caller that
+    /// immediately tried to rebind the same port after CloseAsync() returned
+    /// could still lose the race against the agent's own (fast, but not
+    /// instant) ch.listener.Close(). e2e/fakeagent delays its "channel_closed"
+    /// reply by closeDelay for a forward opened with the magic
+    /// "delay-close-ack" remote address (see that program's own comments), so
+    /// this measures that CloseAsync() actually blocks for roughly that long
+    /// instead of returning immediately.</summary>
+    [Fact]
+    public async Task CloseAsyncWaitsForTheAgentsChannelClosedAcknowledgment()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "delay-close-ack");
+
+        var started = Stopwatch.StartNew();
+        await forward.CloseAsync();
+        started.Stop();
+
+        Assert.True(started.Elapsed >= TimeSpan.FromMilliseconds(250),
+            $"CloseAsync() returned after {started.Elapsed}, want it to have waited for the agent's delayed channel_closed acknowledgment (~300ms)");
+    }
+
     private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
     {
         public void Report(T value) => report(value);

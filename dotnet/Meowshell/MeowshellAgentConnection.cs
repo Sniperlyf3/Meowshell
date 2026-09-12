@@ -75,6 +75,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     internal int ChannelCountForTests => _channels.Count;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<AgentMessage>> _pendingRequests = new();
     private readonly ConcurrentDictionary<string, PendingOpen> _pendingOpens = new();
+    private readonly ConcurrentDictionary<uint, TaskCompletionSource> _pendingCloses = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly SemaphoreSlim _stopLock = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
@@ -487,19 +488,29 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     internal async Task CloseForwardAsync(uint id, CancellationToken cancellationToken)
     {
-        // Unlike a shell/exec channel, the agent never sends anything back
-        // when a forward's listener closes -- there is no "exit_status" to
-        // key cleanup off of (see HandleControlAsync). This explicit close
-        // request is the only terminal signal that exists at all, so it has
-        // to also be what removes the local entry: without it, every
-        // forward ever opened on a connection stays in _channels for the
-        // connection's whole lifetime, not just until it's closed.
+        // Unlike a shell/exec channel, the agent never sends "exit_status" --
+        // it acknowledges a forward's close explicitly instead, with its own
+        // "channel_closed" (see agent.go's closeChannel), sent only once
+        // ch.listener.Close() has actually returned. Waiting for it here
+        // means a caller can trust that by the time CloseAsync() returns,
+        // the port is genuinely free again (e.g. safe to rebind) rather than
+        // merely that the close request was sent. This explicit close is
+        // also still the only terminal signal that exists at all for a
+        // forward, so it has to also be what removes the local entry:
+        // without it, every forward ever opened on a connection stays in
+        // _channels for the connection's whole lifetime, not just until it's
+        // closed.
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingCloses[id] = tcs;
         try
         {
             await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+            await tcs.Task.ConfigureAwait(false);
         }
         finally
         {
+            _pendingCloses.TryRemove(id, out _);
             _channels.TryRemove(id, out _);
         }
     }
@@ -651,6 +662,12 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 // this, it would leak for the life of the connection.
                 _ = WriteControlAsync(channelId, new AgentMessage { Msg = "close_channel" }, CancellationToken.None);
                 return;
+            case "channel_closed":
+                if (_pendingCloses.TryRemove(channelId, out var closedTcs))
+                {
+                    closedTcs.TrySetResult();
+                }
+                return;
             case "sftp_result":
                 if (msg.RequestId is not null && _pendingRequests.TryRemove(msg.RequestId, out var resultTcs))
                 {
@@ -760,6 +777,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         _connected.TrySetException(ex);
         foreach (var kv in _pendingOpens) kv.Value.OnFailed(ex);
         foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
+        foreach (var kv in _pendingCloses) kv.Value.TrySetException(ex);
         foreach (var kv in _channels) kv.Value.OnFault(ex);
     }
 
