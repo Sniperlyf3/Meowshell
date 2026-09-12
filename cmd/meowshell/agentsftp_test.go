@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -240,8 +242,18 @@ func openedChannelID(t *testing.T, out *bytes.Buffer) uint32 {
 // TestSuccessfulUploadAtomicallyReplacesDestination verifies that upload data
 // lands in a sibling staging file and the existing destination is replaced
 // only at finalization via the server's POSIX rename extension.
+//
+// It waits for the exit_status control message before ever looking at the
+// destination file's content, rather than polling the destination via a
+// concurrent SFTP open/read/close in a loop: on Windows, a file opened
+// without FILE_SHARE_DELETE (the default for both os.Open and the SFTP
+// server's own file handles) blocks a concurrent rename-to-replace of that
+// same path, so a concurrent reader would race the very rename this test is
+// verifying and intermittently fail with "Access is denied" -- a race POSIX
+// rename() doesn't have, since Unix lets a rename proceed under any open
+// reader.
 func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
-	session, client, _, _ := newInProcessSFTPClient(t)
+	session, client, rootDir, _ := newInProcessSFTPClient(t)
 	old, err := client.Create("atomic.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -260,18 +272,27 @@ func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
 	session.closeChannel(id, controlMessage{})
 
 	deadline := time.Now().Add(2 * time.Second)
+	var msgs []controlMessage
 	for time.Now().Before(deadline) {
-		if string(readRemoteFile(t, client, "atomic.txt")) == "new-complete-data" {
-			msgs := readControlFrames(t, out)
-			for _, msg := range msgs {
-				if msg.Msg == "exit_status" && msg.ExitCode == 0 {
-					return
+		msgs = readControlFrames(t, out)
+		for _, msg := range msgs {
+			if msg.Msg == "exit_status" {
+				if msg.ExitCode != 0 {
+					t.Fatalf("upload finished with exit code %d, messages = %+v", msg.ExitCode, msgs)
 				}
+				got, err := os.ReadFile(filepath.Join(rootDir, "atomic.txt"))
+				if err != nil {
+					t.Fatalf("reading committed destination: %v", err)
+				}
+				if string(got) != "new-complete-data" {
+					t.Fatalf("destination after commit = %q, want %q", got, "new-complete-data")
+				}
+				return
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("upload never committed successfully; destination = %q, messages = %+v", readRemoteFile(t, client, "atomic.txt"), readControlFrames(t, out))
+	t.Fatalf("upload never committed successfully; messages = %+v", msgs)
 }
 
 // TestCancelledUploadPreservesExistingDestination is the integrity regression:
