@@ -91,7 +91,12 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
-	client := a.forwardClient()
+	client, err := a.forwardClient()
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errConnectionLost, err)
+		return
+	}
 	id, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
@@ -139,7 +144,12 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
-	client := a.forwardClient()
+	client, err := a.forwardClient()
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errConnectionLost, err)
+		return
+	}
 	id, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
