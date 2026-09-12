@@ -1,0 +1,72 @@
+diff --git a/cmd/tailcat/parentjob_other.go b/cmd/tailcat/parentjob_other.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/tailcat/parentjob_other.go
+@@ -0,0 +1,5 @@
++//go:build !windows
++
++package main
++
++func joinParentJobFromEnv() error { return nil }
+diff --git a/cmd/tailcat/parentjob_windows.go b/cmd/tailcat/parentjob_windows.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/tailcat/parentjob_windows.go
+@@ -0,0 +1,47 @@
++//go:build windows
++
++package main
++
++import (
++	"fmt"
++	"os"
++	"unsafe"
++
++	"golang.org/x/sys/windows"
++)
++
++var openParentJobObjectW = windows.NewLazySystemDLL("kernel32.dll").NewProc("OpenJobObjectW")
++
++func joinParentJobFromEnv() error {
++	const env = "MEOWSHELL_PARENT_JOB"
++	name := os.Getenv(env)
++	if name == "" {
++		return nil
++	}
++	_ = os.Unsetenv(env)
++
++	namep, err := windows.UTF16PtrFromString(name)
++	if err != nil {
++		return fmt.Errorf("invalid parent job name: %w", err)
++	}
++	const jobObjectAssignProcess = 0x0001
++	h, _, callErr := openParentJobObjectW.Call(
++		uintptr(jobObjectAssignProcess),
++		0,
++		uintptr(unsafe.Pointer(namep)),
++	)
++	if h == 0 {
++		return fmt.Errorf("opening parent Windows Job Object %q: %w", name, callErr)
++	}
++	job := windows.Handle(h)
++	defer windows.CloseHandle(job)
++
++	process, err := windows.GetCurrentProcess()
++	if err != nil {
++		return fmt.Errorf("getting current process handle: %w", err)
++	}
++	if err := windows.AssignProcessToJobObject(job, process); err != nil {
++		return fmt.Errorf("joining parent Windows Job Object %q: %w", name, err)
++	}
++	return nil
++}
+diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
+--- a/cmd/tailcat/tailcat.go
++++ b/cmd/tailcat/tailcat.go
+@@ -645,2 +645,6 @@
+ func main() {
++	if err := joinParentJobFromEnv(); err != nil {
++		log.Fatalf("tailcat: %v", err)
++	}
++
+ 	root := newRootCommand()

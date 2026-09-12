@@ -61,6 +61,7 @@ func agentCmd(args []string) error {
 	verbose := fs.Bool("verbose", false, "passed to tailcat's own --verbose")
 	port := fs.String("p", "22", "port number of the destination's SSH service")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts)")
+	resolveTailcatTXT := fs.Bool("resolve-tailcat-txt", false, "for a bare hostname destination, look up a \"tailcat=tc...\" DNS TXT record and dial that Tailcat address instead of ordinary SSH. Off by default: this hands trust to whoever controls DNS for that name instead of known_hosts' TOFU verification, so it must be requested explicitly rather than applying silently to any hostname that happens to have such a record")
 	var jumps stringList
 	fs.Var(&jumps, "jump", "an intermediate TCP SSH host to tunnel through first ([user@]host[:port]); repeatable, in order, closest-to-here first")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, agentUsage); fs.PrintDefaults() }
@@ -71,9 +72,14 @@ func agentCmd(args []string) error {
 		return fmt.Errorf("agent needs exactly one destination")
 	}
 	dest := fs.Arg(0)
+	resolvedDest, isTailcat, err := resolveAgentDestination(context.Background(), dest, *resolveTailcatTXT)
+	if err != nil {
+		return err
+	}
+	dest = resolvedDest
 
 	var bin string
-	if looksLikeTailcatAddress(dest) {
+	if isTailcat {
 		b, err := findTailcat(*tailcatBin)
 		if err != nil {
 			return err
@@ -97,14 +103,22 @@ func agentCmd(args []string) error {
 		session.writeError(0, errProtocolError, err)
 		return err
 	}
+
+	// serveFrames must be running before buildAuthMethods: an encrypted
+	// supplied private key makes buildAuthMethods call session.prompt for
+	// its passphrase, which blocks on a prompt_response that only
+	// serveFrames (reading stdin) can ever deliver. Building auth methods
+	// first, as this used to, deadlocks every encrypted-key connection --
+	// the .NET side sends prompt_response, but nothing here is reading
+	// stdin yet to receive it.
+	frameErrCh := make(chan error, 1)
+	go func() { frameErrCh <- session.serveFrames() }()
+
 	auth, err := session.buildAuthMethods(cfg)
 	if err != nil {
 		session.writeError(0, errAuthFailed, err)
 		return err
 	}
-
-	frameErrCh := make(chan error, 1)
-	go func() { frameErrCh <- session.serveFrames() }()
 
 	err = session.connect(context.Background(), connectOptions{
 		destination:    dest,
@@ -175,18 +189,39 @@ type connectOptions struct {
 	auth           []ssh.AuthMethod
 }
 
+const agentChannelWriteQueueDepth = 32
+
 type agentChannel struct {
 	session *ssh.Session
 	stdin   io.WriteCloser
+
+	// writeQueue decouples the single protocol frame reader from potentially
+	// blocking remote writes. A slow SSH/SFTP peer must never be able to stall
+	// prompt responses, close requests, or unrelated channels. The queue is
+	// deliberately bounded; if a producer outruns the remote peer, that channel
+	// is failed instead of applying head-of-line blocking to the whole agent.
+	writeQueue    chan []byte
+	writeStop     chan struct{}
+	writeStopOnce sync.Once
+	writePending  sync.WaitGroup
+	writeFailOnce sync.Once
 
 	sftpFile       *sftp.File
 	ctx            context.Context
 	cancel         context.CancelFunc
 	isUpload       bool
 	uploadPath     string
+	uploadTempPath string
 	uploadPreserve bool
 	uploadMode     uint32
 	uploadModTime  int64
+	// uploadErr, once set, is terminal: a write to sftpFile failed, so
+	// finalizeUpload must report that failure instead of exit_status 0 --
+	// closing the file cleanly afterward says nothing about the data
+	// actually having landed, and further data frames must stop touching
+	// the file at all.
+	uploadErrMu sync.Mutex
+	uploadErr   error
 
 	listener net.Listener
 }
@@ -204,8 +239,12 @@ type agentSession struct {
 	chans   map[uint32]*agentChannel
 	nextID  atomic.Uint32
 
-	sftpMu     sync.Mutex
-	sftpClient *sftp.Client
+	sftpMu        sync.Mutex
+	sftpClient    *sftp.Client
+	sftpOpSlots   chan struct{}
+	sftpOpHandler func(controlMessage)
+
+	openChannelSlots chan struct{}
 
 	promptsMu    sync.Mutex
 	prompts      map[string]chan controlMessage
@@ -224,10 +263,12 @@ type agentSession struct {
 
 func newAgentSession(in io.Reader, out io.Writer) *agentSession {
 	return &agentSession{
-		in:      in,
-		out:     out,
-		chans:   make(map[uint32]*agentChannel),
-		prompts: make(map[string]chan controlMessage),
+		in:               in,
+		out:              out,
+		chans:            make(map[uint32]*agentChannel),
+		prompts:          make(map[string]chan controlMessage),
+		sftpOpSlots:      make(chan struct{}, 8),
+		openChannelSlots: make(chan struct{}, 8),
 	}
 }
 
@@ -448,8 +489,34 @@ func (a *agentSession) writeData(channelID uint32, stream byte, p []byte) error 
 	return writeFrame(a.out, frame{Type: frameTypeData, ChannelID: channelID, Payload: payload})
 }
 
+var (
+	terminalTrue  = true
+	terminalFalse = false
+)
+
+// writeError reports a failure that ends channelID: the caller must have
+// already removed it (or be about to, as part of the same failure path) --
+// see controlMessage.Terminal's own comment for why this distinction exists
+// and what a client does differently for each.
 func (a *agentSession) writeError(channelID uint32, code errorCode, err error) error {
-	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error()})
+	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error(), Terminal: &terminalTrue})
+}
+
+// writeWarning reports a problem on channelID that does not end it -- e.g. a
+// failed post-open step like agent-forwarding setup, or a rejected resize
+// request. The channel keeps working normally afterward.
+func (a *agentSession) writeWarning(channelID uint32, code errorCode, err error) error {
+	return a.writeControl(channelID, controlMessage{Msg: "error", Code: code, Message: err.Error(), Terminal: &terminalFalse})
+}
+
+// writeOpenError reports a failure to open a channel, before any channel ID
+// exists to key it by -- correlated instead by the open_channel request's
+// own RequestID, echoed back the same way channel_opened is (see
+// openChannel and its handlers). The caller may already have stopped
+// waiting on requestID by the time this arrives, in which case it's simply
+// dropped: an open failure has nothing left to leak.
+func (a *agentSession) writeOpenError(requestID string, code errorCode, err error) error {
+	return a.writeControl(0, controlMessage{Msg: "error", RequestID: requestID, Code: code, Message: err.Error()})
 }
 
 func (a *agentSession) serveFrames() error {
@@ -490,13 +557,13 @@ func (a *agentSession) handleControl(channelID uint32, payload []byte) {
 	}
 	switch msg.Msg {
 	case "open_channel":
-		a.openChannel(msg)
+		a.dispatchOpenChannel(msg)
 	case "resize":
 		a.resize(channelID, msg)
 	case "close_channel":
-		a.closeChannel(channelID)
+		a.closeChannel(channelID, msg)
 	case "sftp_op":
-		a.sftpOp(msg)
+		a.dispatchSFTPOp(msg)
 	default:
 		a.writeError(channelID, errProtocolError, fmt.Errorf("unknown message %q", msg.Msg))
 	}
@@ -517,19 +584,197 @@ func (a *agentSession) deliverPromptResponse(msg controlMessage) {
 	}
 }
 
+// dispatchOpenChannel runs openChannel on its own goroutine instead of
+// inline in handleControl, which is called directly from serveFrames' sole
+// frame-reading loop (N2). openChannel's handlers all do blocking SSH work
+// against the remote destination -- NewSession/RequestPty/Start/Shell for a
+// shell/exec, sftp.Stat/Open for an upload/download, client.Listen for a
+// remote forward -- none of which is bounded by any timeout of its own the
+// way tcpDialTimeout already bounds a TCP dial. A slow or malicious SSH
+// server that simply never answers one of these left serveFrames unable to
+// read the next frame at all: not another open_channel, not a
+// prompt_response, not a resize or close_channel for a channel that opened
+// fine moments earlier -- the entire connection froze on that one pending
+// open. Bounded by openChannelSlots the same way dispatchSFTPOp already
+// bounds concurrent SFTP ops, so a client also can't force unbounded
+// goroutines by flooding open_channel requests.
+func (a *agentSession) dispatchOpenChannel(msg controlMessage) {
+	select {
+	case a.openChannelSlots <- struct{}{}:
+		go func() {
+			defer func() { <-a.openChannelSlots }()
+			a.openChannel(msg)
+		}()
+	default:
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("too many concurrent channel opens"))
+	}
+}
+
+// sftpOpTimeout bounds a metadata op (ls/stat/mkdir/rename/...) against the
+// remote server. pkg/sftp's per-call methods (Stat, Rename, MkdirAll, ...)
+// take no context and offer no way to actually cancel an in-flight request,
+// so a caller giving up (cancelling the .NET-side call) only ever stops that
+// caller from waiting -- the goroutine here, and the sftpOpSlots slot it
+// holds, otherwise keeps running until the remote server actually responds.
+// Against a slow or malicious server that never does, enough
+// client-cancelled-but-still-hung ops pile up to permanently exhaust
+// sftpOpSlots (N6), degrading every future SFTP operation on the connection.
+// This can't cancel the request either -- there's nothing here to cancel it
+// with -- but it does guarantee the slot itself is freed after a bounded
+// time regardless, the same tradeoff dialWithTimeout already makes for a
+// forwarding dial with no timeout of its own. A var, not a const, so a test
+// can shrink it rather than waiting out the real 30s to exercise the bound.
+var sftpOpTimeout = 30 * time.Second
+
+func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
+	select {
+	case a.sftpOpSlots <- struct{}{}:
+		done := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { <-a.sftpOpSlots }) }
+		go func() {
+			defer close(done)
+			defer release()
+			if a.sftpOpHandler != nil {
+				a.sftpOpHandler(msg)
+				return
+			}
+			a.sftpOp(msg)
+		}()
+		go func() {
+			select {
+			case <-done:
+				// Finished within the bound; the op above already sent its
+				// own response and released the slot via defer.
+			case <-time.After(sftpOpTimeout):
+				// The op is still outstanding with no way to actually stop
+				// it. Report the timeout now and reclaim the slot
+				// immediately rather than waiting on a response that may
+				// never come; the abandoned goroutine keeps running
+				// harmlessly in the background and, if it does eventually
+				// finish, its late response finds nobody still waiting on
+				// this requestID (dropped, the same as any other orphaned
+				// late response elsewhere in this protocol).
+				a.writeControl(0, controlMessage{
+					Msg:       "error",
+					RequestID: msg.RequestID,
+					Code:      errTimeout,
+					Message:   fmt.Sprintf("sftp %s did not finish within %s", msg.Op, sftpOpTimeout),
+				})
+				release()
+			}
+		}()
+	default:
+		a.writeControl(0, controlMessage{
+			Msg:       "error",
+			RequestID: msg.RequestID,
+			Code:      errUnknown,
+			Message:   "too many concurrent SFTP operations",
+		})
+	}
+}
+
 func (a *agentSession) handleData(channelID uint32, payload []byte) {
 	ch := a.channel(channelID)
-	if ch == nil {
+	if ch == nil || ch.writeQueue == nil {
 		return
 	}
-	switch {
-	case ch.stdin != nil:
-		ch.stdin.Write(payload)
-	case ch.sftpFile != nil:
-		if _, err := ch.sftpFile.Write(payload); err != nil {
-			a.writeError(channelID, classifySFTPError(err), err)
-		}
+
+	// readFrame owns payload only until this call returns. Copy before handing
+	// it to a channel worker, then enqueue without blocking the sole frame
+	// reader. If this bounded queue is full, fail only this channel rather than
+	// allowing one non-reading remote peer to freeze every multiplexed channel.
+	p := append([]byte(nil), payload...)
+	ch.writePending.Add(1)
+	select {
+	case ch.writeQueue <- p:
+	case <-ch.writeStop:
+		ch.writePending.Done()
+	default:
+		ch.writePending.Done()
+		err := fmt.Errorf("channel %d remote input is not being consumed fast enough", channelID)
+		a.writeError(channelID, errUnknown, err)
+		a.failChannelWrite(channelID, ch, err)
 	}
+}
+
+func (a *agentSession) startChannelWriter(channelID uint32, ch *agentChannel) {
+	ch.writeQueue = make(chan []byte, agentChannelWriteQueueDepth)
+	ch.writeStop = make(chan struct{})
+	go func() {
+		for {
+			select {
+			case payload := <-ch.writeQueue:
+				var err error
+				switch {
+				case ch.stdin != nil:
+					_, err = ch.stdin.Write(payload)
+				case ch.sftpFile != nil && ch.isUpload:
+					_, err = ch.sftpFile.Write(payload)
+				}
+				ch.writePending.Done()
+				if err != nil {
+					a.writeError(channelID, classifyChannelWriteError(ch, err), err)
+					a.failChannelWrite(channelID, ch, err)
+					return
+				}
+			case <-ch.writeStop:
+				return
+			}
+		}
+	}()
+}
+
+func stopChannelWriter(ch *agentChannel) {
+	if ch == nil || ch.writeStop == nil {
+		return
+	}
+	ch.writeStopOnce.Do(func() { close(ch.writeStop) })
+}
+
+func classifyChannelWriteError(ch *agentChannel, err error) errorCode {
+	if ch.sftpFile != nil {
+		return classifySFTPError(err)
+	}
+	return errConnectionLost
+}
+
+func (ch *agentChannel) setUploadErr(err error) {
+	ch.uploadErrMu.Lock()
+	defer ch.uploadErrMu.Unlock()
+	if ch.uploadErr == nil {
+		ch.uploadErr = err
+	}
+}
+
+func (ch *agentChannel) getUploadErr() error {
+	ch.uploadErrMu.Lock()
+	defer ch.uploadErrMu.Unlock()
+	return ch.uploadErr
+}
+
+func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err error) {
+	ch.writeFailOnce.Do(func() {
+		if ch.sftpFile != nil && ch.isUpload {
+			ch.setUploadErr(err)
+		}
+		// Closing the underlying operation is what releases a worker already
+		// blocked inside Write. removeChannel is intentionally idempotent here:
+		// close_channel or the normal waiter may have won the race.
+		a.removeChannel(channelID)
+		switch {
+		case ch.session != nil:
+			ch.session.Close()
+		case ch.sftpFile != nil:
+			if ch.cancel != nil {
+				ch.cancel()
+			}
+			ch.sftpFile.Close()
+			if ch.isUpload {
+				a.cleanupUploadTemp(ch)
+			}
+		}
+	})
 }
 
 func (a *agentSession) channel(id uint32) *agentChannel {
@@ -538,22 +783,49 @@ func (a *agentSession) channel(id uint32) *agentChannel {
 	return a.chans[id]
 }
 
+func (a *agentSession) registerChannel(ch *agentChannel) (uint32, error) {
+	a.chansMu.Lock()
+	defer a.chansMu.Unlock()
+
+	// ID 0 is reserved for connection-level control messages. Skip it on
+	// uint32 wrap and never overwrite a still-active channel if a very
+	// long-lived agent eventually cycles through the ID space.
+	for attempts := uint64(0); attempts < uint64(^uint32(0)); attempts++ {
+		id := a.nextID.Add(1)
+		if id == 0 {
+			continue
+		}
+		if _, exists := a.chans[id]; exists {
+			continue
+		}
+		a.chans[id] = ch
+		return id, nil
+	}
+	return 0, fmt.Errorf("no free channel IDs")
+}
+
 func (a *agentSession) openChannel(msg controlMessage) {
 	switch msg.Kind {
 	case "sftp_upload", "sftp_download":
 		a.openSFTPChannel(msg)
-		return
 	case "forward_local", "forward_remote", "forward_socks":
 		a.openForwardChannel(msg)
-		return
+	case "shell", "exec":
+		a.openShellChannel(msg)
+	default:
+		// Fail closed: an unrecognized kind (a protocol bug, version skew,
+		// or a typo) used to fall through to opening an interactive shell,
+		// the same as a legitimate "shell" request -- silently doing the
+		// most privileged thing available instead of refusing what it
+		// doesn't understand.
+		a.writeOpenError(msg.RequestID, errProtocolError, fmt.Errorf("unknown open_channel kind %q", msg.Kind))
 	}
-	a.openShellChannel(msg)
 }
 
 func (a *agentSession) openShellChannel(msg controlMessage) {
 	session, err := a.client().NewSession()
 	if err != nil {
-		a.writeError(0, errUnknown, fmt.Errorf("opening session: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening session: %w", err))
 		return
 	}
 
@@ -575,7 +847,7 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		}
 		if err := session.RequestPty(term, rows, cols, ssh.TerminalModes{}); err != nil {
 			session.Close()
-			a.writeError(0, errUnknown, fmt.Errorf("requesting a pseudo-terminal: %w", err))
+			a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("requesting a pseudo-terminal: %w", err))
 			return
 		}
 	}
@@ -583,38 +855,41 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stdin: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stdin: %w", err))
 		return
 	}
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stdout: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stdout: %w", err))
 		return
 	}
 	stderr, err := session.StderrPipe()
 	if err != nil {
 		session.Close()
-		a.writeError(0, errUnknown, fmt.Errorf("opening remote stderr: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("opening remote stderr: %w", err))
 		return
 	}
 
-	id := a.nextID.Add(1)
 	ch := &agentChannel{session: session, stdin: stdin}
-	a.chansMu.Lock()
-	a.chans[id] = ch
-	a.chansMu.Unlock()
-
-	if err := a.writeControl(id, controlMessage{Msg: "channel_opened"}); err != nil {
-		a.removeChannel(id)
+	id, err := a.registerChannel(ch)
+	if err != nil {
 		session.Close()
+		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
+	a.startChannelWriter(id, ch)
 
+	// RequestAgentForwarding must happen before Start/Shell (the remote
+	// shell only picks up forwarding if it's requested before the shell
+	// process starts), but reporting its failure is deferred until after
+	// channel_opened below -- it's non-fatal to the channel itself (the
+	// shell/exec still works, just without forwarding), and channel_opened
+	// no longer precedes Start/Shell, so there's no longer an already-open
+	// channel to report it on until that's succeeded.
+	var forwardingErr error
 	if a.agentForwardingReady {
-		if err := agent.RequestAgentForwarding(session); err != nil {
-			a.writeError(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", err))
-		}
+		forwardingErr = agent.RequestAgentForwarding(session)
 	}
 
 	switch msg.Kind {
@@ -625,10 +900,29 @@ func (a *agentSession) openShellChannel(msg controlMessage) {
 		err = session.Shell()
 	}
 	if err != nil {
+		// Reported via writeOpenError (correlated by RequestID, not a
+		// channel ID), not writeError: channel_opened is deliberately sent
+		// only once Start/Shell has actually succeeded, so a caller never
+		// sees a channel reported as open that immediately turns out not to
+		// be -- a channel_opened-then-error sequence the caller would have
+		// to specifically account for, versus a single, already-handled
+		// open failure.
 		a.removeChannel(id)
+		stopChannelWriter(ch)
 		session.Close()
-		a.writeError(id, errUnknown, fmt.Errorf("starting session: %w", err))
+		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("starting session: %w", err))
 		return
+	}
+
+	if err := a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID}); err != nil {
+		a.removeChannel(id)
+		stopChannelWriter(ch)
+		session.Close()
+		return
+	}
+
+	if forwardingErr != nil {
+		a.writeWarning(id, errUnknown, fmt.Errorf("requesting agent forwarding: %w", forwardingErr))
 	}
 
 	var wg sync.WaitGroup
@@ -670,6 +964,7 @@ func (a *agentSession) waitChannel(id uint32, ch *agentChannel, wg *sync.WaitGro
 	}
 	a.writeControl(id, controlMessage{Msg: "exit_status", ExitCode: exitCode})
 	a.removeChannel(id)
+	stopChannelWriter(ch)
 }
 
 func (a *agentSession) resize(channelID uint32, msg controlMessage) {
@@ -678,30 +973,56 @@ func (a *agentSession) resize(channelID uint32, msg controlMessage) {
 		return
 	}
 	if msg.Cols <= 0 || msg.Rows <= 0 {
-		a.writeError(channelID, errProtocolError, fmt.Errorf("resize needs positive cols/rows, got %dx%d", msg.Cols, msg.Rows))
+		a.writeWarning(channelID, errProtocolError, fmt.Errorf("resize needs positive cols/rows, got %dx%d", msg.Cols, msg.Rows))
 		return
 	}
 	if err := ch.session.WindowChange(msg.Rows, msg.Cols); err != nil {
-		a.writeError(channelID, errUnknown, fmt.Errorf("resizing: %w", err))
+		a.writeWarning(channelID, errUnknown, fmt.Errorf("resizing: %w", err))
 	}
 }
 
-func (a *agentSession) closeChannel(channelID uint32) {
+func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 	ch := a.removeChannel(channelID)
 	if ch == nil {
 		return
 	}
 	switch {
 	case ch.session != nil:
+		stopChannelWriter(ch)
 		ch.session.Close()
+	case ch.sftpFile != nil && ch.isUpload && msg.Cancelled:
+		// Cancellation is intentionally different from normal EOF: never
+		// commit a partially uploaded staging file just because the caller
+		// closed the channel while unwinding a cancelled/failed UploadAsync.
+		stopChannelWriter(ch)
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+		ch.sftpFile.Close()
+		a.cleanupUploadTemp(ch)
 	case ch.sftpFile != nil && ch.isUpload:
-		a.finalizeUpload(channelID, ch)
+		// All preceding data frames have already been enqueued by the sole
+		// frame reader. Drain them without blocking that reader, then finalize.
+		go func() {
+			ch.writePending.Wait()
+			stopChannelWriter(ch)
+			a.finalizeUpload(channelID, ch)
+		}()
 	case ch.sftpFile != nil:
 		if ch.cancel != nil {
 			ch.cancel()
 		}
 	case ch.listener != nil:
 		ch.listener.Close()
+		// The only terminal signal a forward channel ever gets (see
+		// CloseForwardAsync's own comment on the .NET side): unlike
+		// exec/shell, there's no exit_status to tell a caller the listener
+		// has actually stopped. By the time this control message is sent,
+		// ch.listener.Close() above has already returned, so the caller's
+		// CloseAsync() can now safely rely on the port genuinely being free
+		// again (e.g. to rebind it) instead of only knowing the close
+		// request was sent.
+		a.writeControl(channelID, controlMessage{Msg: "channel_closed"})
 	}
 }
 
@@ -719,6 +1040,7 @@ func (a *agentSession) closeAllChannels() {
 	a.chans = make(map[uint32]*agentChannel)
 	a.chansMu.Unlock()
 	for _, ch := range chans {
+		stopChannelWriter(ch)
 		switch {
 		case ch.session != nil:
 			ch.session.Close()

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/user"
 	"runtime"
 	"strings"
 	"testing"
@@ -58,6 +59,44 @@ func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
 	}
 }
 
+// blockingJumpClient's Dial never returns until unblocked, standing in for
+// a hostile or unresponsive jump host during TestJumpDialerRespectsContext.
+type blockingJumpClient struct {
+	unblock chan struct{}
+}
+
+func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
+	<-b.unblock
+	return nil, errors.New("dial finished after being unblocked, too late to matter")
+}
+
+// TestJumpDialerRespectsContext is a regression test: jumpDialer's returned
+// func used to ignore the context entirely and call via.Dial directly, which
+// takes no context of its own -- so a hostile or unresponsive jump host
+// could hang a connection attempt indefinitely, well past the handshake
+// timeout dialSSHClient thinks it's enforcing.
+func TestJumpDialerRespectsContext(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+
+	dial := jumpDialer(&blockingJumpClient{unblock: unblock}, "host:22")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	conn, err := dial(ctx)
+	if conn != nil {
+		conn.Close()
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("jumpDialer error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("jumpDialer blocked for %s past its context deadline, want it to return promptly", elapsed)
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)
@@ -87,17 +126,26 @@ func TestLooksLikeTailcatAddress(t *testing.T) {
 	}
 }
 
+// TestSplitUserHost is also a regression test: an address with no user@
+// prefix used to always produce an empty SSH username, diverging from
+// ordinary `ssh host` behavior (which defaults to the local OS user). Cases
+// with no @ now expect the local user, looked up the same way the fix does,
+// so the test doesn't hardcode a value tied to whoever runs it.
 func TestSplitUserHost(t *testing.T) {
+	localUser := ""
+	if u, err := user.Current(); err == nil {
+		localUser = u.Username
+	}
 	cases := []struct {
 		dest           string
 		wantUser, want string
 	}{
-		{"example.com", "", "example.com:22"},
-		{"example.com:2222", "", "example.com:2222"},
+		{"example.com", localUser, "example.com:22"},
+		{"example.com:2222", localUser, "example.com:2222"},
 		{"alice@example.com", "alice", "example.com:22"},
 		{"alice@example.com:2222", "alice", "example.com:2222"},
-		{"[::1]", "", "[::1]:22"},
-		{"[::1]:2222", "", "[::1]:2222"},
+		{"[::1]", localUser, "[::1]:22"},
+		{"[::1]:2222", localUser, "[::1]:2222"},
 		{"alice@[::1]:2222", "alice", "[::1]:2222"},
 	}
 	for _, c := range cases {
@@ -268,4 +316,76 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(ctx context.Context, name string) ([]string, error) {
+		if name != "device.example.com" {
+			t.Fatalf("TXT lookup name = %q", name)
+		}
+		return []string{"other=value", "tailcat=tcQUJDRA"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isTailcat || got != "tcQUJDRA" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, "tcQUJDRA")
+	}
+}
+
+// TestResolveAgentDestinationTXTLookupIsOptIn is the security-relevant
+// regression: without allowTXT, a bare hostname must be left as an ordinary
+// SSH destination -- verified via known_hosts' TOFU -- even when a valid
+// "tailcat=" TXT record exists for it. Without this, anyone able to publish
+// a TXT record for a hostname (DNS being far easier to tamper with or
+// misconfigure than a host's own SSH key) could silently redirect trust from
+// known_hosts to Tailcat's own, unrelated authentication for any hostname a
+// caller ever typed, with no indication anything unusual happened.
+func TestResolveAgentDestinationTXTLookupIsOptIn(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		t.Fatal("TXT record looked up despite allowTXT=false")
+		return nil, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "device.example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isTailcat || got != "device.example.com" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want ordinary SSH host, no TXT lookup", got, isTailcat)
+	}
+}
+
+func TestResolveAgentDestinationLeavesOrdinarySSHHostAlone(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		return []string{"unrelated=value"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	got, isTailcat, err := resolveAgentDestination(context.Background(), "ssh.example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isTailcat || got != "ssh.example.com" {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want ordinary SSH host", got, isTailcat)
+	}
+}
+
+func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
+	old := lookupAgentTXT
+	lookupAgentTXT = func(context.Context, string) ([]string, error) {
+		return []string{"tailcat=tcnot-valid!"}, nil
+	}
+	t.Cleanup(func() { lookupAgentTXT = old })
+
+	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com", true); err == nil {
+		t.Fatal("malformed tailcat TXT record was accepted")
+	}
 }

@@ -1,0 +1,51 @@
+diff --git a/cmd/tailcat/managed_parent_linux.go b/cmd/tailcat/managed_parent_linux.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/tailcat/managed_parent_linux.go
+@@ -0,0 +1,46 @@
++//go:build linux || android
++
++package main
++
++import (
++	"os"
++	"strconv"
++	"syscall"
++	"time"
++)
++
++// Managed Meowshell launches cannot safely use PR_SET_PDEATHSIG: Linux ties
++// that signal to the particular parent thread that created the child, so a
++// managed runtime can kill an otherwise healthy Tailcat when only its
++// spawning worker thread exits. The wrapper instead passes the stable host
++// process PID and this watchdog terminates Tailcat only when that process is
++// actually gone/reparented.
++func init() {
++	const env = "MEOWSHELL_MANAGED_PARENT_PID"
++	raw := os.Getenv(env)
++	if raw == "" {
++		return
++	}
++	_ = os.Unsetenv(env)
++
++	pid, err := strconv.Atoi(raw)
++	if err != nil || pid <= 0 {
++		return
++	}
++	if os.Getppid() != pid {
++		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
++		return
++	}
++
++	go func() {
++		ticker := time.NewTicker(250 * time.Millisecond)
++		defer ticker.Stop()
++		for range ticker.C {
++			if os.Getppid() == pid {
++				continue
++			}
++			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
++			return
++		}
++	}()
++}

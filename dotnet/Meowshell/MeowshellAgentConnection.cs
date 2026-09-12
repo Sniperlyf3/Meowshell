@@ -25,6 +25,9 @@ public sealed record MeowshellAgentConfigureOptions
 
     /// <summary>Forward the local ssh-agent (if any) to the remote, once connected.</summary>
     public bool ForwardLocalAgent { get; init; }
+
+    /// <summary>Let a Keystore-backed RSA key (<see cref="KeystoreKeyIds"/>) fall back to the ssh-rsa (SHA-1) signature format for a server that predates RFC 8332 and rejects the SHA-2 RSA formats offered by default. Leave unset unless a specific server is known to need it: OpenSSH itself has refused ssh-rsa by default since 8.8.</summary>
+    public bool AllowLegacyKeyAlgorithms { get; init; }
 }
 
 /// <summary>A host-key prompt: an unrecognized key on a TCP-transport connection, needing a trust-on-first-use decision.</summary>
@@ -63,15 +66,23 @@ public sealed record MeowshellSftpEntry(string Name, long Size, uint Mode, DateT
 public sealed class MeowshellAgentConnection : IAsyncDisposable
 {
     private readonly Process _process;
+    private readonly JobObject? _job;
     private readonly Stream _stdin;
     private readonly Stream _stdout;
     private readonly TailcatDiagnostics _diagnostics = new();
     private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _readLoop;
-    private readonly SemaphoreSlim _openChannelLock = new(1, 1);
     private readonly ConcurrentDictionary<uint, IAgentChannelSink> _channels = new();
+
+    /// <summary>Test-only: how many channels are currently tracked. Not a public API -- a finished channel not being usable is the real, externally observable contract; this just lets a test also assert it isn't still referenced internally.</summary>
+    internal int ChannelCountForTests => _channels.Count;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<AgentMessage>> _pendingRequests = new();
+    private readonly ConcurrentDictionary<string, PendingOpen> _pendingOpens = new();
+    private readonly ConcurrentDictionary<uint, TaskCompletionSource> _pendingCloses = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly SemaphoreSlim _stopLock = new(1, 1);
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly ConcurrentDictionary<Task, byte> _promptTasks = new();
     private long _nextRequestId;
     private bool _stopped;
 
@@ -93,9 +104,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <summary>A Keystore-backed key needs to sign something, under the algorithm in <see cref="MeowshellSignRequest.Algorithm"/>. No handler refuses the signature.</summary>
     public event Func<MeowshellSignRequest, CancellationToken, Task<byte[]>>? SignRequested;
 
-    private MeowshellAgentConnection(Process process)
+    private MeowshellAgentConnection(Process process, JobObject? job)
     {
         _process = process;
+        _job = job;
         _stdin = process.StandardInput.BaseStream;
         _stdout = process.StandardOutput.BaseStream;
         _readLoop = Task.Run(RunReadLoopAsync);
@@ -136,18 +148,22 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         psi.ArgumentList.Add(destination);
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        MeowshellProcessControl.Start(process);
-        var connection = new MeowshellAgentConnection(process);
+        var job = MeowshellProcessControl.Start(process);
+        var connection = new MeowshellAgentConnection(process, job);
         try
         {
             process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;
                 connection._diagnostics.Add(e.Data);
-                connection.Log?.Invoke(e.Data);
+                // Raised on a framework-owned thread with nothing else
+                // watching it: an exception from a Log subscriber must not
+                // be allowed to escape and take the process down over a
+                // logging failure.
+                try { connection.Log?.Invoke(e.Data); } catch { }
             };
             process.BeginErrorReadLine();
 
@@ -179,6 +195,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             KeystoreKeyIds = configure.KeystoreKeyIds?.ToArray(),
             KeystorePublicKeys = ToJagged(configure.KeystorePublicKeys),
             AgentForwarding = configure.ForwardLocalAgent,
+            AllowLegacyKeyAlgorithms = configure.AllowLegacyKeyAlgorithms,
             ProxyUrl = proxyUrl,
         }, cancellationToken);
 
@@ -291,24 +308,35 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var id = await OpenChannelAsync(request,
             (chId, _) => (chId, (IAgentChannelSink)new AgentRequestResponseSink(completion)), cancellationToken).ConfigureAwait(false);
-
-        await using var file = File.OpenRead(localPath);
-        var buffer = new byte[64 * 1024];
-        long sent = 0;
-        int n;
-        while ((n = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            await SendDataAsync(id, buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
-            sent += n;
-            progress?.Report(sent);
-        }
-        await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+        var normalCloseSent = false;
         try
         {
+            await using var file = File.OpenRead(localPath);
+            var buffer = new byte[64 * 1024];
+            long sent = 0;
+            int n;
+            while ((n = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                await SendDataAsync(id, buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
+                sent += n;
+                progress?.Report(sent);
+            }
+            await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            normalCloseSent = true;
             await completion.Task.ConfigureAwait(false);
         }
         finally
         {
+            // Cancellation (or any failure) before the close_channel above
+            // must still tell the agent to stop: otherwise it keeps the
+            // remote file and SFTP channel open for the rest of the
+            // connection's life. Safe to send twice -- a second
+            // close_channel for an already-closed id is a no-op on the
+            // agent side.
+            if (!normalCloseSent)
+            {
+                try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel", Cancelled = true }, CancellationToken.None).ConfigureAwait(false); } catch { }
+            }
             _channels.TryRemove(id, out _);
         }
     }
@@ -327,61 +355,109 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var sink = new AgentDownloadSink();
         var id = await OpenChannelAsync(new AgentMessage { Msg = "open_channel", Kind = "sftp_download", Path = remotePath },
             (chId, opened) => { sink.TotalBytes = opened.Size; return (chId, (IAgentChannelSink)sink); }, cancellationToken).ConfigureAwait(false);
+
+        var finalPath = Path.GetFullPath(localPath);
+        var tempPath = finalPath + ".meowshell-download-" + Guid.NewGuid().ToString("N");
+        var committed = false;
         try
         {
             var total = sink.TotalBytes;
-            await using var file = File.Create(localPath);
-            var stream = sink.Content;
-            var buffer = new byte[64 * 1024];
-            long done = 0;
-            int n;
-            while ((n = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            await using (var file = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
             {
-                await file.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
-                done += n;
-                progress?.Report((done, total));
+                var stream = sink.Content;
+                var buffer = new byte[64 * 1024];
+                long done = 0;
+                int n;
+                while ((n = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    await file.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
+                    done += n;
+                    progress?.Report((done, total));
+                }
+                await sink.Completed.ConfigureAwait(false);
+                await file.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
-            await sink.Completed.ConfigureAwait(false);
+
+            if (preserve)
+            {
+                var stat = await StatAsync(remotePath, cancellationToken: cancellationToken).ConfigureAwait(false);
+                File.SetLastWriteTimeUtc(tempPath, stat.ModifiedAt.UtcDateTime);
+                if (!OperatingSystem.IsWindows())
+                {
+                    try { File.SetUnixFileMode(tempPath, (UnixFileMode)(stat.Mode & 0x1FF)); } catch (PlatformNotSupportedException) { }
+                }
+            }
+
+            File.Move(tempPath, finalPath, overwrite: true);
+            committed = true;
         }
         finally
         {
+            // On the happy path the agent already closed its side once it
+            // hit EOF, so this is a no-op there. On cancellation (or any
+            // other failure) before that, it stops the agent from reading
+            // and sending the rest of a possibly huge remote file that
+            // nothing here is listening for anymore -- cancelling this call
+            // must actually cancel the transfer, not just stop consuming it.
+            try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
             _channels.TryRemove(id, out _);
-        }
-        if (preserve)
-        {
-            var stat = await StatAsync(remotePath, cancellationToken: cancellationToken).ConfigureAwait(false);
-            File.SetLastWriteTimeUtc(localPath, stat.ModifiedAt.UtcDateTime);
-            if (!OperatingSystem.IsWindows())
+            if (!committed)
             {
-                try { File.SetUnixFileMode(localPath, (UnixFileMode)(stat.Mode & 0x1FF)); } catch (PlatformNotSupportedException) { }
+                try { File.Delete(tempPath); } catch { }
             }
         }
     }
 
     /// <summary>"-L": listens locally, forwarding each connection to <paramref name="remoteAddress"/> through the SSH client. A ":0" port in <paramref name="listenAddress"/> gets an OS-assigned one. Refuses to bind anything other than loopback unless <paramref name="allowNonLoopbackBind"/> is true.</summary>
-    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="listenAddress">Local <c>[address]:port</c> to listen on.</param>
+    /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
+    /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
+    /// <param name="maxConnections">Caps how many connections this forward services at once; further connections queue in the listen backlog (or get refused once that fills) instead of piling up unbounded goroutines and file descriptors on the agent. Zero (the default) means unlimited.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-L" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port -- the recommended local endpoint whenever the caller can hand the path to whatever will connect to it.</summary>
-    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="socketPath">Local Unix domain socket path to listen on.</param>
+    /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-R": asks the remote to listen on <paramref name="listenAddress"/>, forwarding each connection it accepts to <paramref name="localAddress"/> on this machine.</summary>
-    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, CancellationToken cancellationToken = default) =>
-        OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, cancellationToken);
+    /// <param name="listenAddress">Remote <c>[address]:port</c> for the server to listen on.</param>
+    /// <param name="localAddress">Local destination <c>host:port</c> to forward accepted connections to.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+        OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-D": runs a local SOCKS5 proxy on <paramref name="listenAddress"/>. By default requires RFC 1929 SOCKS5 auth with a random token -- read it back from <see cref="MeowshellForward.SocksUsername"/>/<see cref="MeowshellForward.SocksPassword"/>.</summary>
-    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, CancellationToken cancellationToken = default)
+    /// <param name="listenAddress">Local <c>[address]:port</c> to listen on.</param>
+    /// <param name="requireAuth">Require SOCKS5 username/password auth.</param>
+    /// <param name="socksUsername">Fixed SOCKS5 username, instead of a generated one.</param>
+    /// <param name="socksPassword">Fixed SOCKS5 password, instead of a generated one.</param>
+    /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
-        return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, cancellationToken);
+        return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, maxConnections, cancellationToken);
     }
 
     /// <summary>"-D" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port. <paramref name="requireAuth"/> defaults to false here, unlike the TCP overload.</summary>
-    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, CancellationToken cancellationToken = default)
+    /// <param name="socketPath">Local Unix domain socket path to listen on.</param>
+    /// <param name="requireAuth">Require SOCKS5 username/password auth.</param>
+    /// <param name="socksUsername">Fixed SOCKS5 username, instead of a generated one.</param>
+    /// <param name="socksPassword">Fixed SOCKS5 password, instead of a generated one.</param>
+    /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
+    /// <param name="cancellationToken">Cancels the open request.</param>
+    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, int maxConnections = 0, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
-        return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, cancellationToken);
+        return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, maxConnections, cancellationToken);
     }
 
     private static (string? Username, string? Password) ResolveSocksAuth(bool requireAuth, string? username, string? password)
@@ -395,13 +471,17 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         (Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(9)),
          Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(18)));
 
-    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, CancellationToken cancellationToken)
+    private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, int maxConnections, CancellationToken cancellationToken)
     {
+        if (maxConnections < 0)
+            throw new ArgumentOutOfRangeException(nameof(maxConnections), maxConnections, "maxConnections must not be negative (0 means unlimited).");
+
         var request = new AgentMessage
         {
             Msg = "open_channel", Kind = kind, ListenAddr = listenAddress, RemoteAddr = remoteAddress,
             ListenNetwork = listenNetwork, AllowNonLoopbackBind = allowNonLoopbackBind,
             SocksUsername = socksUsername, SocksPassword = socksPassword,
+            MaxConnections = maxConnections,
         };
         return OpenChannelAsync(request, (id, opened) =>
         {
@@ -410,42 +490,89 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         }, cancellationToken);
     }
 
-    internal Task CloseForwardAsync(uint id, CancellationToken cancellationToken) =>
-        WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken);
-
-    private async Task<T> OpenChannelAsync<T>(AgentMessage request, Func<uint, AgentMessage, (T Result, IAgentChannelSink? Sink)> makeResult, CancellationToken cancellationToken)
+    internal async Task CloseForwardAsync(uint id, CancellationToken cancellationToken)
     {
-        await _openChannelLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Unlike a shell/exec channel, the agent never sends "exit_status" --
+        // it acknowledges a forward's close explicitly instead, with its own
+        // "channel_closed" (see agent.go's closeChannel), sent only once
+        // ch.listener.Close() has actually returned. Waiting for it here
+        // means a caller can trust that by the time CloseAsync() returns,
+        // the port is genuinely free again (e.g. safe to rebind) rather than
+        // merely that the close request was sent. This explicit close is
+        // also still the only terminal signal that exists at all for a
+        // forward, so it has to also be what removes the local entry:
+        // without it, every forward ever opened on a connection stays in
+        // _channels for the connection's whole lifetime, not just until it's
+        // closed.
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingCloses[id] = tcs;
         try
         {
-            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingOpenSuccess = (id, opened) =>
-            {
-                var (result, sink) = makeResult(id, opened);
-                if (sink is not null) _channels[id] = new AgentChannelDataPump(sink);
-                tcs.TrySetResult(result);
-            };
-            _pendingOpenFailure = ex => tcs.TrySetException(ex);
-            try
-            {
-                await WriteControlAsync(0, request, cancellationToken).ConfigureAwait(false);
-                using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-                return await tcs.Task.ConfigureAwait(false);
-            }
-            finally
-            {
-                _pendingOpenSuccess = null;
-                _pendingOpenFailure = null;
-            }
+            await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+            await tcs.Task.ConfigureAwait(false);
         }
         finally
         {
-            _openChannelLock.Release();
+            _pendingCloses.TryRemove(id, out _);
+            _channels.TryRemove(id, out _);
         }
     }
 
-    private Action<uint, AgentMessage>? _pendingOpenSuccess;
-    private Action<Exception>? _pendingOpenFailure;
+    // Each open_channel request carries its own request ID, correlated
+    // against the response the same way SFTP ops already are -- rather than
+    // one global pending-callback slot. That matters because a single slot
+    // is only safe while calls are strictly serialized: if a caller's
+    // CancellationToken fires while the agent's channel_opened/error for
+    // that request is still in flight, clearing the slot on our side
+    // doesn't stop the agent from creating (or having already created) the
+    // channel. A later call already in flight when that stale response
+    // arrives would previously have silently swallowed it (or worse,
+    // matched it to the wrong caller's request); with each request tracked
+    // by ID, a late response either resolves the right caller or, if
+    // nobody is waiting on it anymore, tells us to close the orphaned
+    // channel immediately (see the "channel_opened"/"error" handling in
+    // HandleControlAsync) instead of leaking it for the life of the
+    // connection.
+    //
+    // OnOpened/OnFailed run synchronously, directly inside HandleControlAsync
+    // as it processes "channel_opened"/"error" -- not as a continuation the
+    // awaiting caller's own task resumes on, which (with the TCS below using
+    // RunContinuationsAsynchronously, as every other completion signal in
+    // this class does) could run arbitrarily later, after the read loop has
+    // already moved on to the next frame. That gap is real: a remote command
+    // that exits essentially immediately can have its exit_status right
+    // behind channel_opened in the same read, and if the new channel isn't
+    // in _channels yet by the time that arrives, it's silently dropped --
+    // the caller's Completed never resolves. Registering the channel here,
+    // as part of handling channel_opened itself, guarantees it's visible to
+    // the very next frame the read loop processes.
+    private readonly record struct PendingOpen(Action<uint, AgentMessage> OnOpened, Action<Exception> OnFailed);
+
+    private async Task<T> OpenChannelAsync<T>(AgentMessage request, Func<uint, AgentMessage, (T Result, IAgentChannelSink? Sink)> makeResult, CancellationToken cancellationToken)
+    {
+        var requestId = NextRequestId();
+        request.RequestId = requestId;
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingOpens[requestId] = new PendingOpen(
+            OnOpened: (channelId, opened) =>
+            {
+                var (result, sink) = makeResult(channelId, opened);
+                if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
+                tcs.TrySetResult(result);
+            },
+            OnFailed: ex => tcs.TrySetException(ex));
+        try
+        {
+            await WriteControlAsync(0, request, cancellationToken).ConfigureAwait(false);
+            using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            _pendingOpens.TryRemove(requestId, out _);
+        }
+    }
 
     internal async Task WriteControlAsync(uint channelId, AgentMessage message, CancellationToken cancellationToken)
     {
@@ -476,7 +603,26 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     await HandleDataAsync(frame.Value.ChannelId, frame.Value.Payload).ConfigureAwait(false);
                     continue;
                 }
-                var msg = System.Text.Json.JsonSerializer.Deserialize<AgentMessage>(frame.Value.Payload, MeowshellAgentProtocol.JsonOptions)!;
+                // Reject explicitly rather than falling through to JSON
+                // parsing: an unrecognized frame type means either the
+                // stream is desynced (in which case trusting the rest of
+                // this frame's bytes as a length-prefixed boundary is
+                // already unsafe) or the agent sent something this build
+                // doesn't understand -- either way, a clear protocol error
+                // beats silently attempting to parse arbitrary bytes as a
+                // control message.
+                if (frame.Value.Type != MeowshellAgentProtocol.FrameTypeControl)
+                    throw new TailcatException("meowshell agent protocol error", 0, $"unknown frame type {frame.Value.Type}");
+                // The null-forgiving deserialize below used to let a literal
+                // JSON "null" control frame turn into an unguarded
+                // NullReferenceException a few lines later (msg.Msg on a
+                // null msg) -- still caught by this method's own try/catch
+                // and still faulting the connection (correctly: a malformed
+                // control frame means this stream can no longer be trusted
+                // to be in sync), but with a confusing exception instead of
+                // a clear protocol-error diagnostic.
+                var msg = System.Text.Json.JsonSerializer.Deserialize<AgentMessage>(frame.Value.Payload, MeowshellAgentProtocol.JsonOptions)
+                    ?? throw new TailcatException("meowshell agent protocol error", 0, "control frame payload was JSON null");
                 await HandleControlAsync(frame.Value.ChannelId, msg).ConfigureAwait(false);
             }
             FaultEverything(new TailcatException("meowshell agent exited unexpectedly", 0, _diagnostics.Tail()));
@@ -504,10 +650,27 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 _connected.TrySetResult();
                 return;
             case "prompt_request":
-                _ = Task.Run(() => HandlePromptAsync(msg));
+                var promptTask = Task.Run(() => HandlePromptAsync(msg));
+                _promptTasks[promptTask] = 0;
+                _ = promptTask.ContinueWith(t => _promptTasks.TryRemove(t, out _), TaskScheduler.Default);
                 return;
             case "channel_opened":
-                _pendingOpenSuccess?.Invoke(channelId, msg);
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openedCallbacks))
+                {
+                    openedCallbacks.OnOpened(channelId, msg);
+                    return;
+                }
+                // Nobody is waiting on this request anymore -- the caller's
+                // CancellationToken fired before this response arrived. The
+                // agent already created the channel on our behalf; without
+                // this, it would leak for the life of the connection.
+                _ = WriteControlAsync(channelId, new AgentMessage { Msg = "close_channel" }, CancellationToken.None);
+                return;
+            case "channel_closed":
+                if (_pendingCloses.TryRemove(channelId, out var closedTcs))
+                {
+                    closedTcs.TrySetResult();
+                }
                 return;
             case "sftp_result":
                 if (msg.RequestId is not null && _pendingRequests.TryRemove(msg.RequestId, out var resultTcs))
@@ -522,16 +685,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     errorTcs.TrySetResult(msg);
                     return;
                 }
+                if (msg.RequestId is not null && _pendingOpens.TryRemove(msg.RequestId, out var openFailedCallbacks))
+                {
+                    openFailedCallbacks.OnFailed(AgentError(msg, "opening a channel"));
+                    return;
+                }
                 if (channelId == 0)
                 {
                     if (!_connected.Task.IsCompleted)
                     {
                         _connected.TrySetException(AgentError(msg, "connecting"));
-                        return;
-                    }
-                    if (MeowshellErrorCodeExtensions.Parse(msg.Code) != MeowshellErrorCode.ConnectionLost && _pendingOpenFailure is { } failure)
-                    {
-                        failure(AgentError(msg, "opening a channel"));
                         return;
                     }
                     FaultEverything(AgentError(msg, "connection"));
@@ -542,6 +705,24 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
         if (_channels.TryGetValue(channelId, out var sink))
             await sink.OnControlAsync(msg).ConfigureAwait(false);
+
+        // "exit_status" always ends a channel, safe to remove on
+        // unconditionally (harmless if Upload/DownloadAsync already did, in
+        // their own finally blocks). A per-channel "error" only ends it when
+        // the agent explicitly says so (N5, see AgentMessage.EndsChannel and
+        // controlMessage.Terminal's own comment on the Go side): some (a
+        // failed agent-forwarding setup, a rejected resize) leave the
+        // channel alive, others (a shell/exec channel dying unexpectedly
+        // with no exit_status to follow) are the only terminal signal that
+        // channel ever gets. Removing on every "error" used to silently drop
+        // all further data/control traffic for a channel that was actually
+        // still running; never removing on one used to leak every channel
+        // whose only terminal signal was an "error" for the life of the
+        // connection -- nothing else ever removed a shell/exec entry once
+        // opened otherwise, on a long-lived connection that opens many short
+        // commands.
+        if (msg.EndsChannel)
+            _channels.TryRemove(channelId, out _);
     }
 
     private async Task HandlePromptAsync(AgentMessage msg)
@@ -553,31 +734,31 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             {
                 case "host_key":
                     if (HostKeyPromptRequested is { } hostKeyHandler)
-                        response.Accept = await hostKeyHandler(new MeowshellHostKeyPrompt(msg.Remote ?? "", msg.Fingerprint ?? ""), CancellationToken.None).ConfigureAwait(false);
+                        response.Accept = await hostKeyHandler(new MeowshellHostKeyPrompt(msg.Remote ?? "", msg.Fingerprint ?? ""), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "password":
                     if (PasswordRequested is { } passwordHandler)
-                        response.Answer = await passwordHandler(msg.Remote ?? "", CancellationToken.None).ConfigureAwait(false);
+                        response.Answer = await passwordHandler(msg.Remote ?? "", _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "passphrase":
                     if (PassphraseRequested is { } passphraseHandler)
-                        response.Answer = await passphraseHandler(CancellationToken.None).ConfigureAwait(false);
+                        response.Answer = await passphraseHandler(_lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "keyboard_interactive":
                     if (KeyboardInteractiveRequested is { } kbdHandler)
-                        response.Answers = await kbdHandler(new MeowshellKeyboardInteractivePrompt(msg.Remote ?? "", msg.Instruction ?? "", msg.Questions ?? [], msg.Echos ?? []), CancellationToken.None).ConfigureAwait(false);
+                        response.Answers = await kbdHandler(new MeowshellKeyboardInteractivePrompt(msg.Remote ?? "", msg.Instruction ?? "", msg.Questions ?? [], msg.Echos ?? []), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
                 case "sign":
                     if (SignRequested is { } signHandler)
-                        response.Signature = await signHandler(new MeowshellSignRequest(msg.KeyId ?? "", msg.Algorithm ?? "", msg.SignData ?? []), CancellationToken.None).ConfigureAwait(false);
+                        response.Signature = await signHandler(new MeowshellSignRequest(msg.KeyId ?? "", msg.Algorithm ?? "", msg.SignData ?? []), _lifetimeCts.Token).ConfigureAwait(false);
                     else
                         response.Cancelled = true;
                     break;
@@ -599,39 +780,76 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private void FaultEverything(Exception ex)
     {
         _connected.TrySetException(ex);
-        _pendingOpenFailure?.Invoke(ex);
+        foreach (var kv in _pendingOpens) kv.Value.OnFailed(ex);
         foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
+        foreach (var kv in _pendingCloses) kv.Value.TrySetException(ex);
         foreach (var kv in _channels) kv.Value.OnFault(ex);
     }
 
     private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(3);
 
-    /// <summary>Ends the connection: closes stdin, then kills the process outright if it has not exited within a few seconds. Safe to call repeatedly.</summary>
+    /// <summary>Ends the connection: closes stdin, then kills the process outright if it has not exited within a few seconds. Safe to call repeatedly, including concurrently.</summary>
     public async Task StopAsync()
     {
-        if (_stopped) return;
-        _stopped = true;
-        if (!_process.HasExited)
+        // _stopLock (not just the _stopped bool it guards) makes this safe
+        // under concurrent callers: an unsynchronized check-then-set let two
+        // overlapping StopAsync/DisposeAsync calls both pass the check
+        // before either set it, each independently closing streams and
+        // racing DisposeAsync's later _process.Dispose()/_writeLock.Dispose()
+        // -- the same pattern TailcatListener.StopAsync already uses.
+        await _stopLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            try { _process.StandardInput.Close(); } catch { }
-            using var grace = new CancellationTokenSource(StopGracePeriod);
-            try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException)
+            if (_stopped) return;
+            _stopped = true;
+
+            // Cancel first, before anything else blocks on shutdown: a
+            // PassphraseRequested/HostKeyPromptRequested/... handler stuck
+            // waiting on a UI that never completes should hear about
+            // cancellation as early as possible, not only once this method
+            // has already finished tearing down the process.
+            _lifetimeCts.Cancel();
+
+            if (!_process.HasExited)
             {
-                // Kill() only requests termination -- it does not wait for the
-                // OS to actually reap the child, so a caller checking liveness
-                // right after StopAsync returns could still see it as running
-                // (a lingering zombie) if we returned here without waiting.
-                MeowshellProcessControl.TryKill(_process);
-                using var killGrace = new CancellationTokenSource(StopGracePeriod);
-                try { await _process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                try { _process.StandardInput.Close(); } catch { }
+                using var grace = new CancellationTokenSource(StopGracePeriod);
+                try { await _process.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException)
+                {
+                    // Kill() only requests termination -- it does not wait for the
+                    // OS to actually reap the child, so a caller checking liveness
+                    // right after StopAsync returns could still see it as running
+                    // (a lingering zombie) if we returned here without waiting.
+                    MeowshellProcessControl.TryKill(_process);
+                    using var killGrace = new CancellationTokenSource(StopGracePeriod);
+                    try { await _process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                }
+            }
+            // Release bounded channel pumps before waiting for the read loop. A
+            // consumer that stopped reading may have backpressured that loop; faulting
+            // its sink completes the pipe and lets shutdown make progress.
+            FaultEverything(new OperationCanceledException("meowshell agent connection stopped"));
+            try { await _readLoop.ConfigureAwait(false); } catch { }
+
+            // Best-effort: give already-cancelled prompt tasks a bounded
+            // window to actually finish (a well-behaved handler observing
+            // _lifetimeCts should return almost immediately) so StopAsync
+            // returning means the connection's own background work is
+            // quiescent, not just that it's been asked to stop. A handler
+            // that ignores cancellation entirely can still outlive this --
+            // there is no way to force an application callback to return --
+            // but it no longer holds up shutdown indefinitely.
+            var pending = _promptTasks.Keys.ToArray();
+            if (pending.Length > 0)
+            {
+                try { await Task.WhenAll(pending).WaitAsync(StopGracePeriod).ConfigureAwait(false); } catch { }
             }
         }
-        // Release bounded channel pumps before waiting for the read loop. A
-        // consumer that stopped reading may have backpressured that loop; faulting
-        // its sink completes the pipe and lets shutdown make progress.
-        FaultEverything(new OperationCanceledException("meowshell agent connection stopped"));
-        try { await _readLoop.ConfigureAwait(false); } catch { }
+        finally
+        {
+            _stopLock.Release();
+        }
     }
 
     /// <summary>Ends the connection and releases everything it holds.</summary>
@@ -639,8 +857,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _process.Dispose();
-        _openChannelLock.Dispose();
+        if (OperatingSystem.IsWindows()) _job?.Dispose();
         _writeLock.Dispose();
+        _lifetimeCts.Dispose();
     }
 }
 
@@ -665,6 +884,12 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         });
     private readonly Task _pumpTask;
 
+    // Touched only from OnDataAsync/OnControlAsync, which the read loop
+    // (RunReadLoopAsync -> HandleDataAsync/HandleControlAsync) only ever
+    // calls one frame at a time on itself -- no concurrent callers, so a
+    // plain bool is enough.
+    private bool _failed;
+
     public AgentChannelDataPump(IAgentChannelSink inner)
     {
         _inner = inner;
@@ -673,30 +898,84 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
 
     private async Task RunAsync()
     {
-        await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        try
         {
-            if (item.IsData)
+            await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
-                catch { }
+                if (item.IsData)
+                {
+                    try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
+                    catch { }
+                }
+                else
+                {
+                    await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
+                }
             }
-            else
-            {
-                await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
-            }
+        }
+        catch (Exception ex)
+        {
+            // _pumpTask (this method) is fire-and-forget -- nothing ever
+            // awaits or observes it -- so an exception escaping here (from
+            // OnControlAsync; OnDataAsync failures are already swallowed
+            // above) would otherwise vanish silently, leaving whatever this
+            // channel's sink represents (an upload, a download, a shell)
+            // hung forever waiting for a completion signal that will now
+            // never arrive. Route it through OnFault so the operation
+            // actually fails instead.
+            try { _inner.OnFault(ex); } catch { }
         }
     }
 
+    // N1: OnDataAsync/OnControlAsync used to await the bounded queue's own
+    // WriteAsync, which blocks once the queue is full (32 items) until this
+    // channel's own RunAsync pump has drained some of it. That awaited
+    // WriteAsync ran directly inside RunReadLoopAsync's single shared frame
+    // loop (via HandleDataAsync/HandleControlAsync), so one channel whose
+    // consumer stalled -- a forward's peer that stops reading, an upload's
+    // destination file starved for disk I/O, anything downstream of
+    // _inner.OnDataAsync -- froze delivery for every other multiplexed
+    // channel on the same connection, not just its own. TryWrite never
+    // blocks: when the queue is already full, this channel alone is failed
+    // (matching the Go agent's own handleData, which does the same "fail
+    // only this channel" thing for the mirror-image direction -- see
+    // agent.go's own comment on failChannelWrite) instead of the shared read
+    // loop ever waiting on it.
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
     {
-        return _queue.Writer.WriteAsync(new QueueItem(true, stream, data, null)).AsTask();
+        if (!TryEnqueue(new QueueItem(true, stream, data, null)))
+            FailBackpressure();
+        return Task.CompletedTask;
     }
 
-    public async Task OnControlAsync(AgentMessage msg)
+    public Task OnControlAsync(AgentMessage msg)
     {
-        await _queue.Writer.WriteAsync(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)).ConfigureAwait(false);
-        if (msg.Msg is "exit_status" or "error")
-            _queue.Writer.TryComplete();
+        if (TryEnqueue(new QueueItem(false, 0, ReadOnlyMemory<byte>.Empty, msg)))
+        {
+            // N5: used to complete on every "error", terminal or not -- a
+            // non-terminal one (a failed agent-forwarding setup, a rejected
+            // resize) closed this queue for writing regardless, so the very
+            // next OnDataAsync/OnControlAsync call for this otherwise
+            // perfectly healthy channel would TryWrite against an already-
+            // completed channel and fail, wrongly faulting it. EndsChannel
+            // is the one shared rule for what actually ends a channel.
+            if (msg.EndsChannel)
+                _queue.Writer.TryComplete();
+        }
+        else
+        {
+            FailBackpressure();
+        }
+        return Task.CompletedTask;
+    }
+
+    private bool TryEnqueue(QueueItem item) => !_failed && _queue.Writer.TryWrite(item);
+
+    private void FailBackpressure()
+    {
+        if (_failed) return;
+        _failed = true;
+        OnFault(new TailcatException("channel data is not being consumed fast enough", 0, ""));
     }
 
     public void OnFault(Exception ex)
@@ -818,10 +1097,21 @@ public sealed class MeowshellAgentShellChannel : IAgentChannelSink, IAsyncDispos
                 _exitCode.TrySetResult(msg.ExitCode);
                 break;
             case "error":
-                var ex = new TailcatException("session failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code));
-                _stdout.Writer.Complete(ex);
-                _stderr.Writer.Complete(ex);
-                _exitCode.TrySetException(ex);
+                // N5: only a terminal "error" (no exit_status will ever
+                // follow for this channel) faults Completed/Output/Error --
+                // a non-terminal one (a failed agent-forwarding setup, a
+                // rejected resize) reports a problem on a channel that's
+                // still running and will still send a real exit_status
+                // later; treating it as fatal here used to end this
+                // channel's public API over a hiccup that never actually
+                // stopped it.
+                if (msg.EndsChannel)
+                {
+                    var ex = new TailcatException("session failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code));
+                    _stdout.Writer.Complete(ex);
+                    _stderr.Writer.Complete(ex);
+                    _exitCode.TrySetException(ex);
+                }
                 break;
         }
         return Task.CompletedTask;

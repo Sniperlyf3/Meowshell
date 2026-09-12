@@ -40,11 +40,26 @@ type pipeConn struct {
 func (c *pipeConn) Read(p []byte) (int, error)  { return c.stdout.Read(p) }
 func (c *pipeConn) Write(p []byte) (int, error) { return c.stdin.Write(p) }
 
+// pipeConnCloseGrace bounds how long Close waits for the tailcat subprocess
+// to exit after its stdin/stdout are closed, before killing it outright. A
+// subprocess that ignores (or never notices) that closure -- hung, wedged,
+// or simply not watching for it -- would otherwise make cmd.Wait() block
+// forever, turning a bounded SSH handshake timeout (Close is invoked from
+// dialSSHClient's context.AfterFunc on expiry) into an unbounded hang.
+const pipeConnCloseGrace = 5 * time.Second
+
 func (c *pipeConn) Close() error {
 	c.once.Do(func() {
 		c.stdin.Close()
 		c.stdout.Close()
-		c.err = c.cmd.Wait()
+		done := make(chan error, 1)
+		go func() { done <- c.cmd.Wait() }()
+		select {
+		case c.err = <-done:
+		case <-time.After(pipeConnCloseGrace):
+			c.cmd.Process.Kill()
+			c.err = <-done
+		}
 		var exitErr *exec.ExitError
 		if errors.As(c.err, &exitErr) {
 			c.err = nil
@@ -66,6 +81,24 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "tailcat" }
 func (pipeAddr) String() string  { return "tailcat" }
 
+// modernSSHAlgorithms restricts key exchange, cipher, MAC, and host-key
+// algorithm negotiation to golang.org/x/crypto/ssh's own SupportedAlgorithms
+// set (N11): without this, an unconfigured ssh.ClientConfig falls back to
+// the package's *default* lists, which -- for compatibility with very old
+// servers -- still include algorithms the same package classifies as
+// insecure (SHA-1 key exchange, 96-bit truncated HMAC, DSA and ssh-rsa/SHA-1
+// host keys). Explicitly restricting to SupportedAlgorithms() means a server
+// that only offers those legacy algorithms fails the handshake instead of
+// silently downgrading to them.
+func modernSSHAlgorithms() (ssh.Config, []string) {
+	algos := ssh.SupportedAlgorithms()
+	return ssh.Config{
+		KeyExchanges: algos.KeyExchanges,
+		Ciphers:      algos.Ciphers,
+		MACs:         algos.MACs,
+	}, algos.HostKeys
+}
+
 func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, hostKeyCallback ssh.HostKeyCallback, auth []ssh.AuthMethod) (*ssh.Client, error) {
 	handshakeCtx, cancel := context.WithTimeout(ctx, sshHandshakeTimeout)
 	defer cancel()
@@ -73,12 +106,15 @@ func dialSSHClient(ctx context.Context, dial dialer, remoteAddr, user string, ho
 	if err != nil {
 		return nil, err
 	}
+	cryptoConfig, hostKeyAlgos := modernSSHAlgorithms()
 	stopCancellation := context.AfterFunc(handshakeCtx, func() { conn.Close() })
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, remoteAddr, &ssh.ClientConfig{
-		User:            user,
-		HostKeyCallback: hostKeyCallback,
-		Auth:            auth,
-		Timeout:         sshHandshakeTimeout,
+		Config:            cryptoConfig,
+		HostKeyAlgorithms: hostKeyAlgos,
+		User:              user,
+		HostKeyCallback:   hostKeyCallback,
+		Auth:              auth,
+		Timeout:           sshHandshakeTimeout,
 	})
 	stoppedCancellation := stopCancellation()
 	if err != nil {

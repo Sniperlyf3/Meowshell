@@ -53,9 +53,6 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     /// <summary>Contents of a tailcat *.private.json, supplied at runtime rather than stored on the device. Piped to meowshell on stdin, never exists as a named file.</summary>
     public string? PrivateKeyJson { get; init; }
 
-    /// <summary>How long to wait for the server to publish its address.</summary>
-    public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
-
     /// <summary>Embed the DERP server's own info in the published address instead of a region reference. Passed to tailcat's own <c>--full-address</c>.</summary>
     public bool FullAddress { get; init; }
 
@@ -91,10 +88,20 @@ public sealed record MeowshellOptions : TailcatListenerOptions
             Lifetime = lifetime,
         };
 #else
+        // N3: this used to be Path.Combine(Path.GetTempPath(), "meowshell")
+        // -- a fixed, predictable name inside a directory every local user
+        // can write to, so anyone who got there first could plant a
+        // symlink at that exact path (redirecting session key material and
+        // known_hosts, since this becomes HOME for the spawned process,
+        // wherever they chose) or simply leave the directory readable by
+        // others. MeowshellHomeDirectory.ResolveDefault() resolves a
+        // private, per-user location instead and verifies (or establishes)
+        // that it's actually private before handing it back.
+        var homeDir = MeowshellHomeDirectory.ResolveDefault();
         return new MeowshellOptions
         {
-            HomeDirectory = Path.Combine(Path.GetTempPath(), "meowshell"),
-            WorkDirectory = Path.GetTempPath(),
+            HomeDirectory = homeDir,
+            WorkDirectory = homeDir,
             Lifetime = lifetime,
         };
 #endif
@@ -108,6 +115,9 @@ public sealed class MeowshellServer : IAsyncDisposable
     private readonly TailcatListener _listener;
     private readonly string _addressFile;
     private readonly CancellationTokenSource _deadline = new();
+    private Task _deadlineTask = Task.CompletedTask;
+
+    internal Task DeadlineTaskForTests => _deadlineTask;
 
     /// <summary>The tailcat address clients connect to: <c>tailcat ssh &lt;address&gt;</c>.</summary>
     public string Address { get; private set; } = "";
@@ -144,10 +154,14 @@ public sealed class MeowshellServer : IAsyncDisposable
     /// <exception cref="ArgumentException">Both authentication modes were set, nothing was chosen to serve, or <see cref="MeowshellOptions.Files"/> was combined with a forced command on the ssh/no-auth-ssh service.</exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
     /// <exception cref="TailcatException">tailcat exited before publishing an address.</exception>
-    /// <exception cref="TimeoutException">No address appeared within <see cref="MeowshellOptions.StartTimeout"/>.</exception>
+    /// <exception cref="TimeoutException">No address appeared within <see cref="TailcatListenerOptions.StartTimeout"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
+        TimeSpanValidation.EnsurePositiveAndBounded(options.Lifetime, nameof(options.Lifetime));
+        TimeSpanValidation.EnsurePositiveAndBounded(options.StartTimeout, nameof(options.StartTimeout));
+        TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
+
         var hasSSH = !string.IsNullOrEmpty(options.AuthorizedKeys) || options.InsecureNoAuth;
         if (!string.IsNullOrEmpty(options.AuthorizedKeys) && options.InsecureNoAuth)
         {
@@ -217,9 +231,17 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         psi.Environment["TMPDIR"] = options.WorkDirectory;
         psi.Environment["TAILCAT_ADDR_FILE"] = addressFile;
+        if (options.ProcessEnvironmentOverrides is not null)
+        {
+            foreach (var (name, value) in options.ProcessEnvironmentOverrides)
+            {
+                if (value is null) psi.Environment.Remove(name);
+                else psi.Environment[name] = value;
+            }
+        }
 
         var process = new Process { StartInfo = psi };
         MeowshellServer? server = null;
@@ -231,8 +253,23 @@ public sealed class MeowshellServer : IAsyncDisposable
 
             if (options.PrivateKeyJson is not null)
             {
-                await process.StandardInput.WriteAsync(options.PrivateKeyJson)
-                    .ConfigureAwait(false);
+                // Bounded by StartTimeout the same way WaitForAddressAsync
+                // below is: a plain, unbounded WriteAsync here means a child
+                // that starts but never consumes stdin can hang StartAsync
+                // indefinitely, before StartTimeout ever gets a chance to
+                // apply -- and the caller's own cancellationToken alone
+                // wouldn't add a bound if they left it at the default.
+                using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                writeTimeout.CancelAfter(options.StartTimeout);
+                try
+                {
+                    await process.StandardInput.WriteAsync(options.PrivateKeyJson.AsMemory(), writeTimeout.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"writing the private key to tailcat's stdin did not finish within {options.StartTimeout}");
+                }
                 process.StandardInput.Close();
             }
 
@@ -277,7 +314,7 @@ public sealed class MeowshellServer : IAsyncDisposable
         }
     }
 
-    private void StartDeadline() => _ = Task.Run(async () =>
+    private void StartDeadline() => _deadlineTask = Task.Run(async () =>
     {
         try
         {
@@ -305,6 +342,12 @@ public sealed class MeowshellServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        // Observed rather than left to fault silently as an unobserved task
+        // exception: StopAsync() above already cancels _deadline, so this
+        // normally only awaits OperationCanceledException home, but nothing
+        // upstream should have to trust that StartDeadline's background task
+        // can never fail any other way.
+        try { await _deadlineTask.ConfigureAwait(false); } catch { }
         _deadline.Dispose();
         await _listener.DisposeAsync().ConfigureAwait(false);
     }

@@ -38,6 +38,11 @@ public sealed class PackageConsumptionTests : IDisposable
             WorkDirectory = Path.Combine(_dir, "work"),
             InsecureNoAuth = true,
             StartTimeout = TimeSpan.FromSeconds(30),
+            ProcessEnvironmentOverrides = new Dictionary<string, string?>
+            {
+                ["TS_DEBUG_TAILCAT_LOCAL_DERP"] = "1",
+                ["TAILCAT_DERPMAP_URL"] = "none",
+            },
         };
 
         await using var server = await MeowshellServer.StartAsync(options);

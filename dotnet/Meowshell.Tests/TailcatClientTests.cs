@@ -59,6 +59,56 @@ public sealed class TailcatClientTests : IDisposable
         };
     }
 
+
+    [Fact]
+    public void ApplyHomeOverridesInheritedPlatformConfigRoot()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        var home = Path.Combine(_dir, "isolated-home");
+
+        if (OperatingSystem.IsWindows())
+        {
+            psi.Environment["APPDATA"] = @"C:\\attacker\\roaming";
+            psi.Environment["LOCALAPPDATA"] = @"C:\\attacker\\local";
+        }
+        else
+        {
+            psi.Environment["XDG_CONFIG_HOME"] = "/tmp/attacker-config";
+        }
+
+        TailcatProcessEnvironment.ApplyHome(psi, home);
+
+        Assert.Equal(home, psi.Environment["HOME"]);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(Path.Combine(home, "AppData", "Roaming"), psi.Environment["APPDATA"]);
+            Assert.Equal(Path.Combine(home, "AppData", "Local"), psi.Environment["LOCALAPPDATA"]);
+        }
+        else
+        {
+            Assert.Equal(Path.Combine(home, ".config"), psi.Environment["XDG_CONFIG_HOME"]);
+        }
+    }
+
+    // Regression test for N13: the low-level RunAsync used to hand Timeout
+    // straight to `new CancellationTokenSource(timeout)` after the process
+    // was already started (`using var process = ...; using var job =
+    // MeowshellProcessControl.Start(process);` both precede it), so an
+    // invalid Timeout (negative, or too large for CancellationTokenSource's
+    // int-milliseconds range) threw only after spawning a child that nothing
+    // then held a reference to kill -- disposing a Process does not kill it.
+    // argsFile is written by the fake tailcat's own stdout redirection as
+    // soon as it actually runs, so its absence proves the process never started.
+    [Fact]
+    public async Task GenerateKeyRejectsAnInvalidTimeoutWithoutStartingTheProcess()
+    {
+        var (options, argsFile) = Fake("echo tcTHEADDRESS000000000000\n");
+        var bad = options with { Timeout = TimeSpan.FromSeconds(-5) };
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => TailcatClient.GenerateKeyAsync(
+            bad, new TailcatKeyOptions { Name = "test-key" }));
+        Assert.False(File.Exists(argsFile), "the tailcat process was started despite an invalid Timeout");
+    }
+
     [Fact]
     public async Task GenerateKeyReturnsTheLastLineOfOutput()
     {
@@ -367,6 +417,16 @@ public sealed class TailcatClientTests : IDisposable
     }
 
     [Fact]
+    public async Task ListFilesRejectsAnOverflowingSizeAsATailcatException()
+    {
+        var (options, _) = Fake("printf -- '-rw-r--r-- 999999999999999999999999999 Sep  9 10:56 huge.txt\\n'\n");
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => TailcatClient.ListFilesAsync(options, "tcADDR", longListing: true));
+        Assert.Equal(0, ex.ExitCode);
+        Assert.Contains("64-bit", ex.Message);
+    }
+
+    [Fact]
     public async Task ListFilesThrowsOnFailure()
     {
         var (options, argsFile) = Fake("echo 'no such file' >&2\nexit 1\n");
@@ -401,6 +461,17 @@ public sealed class TailcatClientTests : IDisposable
         var (options, _) = Fake("");
         await Assert.ThrowsAsync<ArgumentException>(
             () => TailcatClient.ListFilesAsync(options, TailcatPath.Local("not-remote")));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("tc")]
+    [InlineData("not-an-address")]
+    [InlineData("tcgarbage!")]
+    [InlineData("tcA")]
+    public void TailcatAddressRejectsMalformedValues(string value)
+    {
+        Assert.Throws<FormatException>(() => new TailcatAddress(value));
     }
 
     [Fact]
@@ -509,6 +580,20 @@ public sealed class TailcatClientTests : IDisposable
         var (options, _) = Fake("exec sleep 300\n");
         var timed = options with { Timeout = TimeSpan.FromMilliseconds(500) };
         await Assert.ThrowsAsync<TimeoutException>(() => TailcatClient.ResolveAsync(timed, "tcADDR"));
+    }
+
+    // Regression test: RunAsync used to buffer stdout/stderr with an
+    // unbounded ReadToEndAsync, so a misbehaving tailcat binary (or a
+    // destination able to influence output, e.g. what a hostile server
+    // returns to "ls") could grow memory without any cap. 20MB comfortably
+    // exceeds the 16MiB limit while staying fast to generate and pipe.
+    [Fact]
+    public async Task ThrowsAndKillsTheProcessWhenOutputExceedsTheSizeLimit()
+    {
+        var (options, _) = Fake("yes 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | head -c 20000000\n");
+        var timed = options with { Timeout = TimeSpan.FromSeconds(30) };
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.ResolveAsync(timed, "tcADDR"));
+        Assert.Contains("bytes of output", ex.Message);
     }
 
     [Fact]

@@ -17,7 +17,11 @@ internal sealed class TailcatListener : IAsyncDisposable
     private readonly SemaphoreSlim _stopLock = new(1, 1);
     private readonly TailcatDiagnostics _diagnostics = new();
     private JobObject? _job;
+    private Task _exitObserver = Task.CompletedTask;
+    private int _exitObserverStarted;
     private bool _stopped;
+
+    internal Task ExitObserverForTests => _exitObserver;
 
     public Process Process { get; }
 
@@ -37,29 +41,59 @@ internal sealed class TailcatListener : IAsyncDisposable
         var listener = new TailcatListener(process, gracePeriod);
         // Subscribe before Start: a malformed command can exit quickly enough
         // that registering afterwards misses Exited and leaves Completed hung.
-        process.Exited += async (_, _) =>
+        process.Exited += (_, _) => listener.StartExitObserver();
+        process.OutputDataReceived += (_, e) =>
         {
-            await process.WaitForExitAsync().ConfigureAwait(false);
-            if (listener._stopped) listener._exited.TrySetResult();
-            else listener._exited.TrySetException(new TailcatException(
-                "tailcat exited unexpectedly", process.ExitCode, listener._diagnostics.Tail()));
+            if (e.Data is null) return;
+            // Raised on a framework-owned thread with nothing else watching
+            // it: an exception from a Log subscriber (or onLog) must not be
+            // allowed to escape and take the process down over a logging
+            // failure.
+            try { listener.Log?.Invoke(e.Data); } catch { }
+            try { onLog?.Invoke(e.Data); } catch { }
         };
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) { listener.Log?.Invoke(e.Data); onLog?.Invoke(e.Data); } };
         process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is null) return;
             listener._diagnostics.Add(e.Data);
-            listener.Log?.Invoke(e.Data);
-            onLog?.Invoke(e.Data);
+            try { listener.Log?.Invoke(e.Data); } catch { }
+            try { onLog?.Invoke(e.Data); } catch { }
         };
-        MeowshellProcessControl.Start(process);
-        if (OperatingSystem.IsWindows())
-        {
-            listener._job = JobObject.Wrap(process);
-        }
+        listener._job = MeowshellProcessControl.Start(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         return listener;
+    }
+
+    private void StartExitObserver()
+    {
+        if (Interlocked.Exchange(ref _exitObserverStarted, 1) != 0) return;
+        _exitObserver = ObserveExitAsync();
+    }
+
+    private async Task ObserveExitAsync()
+    {
+        try
+        {
+            await Process.WaitForExitAsync().ConfigureAwait(false);
+            // Process.Exited / WaitForExitAsync can observe process exit before
+            // BeginErrorReadLine's final buffered ErrorDataReceived callbacks
+            // have run. The parameterless synchronous WaitForExit() is special:
+            // once the process is already dead it also waits for redirected
+            // async stream handlers to finish. Without this drain, a fast
+            // startup failure can lose the *actual* fatal stderr line and leave
+            // diagnostics containing only warnings printed immediately before
+            // it, which made relay/server flakes effectively impossible to
+            // diagnose from CI.
+            Process.WaitForExit();
+            if (_stopped) _exited.TrySetResult();
+            else _exited.TrySetException(new TailcatException(
+                "tailcat exited unexpectedly", Process.ExitCode, _diagnostics.Tail()));
+        }
+        catch (Exception ex)
+        {
+            _exited.TrySetException(ex);
+        }
     }
 
     public async Task ThrowIfExitedAsync(string summary, CancellationToken cancellationToken = default)
@@ -96,6 +130,7 @@ internal sealed class TailcatListener : IAsyncDisposable
                     try { await Process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
                 }
             }
+            StartExitObserver();
             _exited.TrySetResult();
         }
         finally
@@ -107,6 +142,7 @@ internal sealed class TailcatListener : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        try { await _exitObserver.ConfigureAwait(false); } catch { }
         _stopLock.Dispose();
         Process.Dispose();
         if (OperatingSystem.IsWindows())

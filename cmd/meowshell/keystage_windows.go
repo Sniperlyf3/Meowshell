@@ -1,42 +1,42 @@
 package main
 
-import (
-	"fmt"
-	"os"
-	"sync"
-)
+import "sync"
 
 var (
 	stagedKeyMu   sync.Mutex
-	stagedKeyPath string
+	stagedKeyData []byte
 )
 
-func stageKey(dir string, data []byte) (string, error) {
-	f, err := os.CreateTemp(dir, "meowshell-key-*")
-	if err != nil {
-		return "", fmt.Errorf("staging key: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", fmt.Errorf("writing staged key: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", fmt.Errorf("closing staged key: %w", err)
-	}
+// stageKey deliberately does not create a named temporary file on Windows.
+// The bundled tailcat is patched to interpret --key=- as "read the private
+// key JSON from stdin"; runTailcat pipes this in-memory copy to the child after
+// it starts. That removes both the old arbitrary one-second deletion race and
+// private-key residue if meowshell is terminated abnormally.
+func stageKey(_ string, data []byte) (string, error) {
 	stagedKeyMu.Lock()
-	stagedKeyPath = f.Name()
-	stagedKeyMu.Unlock()
-	return f.Name(), nil
+	defer stagedKeyMu.Unlock()
+	zeroBytes(stagedKeyData)
+	stagedKeyData = append([]byte(nil), data...)
+	return "-", nil
+}
+
+func takeStagedKey() []byte {
+	stagedKeyMu.Lock()
+	defer stagedKeyMu.Unlock()
+	data := stagedKeyData
+	stagedKeyData = nil
+	return data
 }
 
 func cleanupStagedKey() {
 	stagedKeyMu.Lock()
-	path := stagedKeyPath
-	stagedKeyPath = ""
-	stagedKeyMu.Unlock()
-	if path != "" {
-		os.Remove(path)
+	defer stagedKeyMu.Unlock()
+	zeroBytes(stagedKeyData)
+	stagedKeyData = nil
+}
+
+func zeroBytes(p []byte) {
+	for i := range p {
+		p[i] = 0
 	}
 }

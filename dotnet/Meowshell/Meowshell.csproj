@@ -32,6 +32,14 @@
           Pack="true" PackagePath="buildTransitive/net10.0-android36.0/" />
   </ItemGroup>
 
+  <!-- Lets Meowshell.Tests assert on internal state directly (e.g. that a
+       finished channel is actually removed, not just publicly observable as
+       "no longer usable") for lifecycle bugs that have no other externally
+       visible symptom to test against. Doesn't change what's public. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Meowshell.Tests" />
+  </ItemGroup>
+
   <!-- MeowshellAgentConnection's channel Output/Error streams are backed by
        Pipe: an async producer (the agent's read loop) writing frames as
        they arrive, a consumer reading them as an ordinary Stream. Framework-

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Meowshell;
@@ -67,29 +66,30 @@ public sealed class MeowshellListenersE2ETests : IDisposable
     {
         var real = RealBinaries();
         if (real is null) return;
-        var (bin, tailcatPath) = real.Value;
+        var (bin, _) = real.Value;
 
-        var configDir = Path.Combine(_dir, "keyconfig");
-        Directory.CreateDirectory(configDir);
-        var genkeyPsi = new ProcessStartInfo(tailcatPath)
+        // tailcat forward now pings the remote peer before announcing
+        // readiness (it no longer trusts a bound local listener alone --
+        // the first accepted connection used to be what actually brought
+        // the DERP/WireGuard path up, which could lose that race). A bare
+        // genkey'd address with nothing listening behind it can no longer
+        // stand in for "a forward target"; this needs a real, reachable
+        // server the same way every other real-binary E2E here does.
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        };
-        genkeyPsi.ArgumentList.Add("genkey");
-        genkeyPsi.ArgumentList.Add("--key=forward-e2e");
-        genkeyPsi.Environment["XDG_CONFIG_HOME"] = configDir;
-        using var genkey = Process.Start(genkeyPsi)!;
-        var address = (await genkey.StandardOutput.ReadToEndAsync()).Trim();
-        var exited = await Task.Run(() => genkey.WaitForExit(30_000));
-        Assert.True(exited, "tailcat genkey did not exit in time");
-        Assert.NotEmpty(address);
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "server-home"),
+            WorkDirectory = Path.Combine(_dir, "server-work"),
+            InsecureNoAuth = true,
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        });
 
         await using var forward = await MeowshellPortForward.StartAsync(new MeowshellPortForwardOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "home2"),
-            Address = address,
+            Address = server.Address,
             Mappings = ["0:80"],
         });
 
@@ -129,7 +129,8 @@ public sealed class MeowshellListenersE2ETests : IDisposable
         });
         var backendPort = ((IPEndPoint)backend.LocalEndpoint).Port;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        var serverLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -138,40 +139,57 @@ public sealed class MeowshellListenersE2ETests : IDisposable
             AllowExitNode = true,
             Lifetime = TimeSpan.FromMinutes(2),
             StartTimeout = TimeSpan.FromSeconds(30),
-        });
+        }, onLog: serverLogs.Enqueue);
 
+        // StartAsync now has a production readiness contract: it returns
+        // only after tailcat has bound every requested local listener, and
+        // exposes the actual OS-assigned address directly. Applications no
+        // longer need to parse diagnostic logs or race listener startup.
+        var forwardLogs = new System.Collections.Concurrent.ConcurrentQueue<string>();
         await using var forward = await MeowshellPortForward.StartAsync(new MeowshellPortForwardOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "forward-home"),
             Address = server.Address,
             Mappings = [$"0:{backendPort}"],
-        });
+            StartTimeout = TimeSpan.FromSeconds(30),
+        }, forwardLogs.Enqueue);
+        var boundAddress = Assert.Single(forward.BoundAddresses);
 
-        var boundAddressFound = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        forward.Log += line =>
-        {
-            var marker = "forwarding ";
-            var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var rest = line[(at + marker.Length)..];
-            var end = rest.IndexOf(' ');
-            if (end > 0) boundAddressFound.TrySetResult(rest[..end]);
-        };
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        using var registration = cts.Token.Register(() => boundAddressFound.TrySetCanceled());
-        var boundAddress = await boundAddressFound.Task;
-
+        // "forwarding <addr> -> ..." means only that tailcat's local listener
+        // is bound.  The client-side tailcat connection is lazy: the first
+        // accepted TCP connection is what brings the DERP/WireGuard path up.
+        // Under load that first attempt can legitimately lose the race and
+        // close with EOF before the exit-node route is ready (upstream
+        // tailcat's analogous exit-node-forward test documents the same
+        // transient reset).  Treat this as readiness probing, not as the one
+        // and only assertion attempt.  A real regression still fails after
+        // the bounded overall deadline.
+        // StartAsync now waits for the forward listener to bind, and the
+        // patched tailcat forward preflights the Tailcat peer before it ever
+        // publishes that readiness. The first application connection must
+        // therefore work immediately; retrying here would hide a real runtime
+        // readiness regression that programmatic callers would still hit.
+        var endpoint = IPEndPoint.Parse(boundAddress);
         using var socket = new TcpClient();
-        await socket.ConnectAsync(IPEndPoint.Parse(boundAddress), cts.Token);
-        using var readCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var attemptCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await socket.ConnectAsync(endpoint, attemptCts.Token);
+
         var buffer = new byte[256];
         var total = 0;
-        int n;
-        while (total < buffer.Length && (n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), readCts.Token)) > 0)
+        while (total < buffer.Length)
+        {
+            var n = await socket.GetStream().ReadAsync(buffer.AsMemory(total), attemptCts.Token);
+            if (n == 0) break;
             total += n;
+            if (total >= System.Text.Encoding.UTF8.GetByteCount(backendReply)) break;
+        }
         var got = System.Text.Encoding.UTF8.GetString(buffer, 0, total);
-        Assert.Equal(backendReply, got);
+
+        Assert.True(
+            got == backendReply,
+            "first connection after StartAsync was not ready; " +
+            $"received={got}; forward logs: {string.Join(" || ", forwardLogs)}; " +
+            $"server logs: {string.Join(" || ", serverLogs)}");
     }
 }

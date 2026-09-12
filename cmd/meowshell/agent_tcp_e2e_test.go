@@ -16,6 +16,58 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// TestNonTerminalErrorDoesNotEndTheChannel is a regression test for N5: a
+// non-terminal "error" (a rejected resize request, here -- agent-forwarding
+// setup failure is the other real-world case) used to be wire-indistinguishable
+// from a terminal one, and MeowshellAgentConnection's AgentChannelDataPump
+// treated every "error" as ending the channel's own data queue regardless.
+// Sends an invalid resize for a channel that's still very much alive and
+// confirms both that the error carries Terminal: false, and that the channel
+// keeps working normally afterward (a real exec command run against it still
+// completes and returns its output).
+func TestNonTerminalErrorDoesNotEndTheChannel(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	addr, _, stop := startTestSSHServer(t, echoCommandHandler)
+	defer stop()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+	defer stopAgent(t, cmd, stdin)
+
+	f := mustReadFrame(t, out)
+	msg := decodeControl(t, f)
+	if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+		t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+	}
+	send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Accept: true})
+	expectConnected(t, out)
+
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "shell", RequestID: "req1"})
+	id := expectChannelOpened(t, out)
+
+	send(t, stdin, id, controlMessage{Msg: "resize", Cols: -1, Rows: -1})
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("resize with invalid cols/rows = %+v, want an \"error\"", msg)
+	}
+	if msg.Terminal == nil || *msg.Terminal {
+		t.Errorf("resize error Terminal = %v, want a non-nil false: a rejected resize must not end the channel", msg.Terminal)
+	}
+
+	// Prove the channel is still alive and tracked (not removed as a side
+	// effect of the "error" above) by triggering the same rejection again:
+	// if the channel had wrongly been removed, resize() would find nothing
+	// under this ID and send nothing back at all, so this would time out
+	// instead of promptly getting a second "error".
+	send(t, stdin, id, controlMessage{Msg: "resize", Cols: -1, Rows: -1})
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("second resize after the first was rejected = %+v, want another \"error\" (the channel must still be tracked)", msg)
+	}
+}
+
 func TestAgentTCPEndToEnd(t *testing.T) {
 	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
 
@@ -75,6 +127,260 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 			t.Fatalf("connecting with a changed host key = %+v, want an error with code %q", msg, errHostKeyChanged)
 		}
 	})
+}
+
+// TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError is a
+// regression test: openShellChannel used to send channel_opened before
+// calling session.Start/session.Shell, so a failure there produced a
+// misleading channel_opened immediately followed by an error -- instead of
+// a single, correctly-correlated open failure the caller never has to
+// unwind a "successfully opened" channel for. A server that rejects the
+// exec request lets the test trigger that failure deterministically.
+func TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	addr, stop := startTestSSHServerRejectingSessionStart(t)
+	defer stop()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+	defer stopAgent(t, cmd, stdin)
+
+	f := mustReadFrame(t, out)
+	msg := decodeControl(t, f)
+	if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+		t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+	}
+	send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Accept: true})
+	expectConnected(t, out)
+
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"anything"}, RequestID: "req1"})
+
+	f = mustReadFrame(t, out)
+	msg = decodeControl(t, f)
+	if msg.Msg != "error" {
+		t.Fatalf("open_channel against a server that rejects the exec request = %+v, want a single \"error\" (not a channel_opened)", msg)
+	}
+	if msg.RequestID != "req1" {
+		t.Errorf("error RequestID = %q, want %q -- the open failure must correlate to the open_channel request, not arrive as a channel_opened followed by a separate error", msg.RequestID, "req1")
+	}
+}
+
+// startTestSSHServerRejectingSessionStart accepts session channels but
+// always rejects the "exec"/"shell" request that session.Start/session.Shell
+// send to actually start the remote command -- deterministically forcing
+// openShellChannel's post-open failure path without needing a flaky timing
+// trick.
+func startTestSSHServerRejectingSessionStart(t *testing.T) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, config)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					if newCh.ChannelType() != "session" {
+						newCh.Reject(ssh.UnknownChannelType, "unsupported")
+						continue
+					}
+					ch, requests, err := newCh.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						defer ch.Close()
+						for req := range requests {
+							switch req.Type {
+							case "exec", "shell":
+								if req.WantReply {
+									req.Reply(false, nil)
+								}
+								return
+							default:
+								if req.WantReply {
+									req.Reply(true, nil)
+								}
+							}
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	stop = func() { ln.Close() }
+	t.Cleanup(stop)
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "127.0.0.1:" + port, stop
+}
+
+// TestOpenChannelDoesNotBlockOtherChannels is a regression test for N2:
+// openChannel used to run inline in handleControl, called directly from
+// serveFrames' sole frame-reading loop -- so a blocking SSH operation deep
+// inside it (session.NewSession/RequestPty/Start/Shell, sftp.Stat/Open,
+// client.Listen) stalled that one goroutine forever, and with it every other
+// multiplexed channel: nothing else could be read off the wire at all, not
+// another open_channel, not a resize, not a close_channel for a channel that
+// opened fine moments earlier. The test server here accepts every SSH
+// session channel-open normally, but for one specific exec command
+// deliberately never replies to the "exec" request that session.Start sends
+// -- identified by the command payload itself, since the server has no other
+// way to correlate an SSH-level channel-open with this protocol's own
+// RequestID. That command's channel is left permanently pending; a second,
+// ordinary exec channel opened right after it must still succeed promptly
+// rather than wait on the first.
+func TestOpenChannelDoesNotBlockOtherChannels(t *testing.T) {
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	const stuckCommand = "stuck"
+	addr, stop := startTestSSHServerHangingOnExecCommand(t, stuckCommand)
+	defer stop()
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+
+	cmd, stdin, out := startAgent(t, meowshellBin, knownHosts, "testuser@"+addr)
+	defer stopAgent(t, cmd, stdin)
+
+	f := mustReadFrame(t, out)
+	msg := decodeControl(t, f)
+	if msg.Msg != "prompt_request" || msg.PromptKind != "host_key" {
+		t.Fatalf("first message = %+v, want a host_key prompt_request", msg)
+	}
+	send(t, stdin, 0, controlMessage{Msg: "prompt_response", RequestID: msg.RequestID, Accept: true})
+	expectConnected(t, out)
+
+	// session.Start(stuckCommand) blocks forever waiting for a reply to the
+	// "exec" request it sends -- the test server never answers it. With the
+	// bug, that alone would already be enough to freeze everything below.
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{stuckCommand}, RequestID: "hang"})
+
+	send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"still works"}, RequestID: "req2"})
+	id := expectChannelOpened(t, out)
+	got := readUntilExit(t, out, id)
+	if !bytes.Contains(got, []byte("still works")) {
+		t.Errorf("second channel's output = %q, want it to contain the echoed command", got)
+	}
+}
+
+// startTestSSHServerHangingOnExecCommand accepts every SSH session
+// channel-open normally, but for an exec request whose command equals
+// stuckCommand, deliberately never replies to it (leaving the client's
+// session.Start blocked on that reply forever) -- simulating a slow or
+// malicious SSH server that never finishes answering one specific request.
+// Any other exec command is answered and completed normally. Correlating by
+// the command payload (rather than which channel-open the server happens to
+// see first) is deliberate: once multiple opens are genuinely concurrent
+// (the very property this is testing), there is no guarantee about which of
+// several SSH-level channel-opens reaches the server first.
+func startTestSSHServerHangingOnExecCommand(t *testing.T, stuckCommand string) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, config)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					if newCh.ChannelType() != "session" {
+						newCh.Reject(ssh.UnknownChannelType, "unsupported")
+						continue
+					}
+					ch, requests, err := newCh.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						defer ch.Close()
+						for req := range requests {
+							switch req.Type {
+							case "exec":
+								var payload struct{ Command string }
+								ssh.Unmarshal(req.Payload, &payload)
+								if payload.Command == stuckCommand {
+									// Never Reply, and never return either:
+									// returning would run the deferred
+									// ch.Close() above, closing the SSH
+									// channel out from under session.Start's
+									// wait and unblocking it with an error
+									// instead of actually hanging it -- the
+									// opposite of what this is simulating.
+									// Parking here keeps the channel open
+									// with no reply ever sent, the same as a
+									// server that never gets around to
+									// answering it.
+									select {}
+								}
+								req.Reply(true, nil)
+								echoCommandHandler(ch, payload.Command)
+								return
+							case "pty-req", "shell", "window-change":
+								if req.WantReply {
+									req.Reply(true, nil)
+								}
+							default:
+								if req.WantReply {
+									req.Reply(false, nil)
+								}
+							}
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	stop = func() { ln.Close() }
+	t.Cleanup(stop)
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "127.0.0.1:" + port, stop
 }
 
 func startAgent(t *testing.T, meowshellBin, knownHosts, dest string) (*exec.Cmd, *os.File, *bufio.Reader) {

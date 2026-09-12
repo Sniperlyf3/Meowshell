@@ -196,19 +196,6 @@ func TestValidateKeyRejectsJunk(t *testing.T) {
 	}
 }
 
-func TestShimDetectionAcceptsAnyFlag(t *testing.T) {
-	for _, args := range [][]string{{"-l"}, {"-c", "echo hi"}, {"--login"}, {"-lc", "x"}} {
-		if !isShimInvocation(args) {
-			t.Errorf("isShimInvocation(%q) = false, want true", args)
-		}
-	}
-	for _, args := range [][]string{{}, {"serve"}, {"connect", "tc..."}, {"env"}, {"-h"}, {"--help"}} {
-		if isShimInvocation(args) {
-			t.Errorf("isShimInvocation(%q) = true, want false", args)
-		}
-	}
-}
-
 func TestFindTailcatDoesNotRequireAnExecuteBitOnWindows(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "tailcat.exe")

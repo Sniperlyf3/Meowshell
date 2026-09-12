@@ -1,0 +1,31 @@
+diff --git a/cmd/tailcat/forward.go b/cmd/tailcat/forward.go
+--- a/cmd/tailcat/forward.go
++++ b/cmd/tailcat/forward.go
+@@ -13,7 +13,8 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"syscall"
++	"time"
+ 
+ 	"github.com/peterbourgon/ff/v4"
+ 	"github.com/tailscale/tailcat"
+@@ -77,5 +78,18 @@ func runForward(ctx context.Context, logf logger.Logf, bind string, args []string
+ 	}
+ 
+ 	cl := newClient(logf, tailcatAddrArg(args[0]), clientKey())
++	// Do not publish a local listener until the remote Tailcat peer is
++	// actually reachable. Without this preflight the first accepted TCP
++	// connection is what brings the DERP/WireGuard path up; under load that
++	// first application connection can lose the handshake race and be reset
++	// even though "forwarding ..." has already been printed. SOCKS mode
++	// already performs the same kind of Ping before announcing its proxy.
++	pingCtx, cancelPing := context.WithTimeout(ctx, 15*time.Second)
++	if _, err := cl.Ping(pingCtx); err != nil {
++		cancelPing()
++		_ = cl.Close()
++		return fmt.Errorf("ping tailcat server before forwarding: %w", err)
++	}
++	cancelPing()
+ 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+ 	defer stop()

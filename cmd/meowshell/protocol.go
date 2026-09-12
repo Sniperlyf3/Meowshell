@@ -101,6 +101,18 @@ type controlMessage struct {
 
 	Code    errorCode `json:"code,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Terminal disambiguates an "error" message (N5): some (a shell/exec
+	// channel dying unexpectedly with no exit_status to follow, an upload's
+	// write failure, a cancelled/failed download) end the channel; others
+	// (a failed agent-forwarding setup, a rejected resize request) report a
+	// problem on a channel that stays alive and keeps working. Always set
+	// explicitly by writeError (true) or writeWarning (false) -- never left
+	// to its zero value -- so a nil Terminal on the wire only ever means an
+	// older sender that predates this field, which a receiver should treat
+	// as terminal (the safer of the two: a truly-dead channel a client
+	// wrongly treats as terminal is merely tidied up unnecessarily; a
+	// truly-dead channel a client wrongly treats as alive is a silent hang).
+	Terminal *bool `json:"terminal,omitempty"`
 
 	RequestID string `json:"request_id,omitempty"`
 
@@ -123,6 +135,13 @@ type controlMessage struct {
 	Signature []byte `json:"signature,omitempty"`
 
 	DisableAgent bool `json:"disable_agent,omitempty"`
+
+	// AllowLegacyKeyAlgorithms opts a keystore-held key back into offering
+	// the ssh-rsa (SHA-1) signature format as a fallback, for a server that
+	// predates RFC 8332 and rejects the SHA-2 RSA formats keystoreSigner
+	// otherwise offers exclusively (N11). Left unset, a keystore RSA key
+	// never offers ssh-rsa.
+	AllowLegacyKeyAlgorithms bool `json:"allow_legacy_key_algorithms,omitempty"`
 
 	Keys         [][]byte `json:"keys,omitempty"`
 	Certificates [][]byte `json:"certificates,omitempty"`
@@ -159,6 +178,12 @@ type controlMessage struct {
 
 	SocksUsername string `json:"socks_username,omitempty"`
 	SocksPassword string `json:"socks_password,omitempty"`
+
+	// MaxConnections caps how many connections a forward_local/forward_remote/
+	// forward_socks channel will service at once; zero (the default, and
+	// what every existing client that predates this field sends) means
+	// unlimited, preserving prior behavior for anyone who doesn't opt in.
+	MaxConnections int `json:"max_connections,omitempty"`
 }
 
 type sftpEntry struct {

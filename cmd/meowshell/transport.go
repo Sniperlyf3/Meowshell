@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"strings"
 	"time"
 
@@ -56,7 +57,32 @@ func tcpDialer(hostPort string) dialer {
 
 func jumpDialer(via jumpClient, hostPort string) dialer {
 	return func(ctx context.Context) (net.Conn, error) {
-		return via.Dial("tcp", hostPort)
+		// via.Dial (an *ssh.Client's channel-opening Dial) takes no context,
+		// so a hostile or unresponsive jump host can otherwise hang this
+		// past the handshake timeout dialSSHClient thinks it's enforcing.
+		// Run it in the background and honor ctx ourselves; if it does
+		// eventually complete after we've given up, close the orphaned
+		// connection instead of leaking it.
+		type result struct {
+			conn net.Conn
+			err  error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			conn, err := via.Dial("tcp", hostPort)
+			ch <- result{conn, err}
+		}()
+		select {
+		case res := <-ch:
+			return res.conn, res.err
+		case <-ctx.Done():
+			go func() {
+				if res := <-ch; res.conn != nil {
+					res.conn.Close()
+				}
+			}()
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -64,16 +90,24 @@ type jumpClient interface {
 	Dial(network, addr string) (net.Conn, error)
 }
 
-func splitUserHost(dest, defaultPort string) (user, hostPort string) {
+func splitUserHost(dest, defaultPort string) (username, hostPort string) {
 	if at := strings.LastIndex(dest, "@"); at >= 0 {
-		user, dest = dest[:at], dest[at+1:]
+		username, dest = dest[:at], dest[at+1:]
+	} else if u, err := user.Current(); err == nil {
+		// Matches ordinary `ssh host` behavior: no user@ prefix means the
+		// local OS user, not an empty SSH username. If the lookup itself
+		// fails (e.g. no /etc/passwd entry for the running UID, as can
+		// happen in a minimal container), fall back to the previous
+		// behavior of leaving it empty rather than failing the connection
+		// outright.
+		username = u.Username
 	}
 	if _, _, err := net.SplitHostPort(dest); err == nil {
-		return user, dest
+		return username, dest
 	}
 
 	host := strings.TrimSuffix(strings.TrimPrefix(dest, "["), "]")
-	return user, net.JoinHostPort(host, defaultPort)
+	return username, net.JoinHostPort(host, defaultPort)
 }
 
 func proxyDialer(proxyURL, hostPort string) (dialer, error) {
@@ -146,6 +180,9 @@ func dialHTTPConnectProxy(ctx context.Context, proxyURL *url.URL, hostPort strin
 	}
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", hostPort, hostPort, authHeader); err != nil {
 		conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	br := bufio.NewReader(conn)
@@ -174,6 +211,57 @@ type bufConn struct {
 }
 
 func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+var lookupAgentTXT = net.DefaultResolver.LookupTXT
+
+func resolveAgentDestination(ctx context.Context, dest string, allowTXT bool) (string, bool, error) {
+	if looksLikeTailcatAddress(dest) {
+		return dest, true, nil
+	}
+	// user@host, explicit host:port, and IP literals are unambiguously ordinary
+	// SSH destinations. A bare DNS name is the only form that can also stand
+	// for Tailcat's documented "tailcat=tc..." TXT indirection.
+	if strings.Contains(dest, "@") {
+		return dest, false, nil
+	}
+	if _, _, err := net.SplitHostPort(dest); err == nil {
+		return dest, false, nil
+	}
+	if net.ParseIP(strings.Trim(dest, "[]")) != nil {
+		return dest, false, nil
+	}
+	// A bare hostname otherwise means ordinary SSH, verified against
+	// known_hosts with TOFU. The TXT indirection below hands trust to a
+	// completely different mechanism instead -- tailcat's own client
+	// authentication, with no known_hosts involved at all -- on the say-so
+	// of whoever controls DNS for that name. That is a meaningfully weaker
+	// (or at least different) trust boundary than the one a bare hostname
+	// otherwise implies, so it only applies when the caller has explicitly
+	// asked for it; the default leaves a bare hostname as ordinary SSH,
+	// even if a "tailcat=" TXT record happens to exist for it.
+	if !allowTXT {
+		return dest, false, nil
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	txts, err := lookupAgentTXT(lookupCtx, strings.TrimSuffix(dest, "."))
+	if err != nil {
+		// A missing/unresolvable TXT record does not make a normal SSH hostname
+		// invalid; its A/AAAA lookup belongs to the regular TCP dial path.
+		return dest, false, nil
+	}
+	for _, txt := range txts {
+		if value, ok := strings.CutPrefix(txt, "tailcat="); ok {
+			value = strings.TrimSpace(value)
+			if !looksLikeTailcatAddress(value) {
+				return "", false, fmt.Errorf("DNS name %q has an invalid tailcat TXT address", dest)
+			}
+			return value, true, nil
+		}
+	}
+	return dest, false, nil
+}
 
 func looksLikeTailcatAddress(dest string) bool {
 	rest, ok := strings.CutPrefix(dest, "tc")

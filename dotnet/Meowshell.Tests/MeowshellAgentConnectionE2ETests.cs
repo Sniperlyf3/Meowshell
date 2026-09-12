@@ -64,7 +64,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -96,7 +96,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -130,7 +130,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
         var served = Path.Combine(_dir, "served");
         Directory.CreateDirectory(served);
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -177,7 +177,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -232,7 +232,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -261,7 +261,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -289,7 +289,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),
@@ -340,7 +340,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (real is null) return;
         var (bin, _) = real.Value;
 
-        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        await using var server = await RelayE2E.StartServerAsync(new MeowshellOptions
         {
             BinaryDirectory = bin,
             HomeDirectory = Path.Combine(_dir, "server-home"),

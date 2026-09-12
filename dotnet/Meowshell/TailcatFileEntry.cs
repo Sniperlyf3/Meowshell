@@ -53,10 +53,16 @@ public sealed record TailcatFileEntry(
         }
         var (name, isDir) = SplitTrailingSlash(m.Groups["name"].Value);
         var modifiedRaw = $"{m.Groups["month"].Value} {m.Groups["day"].Value} {m.Groups["timeOrYear"].Value}";
+        if (!long.TryParse(m.Groups["size"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var size))
+        {
+            throw new TailcatException(
+                "unexpected output from tailcat ls -l", exitCode: 0,
+                $"file size was outside the supported 64-bit range: {m.Groups["size"].Value}");
+        }
         return new TailcatFileEntry(
             name, isDir,
             Mode: m.Groups["mode"].Value,
-            Size: long.Parse(m.Groups["size"].Value, CultureInfo.InvariantCulture),
+            Size: size,
             ModifiedRaw: modifiedRaw,
             ModifiedAt: TryParseModified(m.Groups["month"].Value, m.Groups["day"].Value, m.Groups["timeOrYear"].Value));
     }

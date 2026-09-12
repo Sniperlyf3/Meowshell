@@ -65,7 +65,7 @@ public static class TailcatClient
             psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
         if (options.Verbose)
             psi.ArgumentList.Add("--verbose");
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         return psi;
     }
 
@@ -73,23 +73,96 @@ public static class TailcatClient
     {
         var psi = Prepare(options);
         foreach (var a in args) psi.ArgumentList.Add(a);
-        return RunAsync(psi, options.Timeout, "tailcat " + string.Join(' ', args));
+        // Name the operation by its verb alone (e.g. "tailcat ping"), not the
+        // full argument vector: several callers (PingAsync, ListFilesAsync,
+        // SshAsync, CpAsync) put a tailcat address -- treated as
+        // credential-like elsewhere in this codebase's own security model --
+        // or other caller-supplied values directly in args, and this message
+        // ends up in a TimeoutException that an application can easily let
+        // reach a log or crash reporter.
+        var verb = args.Length > 0 ? args[0] : "";
+        return RunAsync(psi, options.Timeout, $"tailcat {verb}");
+    }
+
+    // Bounds how much of a one-shot command's stdout/stderr this buffers in
+    // memory. ReadToEndAsync has no such cap on its own, so a misbehaving
+    // tailcat binary, or a destination that gets to influence output (e.g.
+    // what a hostile server returns to "ls"), could otherwise grow memory
+    // without bound. Well above any realistic legitimate output (address
+    // lists, JSON metadata, directory listings) while still bounding worst
+    // case.
+    private const int MaxOutputBytes = 16 * 1024 * 1024;
+
+    private sealed class OutputLimitFlag
+    {
+        public volatile bool Exceeded;
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, OutputLimitFlag limitFlag, CancellationTokenSource haltSource, CancellationToken cancellationToken)
+    {
+        var buffer = new char[8192];
+        var sb = new System.Text.StringBuilder();
+        long total = 0;
+        while (true)
+        {
+            int n;
+            try
+            {
+                n = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return sb.ToString();
+            }
+            if (n == 0) break;
+            total += n;
+            if (total > MaxOutputBytes)
+            {
+                limitFlag.Exceeded = true;
+                haltSource.Cancel();
+                return sb.ToString();
+            }
+            sb.Append(buffer, 0, n);
+        }
+        return sb.ToString();
     }
 
     private static async Task<TailcatResult> RunAsync(ProcessStartInfo psi, TimeSpan timeout, string commandForTimeoutMessage)
     {
+        // Validated here, the one place every caller (RunAsync(options, args),
+        // GetEnvironmentAsync, RunMeowshellCpAsync) funnels through, and
+        // before the process below is started: a bad timeout must never
+        // leak a spawned child that nothing will ever wait for or kill.
+        TimeSpanValidation.EnsurePositiveAndBounded(timeout, nameof(timeout));
         using var process = new Process { StartInfo = psi };
-        MeowshellProcessControl.Start(process);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var job = MeowshellProcessControl.Start(process);
         using var cts = new CancellationTokenSource(timeout);
+        var limitFlag = new OutputLimitFlag();
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput, limitFlag, cts, cts.Token);
+        var stderrTask = ReadBoundedAsync(process.StandardError, limitFlag, cts, cts.Token);
         try
         {
             await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            // Kill() only requests termination -- wait (bounded) for the OS
+            // to actually reap the child before returning, the same fix
+            // already applied to MeowshellAgentConnection/TailcatListener:
+            // otherwise a caller has no guarantee the process is actually
+            // gone by the time this throws.
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    using var killGrace = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    try { await process.WaitForExitAsync(killGrace.Token).ConfigureAwait(false); } catch { }
+                }
+            }
+            catch { }
+            if (limitFlag.Exceeded)
+                throw new TailcatException($"{commandForTimeoutMessage} produced more than {MaxOutputBytes:N0} bytes of output", exitCode: -1, "");
             throw new TimeoutException($"{commandForTimeoutMessage} did not finish within {timeout}");
         }
         return new TailcatResult(
@@ -326,7 +399,7 @@ public static class TailcatClient
         };
         psi.ArgumentList.Add("env");
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         var result = await RunAsync(psi, options.Timeout, "meowshell env").ConfigureAwait(false);
         if (!result.Success) throw Failure("env", result);
         return TailcatEnvironment.Parse(result.Stdout);
@@ -351,7 +424,7 @@ public static class TailcatClient
         foreach (var a in cpArgs) psi.ArgumentList.Add(a);
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
-        psi.Environment["HOME"] = options.HomeDirectory;
+        TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
         return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));
     }
 }

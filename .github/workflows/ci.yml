@@ -55,7 +55,7 @@ jobs:
           GOTOOLCHAIN: auto
         run: |
           go vet ./...
-          go test ./...
+          go test ./... -count=10
 
       - name: Scan Go call paths for known vulnerabilities
         env:
@@ -203,9 +203,6 @@ jobs:
           name: tailcat-binaries
           path: dist
 
-      - name: Start a local DERP relay for the E2E tests
-        run: ./e2e/start-testderp.sh
-
       - name: End-to-end test on this host
         env:
           TAILCAT: dist/tailcat_linux_${{ matrix.arch }}
@@ -229,6 +226,32 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: stable
+
+      # See the "build" job's own comment: cmd/meowshell's go.mod replaces
+      # github.com/tailscale/tailcat with a local ./.tailcat-src checkout, so
+      # go vet/go test need it present before either can resolve imports.
+      - name: Fetch tailcat source (for go.mod's replace directive)
+        shell: bash
+        env:
+          SRC_REF: ${{ inputs.tailcat_ref }}
+        run: |
+          SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+
+      # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
+      # validation, N9) only builds and runs under GOOS=windows, so it never
+      # gets exercised by the "build" job's own go vet/go test, which run on
+      # ubuntu-latest -- this is the only place in CI a real Windows host
+      # actually type-checks and runs that code.
+      - name: Vet and test meowshell on Windows
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go vet ./...
+          go test ./... -count=10
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -289,24 +312,28 @@ jobs:
           dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
           dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
 
-      - name: Start a local DERP relay for the E2E tests
-        run: ./e2e/start-testderp.sh
-
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
         # no-op locally when the variables are unset (see
-        # MeowshellServerE2ETests.RealBinaries). TAILCAT_DERPMAP_URL (set by
-        # the relay step above) reaches the real tailcat processes these
-        # tests spawn via plain environment inheritance -- MeowshellServer
-        # and MeowshellAgentConnection never touch it themselves.
+        # MeowshellServerE2ETests.RealBinaries). Use tailcat's own
+        # TS_DEBUG_TAILCAT_LOCAL_DERP mode rather than a shared helper relay:
+        # each server starts a loopback DERP, waits until it is registered
+        # before publishing its address, and embeds the relay in that address.
+        # "none" deliberately makes any accidental external DERP-map lookup
+        # fail, keeping the E2E exchange hermetic (the same mode upstream
+        # tailcat uses in TestLocalDERPMode).
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-        run: >-
-          dotnet test dotnet/Meowshell.sln -c Release --nologo
-          --logger "trx;LogFileName=meowshell-tests.trx"
-          --results-directory test-results
+        run: |
+          for i in $(seq 1 10); do
+            echo "::group::.NET stress pass $i/10"
+            dotnet test dotnet/Meowshell.sln -c Release --nologo \
+              --logger "trx;LogFileName=meowshell-tests-$i.trx" \
+              --results-directory test-results
+            echo "::endgroup::"
+          done
 
       - name: Upload .NET test diagnostics
         if: failure()
@@ -352,13 +379,6 @@ jobs:
         # the pack step above. BuildNumber must match the pack step's, so
         # its PackageReference resolves to the version just packed.
         run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
-
-      - name: Stop the local DERP relay
-        # Meowshell.PackageTests above also runs real-binary E2E tests, so
-        # this has to wait until every step that could need the relay is
-        # done, not just the "Test" step above it.
-        if: always()
-        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

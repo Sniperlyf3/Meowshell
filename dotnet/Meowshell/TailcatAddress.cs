@@ -7,13 +7,28 @@ public readonly record struct TailcatAddress
 {
     private readonly string _value;
 
-    /// <summary>Wraps <paramref name="value"/>, requiring it to start with "tc".</summary>
-    /// <exception cref="FormatException"><paramref name="value"/> doesn't start with "tc".</exception>
+    /// <summary>Wraps <paramref name="value"/>, requiring the same <c>tc&lt;base64url&gt;</c> shape the native client recognizes.</summary>
+    /// <exception cref="FormatException"><paramref name="value"/> is not syntactically a tailcat address.</exception>
     public TailcatAddress(string value)
     {
-        if (!value.StartsWith("tc", StringComparison.Ordinal))
+        if (!value.StartsWith("tc", StringComparison.Ordinal) || value.Length == 2)
+            throw new FormatException($"\"{value}\" is not a tailcat address.");
+
+        var encoded = value[2..];
+        if (encoded.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_')) || encoded.Length % 4 == 1)
+            throw new FormatException($"\"{value}\" is not a valid base64url tailcat address.");
+
+        // Validate the raw, unpadded base64url payload rather than only its
+        // alphabet so malformed lengths/encodings fail at the API boundary.
+        var padded = encoded.Replace('-', '+').Replace('_', '/');
+        padded += new string('=', (4 - padded.Length % 4) % 4);
+        try
         {
-            throw new FormatException($"\"{value}\" is not a tailcat address: it doesn't start with \"tc\".");
+            _ = Convert.FromBase64String(padded);
+        }
+        catch (FormatException ex)
+        {
+            throw new FormatException($"\"{value}\" is not a valid base64url tailcat address.", ex);
         }
         _value = value;
     }
@@ -24,6 +39,6 @@ public readonly record struct TailcatAddress
     /// <summary>The address itself.</summary>
     public static implicit operator string(TailcatAddress address) => address._value;
 
-    /// <summary>Wraps <paramref name="value"/>, requiring it to start with "tc".</summary>
+    /// <summary>Wraps <paramref name="value"/>, validating the tailcat address syntax.</summary>
     public static implicit operator TailcatAddress(string value) => new(value);
 }

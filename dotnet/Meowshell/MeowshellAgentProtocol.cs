@@ -56,13 +56,20 @@ internal static class MeowshellAgentProtocol
         if (n > MaxFrameLength)
             throw new TailcatException("meowshell agent protocol error", 0, $"frame length {n} exceeds the {MaxFrameLength} limit");
 
-        var body = new byte[n];
-        if (!await ReadFullAsync(stream, body, cancellationToken).ConfigureAwait(false))
+        // Read the header and payload directly into their final buffers
+        // instead of one body-sized buffer that then gets copied into a
+        // second, payload-sized one: at the 64MiB frame limit, that used to
+        // mean two ~64MiB allocations live at once (and a full-frame copy)
+        // for a single incoming frame.
+        var header = new byte[FrameHeaderLength];
+        if (!await ReadFullAsync(stream, header, cancellationToken).ConfigureAwait(false))
             throw new TailcatException("meowshell agent protocol error", 0, "connection closed mid-frame");
 
         var payload = new byte[n - FrameHeaderLength];
-        Array.Copy(body, FrameHeaderLength, payload, 0, payload.Length);
-        return new AgentFrame(body[0], ReadUInt32BigEndian(body.AsSpan(1, 4)), payload);
+        if (!await ReadFullAsync(stream, payload, cancellationToken).ConfigureAwait(false))
+            throw new TailcatException("meowshell agent protocol error", 0, "connection closed mid-frame");
+
+        return new AgentFrame(header[0], ReadUInt32BigEndian(header.AsSpan(1, 4)), payload);
     }
 
     private static async Task<bool> ReadFullAsync(Stream stream, byte[] buf, CancellationToken cancellationToken)
@@ -109,6 +116,17 @@ internal sealed class AgentMessage
     public string? Code { get; set; }
     public string? Message { get; set; }
 
+    // N5: disambiguates an "error" message -- some end the channel (a
+    // shell/exec channel dying unexpectedly with no exit_status to follow,
+    // an upload's write failure), others report a problem on a channel that
+    // stays alive (a failed agent-forwarding setup, a rejected resize
+    // request). Null means an agent build that predates this field; treated
+    // as terminal (see MeowshellAgentConnection's own use of it) since
+    // that's the safer default -- a truly-dead channel wrongly treated as
+    // terminal is merely tidied up unnecessarily, while a truly-dead
+    // channel wrongly treated as alive is a silent hang.
+    public bool? Terminal { get; set; }
+
     public string? RequestId { get; set; }
     public string? PromptKind { get; set; }
     public string? Remote { get; set; }
@@ -133,6 +151,7 @@ internal sealed class AgentMessage
     public string[]? KeystoreKeyIds { get; set; }
     public byte[][]? KeystorePublicKeys { get; set; }
     public bool AgentForwarding { get; set; }
+    public bool AllowLegacyKeyAlgorithms { get; set; }
 
     public string? ProxyUrl { get; set; }
 
@@ -159,6 +178,16 @@ internal sealed class AgentMessage
 
     public string? SocksUsername { get; set; }
     public string? SocksPassword { get; set; }
+
+    public int MaxConnections { get; set; }
+
+    /// <summary>Whether this message ends the channel it arrived on: always true for "exit_status",
+    /// and for "error" whatever the agent explicitly said (<see cref="Terminal"/>), defaulting to true
+    /// for an older agent build that never set it. See <see cref="Terminal"/>'s own comment for why
+    /// "error" needs this at all. The one authoritative rule both AgentChannelDataPump (whether to stop
+    /// delivering further data/control messages for this channel) and MeowshellAgentConnection
+    /// (whether to remove the channel from its own bookkeeping) key off of.</summary>
+    public bool EndsChannel => Msg == "exit_status" || (Msg == "error" && (Terminal ?? true));
 }
 
 internal sealed class AgentSftpEntry

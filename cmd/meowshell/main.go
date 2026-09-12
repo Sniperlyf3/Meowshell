@@ -68,6 +68,11 @@ executable, then on $PATH.
 `
 
 func main() {
+	if err := joinParentJobFromEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "meowshell: %v\n", err)
+		os.Exit(1)
+	}
+
 	if isShimInvocation(os.Args[1:]) {
 		if err := runAsShell(os.Args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "meowshell: %v\r\n", err)
