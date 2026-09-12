@@ -203,9 +203,6 @@ jobs:
           name: tailcat-binaries
           path: dist
 
-      - name: Start a local DERP relay for the E2E tests
-        run: ./e2e/start-testderp.sh
-
       - name: End-to-end test on this host
         env:
           TAILCAT: dist/tailcat_linux_${{ matrix.arch }}
@@ -322,13 +319,18 @@ jobs:
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
         # no-op locally when the variables are unset (see
-        # MeowshellServerE2ETests.RealBinaries). TAILCAT_DERPMAP_URL (set by
-        # the relay step above) reaches the real tailcat processes these
-        # tests spawn via plain environment inheritance -- MeowshellServer
-        # and MeowshellAgentConnection never touch it themselves.
+        # MeowshellServerE2ETests.RealBinaries). Use tailcat's own
+        # TS_DEBUG_TAILCAT_LOCAL_DERP mode rather than a shared helper relay:
+        # each server starts a loopback DERP, waits until it is registered
+        # before publishing its address, and embeds the relay in that address.
+        # "none" deliberately makes any accidental external DERP-map lookup
+        # fail, keeping the E2E exchange hermetic (the same mode upstream
+        # tailcat uses in TestLocalDERPMode).
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
+          TS_DEBUG_TAILCAT_LOCAL_DERP: "1"
+          TAILCAT_DERPMAP_URL: "none"
         run: >-
           dotnet test dotnet/Meowshell.sln -c Release --nologo
           --logger "trx;LogFileName=meowshell-tests.trx"
@@ -377,14 +379,10 @@ jobs:
         # nupkg does. Not part of Meowshell.sln: it can only run after
         # the pack step above. BuildNumber must match the pack step's, so
         # its PackageReference resolves to the version just packed.
+        env:
+          TS_DEBUG_TAILCAT_LOCAL_DERP: "1"
+          TAILCAT_DERPMAP_URL: "none"
         run: dotnet test dotnet/Meowshell.PackageTests -c Release -p:BuildNumber="${{ github.run_number }}" --nologo
-
-      - name: Stop the local DERP relay
-        # Meowshell.PackageTests above also runs real-binary E2E tests, so
-        # this has to wait until every step that could need the relay is
-        # done, not just the "Test" step above it.
-        if: always()
-        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
