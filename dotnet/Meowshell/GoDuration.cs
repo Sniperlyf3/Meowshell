@@ -28,7 +28,9 @@ internal static class GoDuration
             if (!m.Success || m.Index != pos) return false;
             matchedAny = true;
             pos = m.Index + m.Length;
-            var value = double.Parse(m.Groups["num"].Value, CultureInfo.InvariantCulture);
+            if (!double.TryParse(m.Groups["num"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                || !double.IsFinite(value))
+                return false;
             totalSeconds += m.Groups["unit"].Value switch
             {
                 "ns" => value / 1_000_000_000,
@@ -42,7 +44,17 @@ internal static class GoDuration
         }
         if (!matchedAny) return false;
 
-        result = TimeSpan.FromSeconds(negative ? -totalSeconds : totalSeconds);
-        return true;
+        if (!double.IsFinite(totalSeconds)
+            || totalSeconds > TimeSpan.MaxValue.TotalSeconds)
+            return false;
+        try
+        {
+            result = TimeSpan.FromSeconds(negative ? -totalSeconds : totalSeconds);
+            return true;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
     }
 }
