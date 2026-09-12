@@ -397,13 +397,19 @@ func closeClients(clients []*ssh.Client) {
 }
 
 func (a *agentSession) closeHops() {
+	// pkg/sftp.Client.Close waits for its receive goroutine. Against an
+	// unresponsive peer that goroutine may itself be blocked on the SSH
+	// channel forever, so closing SFTP before the transport can wedge agent
+	// shutdown. Tear down SSH first; that forces the SFTP receive loop to EOF,
+	// after which closing/clearing the client is bounded.
+	closeClients(a.hops)
 	a.resetSFTPClient(nil)
 	a.tcMu.Lock()
 	if a.tcClient != nil {
 		a.tcClient.Close()
+		a.tcClient = nil
 	}
 	a.tcMu.Unlock()
-	closeClients(a.hops)
 }
 
 const (
@@ -682,7 +688,6 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 	select {
 	case a.sftpOpSlots <- struct{}{}:
 		done := make(chan struct{})
-		usedClient := make(chan *sftp.Client, 1)
 		var releaseOnce sync.Once
 		release := func() { releaseOnce.Do(func() { <-a.sftpOpSlots }) }
 
@@ -690,20 +695,17 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 			defer close(done)
 			defer release()
 			if a.sftpOpHandler != nil {
-				usedClient <- nil
 				a.sftpOpHandler(msg)
 				return
 			}
 			sf, err := a.sftpClientFor()
 			if err != nil {
-				usedClient <- nil
 				a.writeControl(0, controlMessage{
 					Msg: "error", RequestID: msg.RequestID,
 					Code: errUnknown, Message: err.Error(),
 				})
 				return
 			}
-			usedClient <- sf
 			a.sftpOpWithClient(sf, msg)
 		}()
 
@@ -728,26 +730,18 @@ func (a *agentSession) dispatchSFTPOp(msg controlMessage) {
 				release()
 
 				if a.sftpOpHandler != nil {
-					// Unit-test hook: there is no real subsystem to reset.
+					// Unit-test hook: there is no real transport to abort.
 					return
 				}
-				select {
-				case sf := <-usedClient:
-					if sf != nil {
-						// Closing the exact shared SFTP client forces any
-						// requests blocked in pkg/sftp to return. The field is
-						// cleared only if this is still the active instance,
-						// so a later timeout cannot accidentally close a newer
-						// replacement client.
-						a.resetSFTPClient(sf)
-						return
-					}
-				default:
-					// Even NewClient itself has not completed. There is no
-					// narrower handle to cancel, so fail the SSH transport;
-					// that is the only reliable way to unwind subsystem setup.
-					a.reportConnectionLost(fmt.Errorf("SFTP subsystem setup timed out after %s", sftpOpTimeout))
-				}
+				// pkg/sftp exposes no context cancellation and Client.Close
+				// itself waits for the receive goroutine, so trying to reset
+				// just the SFTP client can hang on the same unresponsive
+				// transport we're trying to recover from. Closing the SSH
+				// transport is the only reliable cancellation primitive: it
+				// forces every blocked SFTP read/request to unwind and makes
+				// subsequent channel work fail explicitly instead of leaking
+				// goroutines in the background.
+				a.reportConnectionLost(fmt.Errorf("SFTP %s timed out after %s", msg.Op, sftpOpTimeout))
 			}
 		}()
 	default:
