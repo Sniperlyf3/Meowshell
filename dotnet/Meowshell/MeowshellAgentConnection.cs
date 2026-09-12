@@ -571,7 +571,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             OnOpened: (channelId, opened) =>
             {
                 var (result, sink) = makeResult(channelId, opened);
-                if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
+                if (sink is not null)
+                    _channels[channelId] = new AgentChannelDataPump(
+                        sink,
+                        () => FailBackpressuredChannel(channelId));
                 tcs.TrySetResult(result);
             },
             OnFailed: ex => tcs.TrySetException(ex));
@@ -584,6 +587,34 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         finally
         {
             _pendingOpens.TryRemove(requestId, out _);
+        }
+    }
+
+    private void FailBackpressuredChannel(uint channelId)
+    {
+        if (!_channels.TryRemove(channelId, out _))
+            return;
+
+        // Do not await from the shared read loop. The whole purpose of the
+        // bounded per-channel pump is to isolate a stalled consumer from every
+        // other multiplexed channel; cleanup must preserve that property.
+        _ = CloseBackpressuredChannelAsync(channelId);
+    }
+
+    private async Task CloseBackpressuredChannelAsync(uint channelId)
+    {
+        try
+        {
+            await WriteControlAsync(
+                channelId,
+                new AgentMessage { Msg = "close_channel", Cancelled = true },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Connection teardown/faulting will clean up the native side if
+            // the close cannot be written. The local channel is already
+            // faulted and removed, so there is nothing useful to surface here.
         }
     }
 
@@ -888,6 +919,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     private readonly record struct QueueItem(bool IsData, byte Stream, ReadOnlyMemory<byte> Data, AgentMessage? Control);
 
     private readonly IAgentChannelSink _inner;
+    private readonly Action? _onBackpressure;
     private readonly System.Threading.Channels.Channel<QueueItem> _queue =
         System.Threading.Channels.Channel.CreateBounded<QueueItem>(new System.Threading.Channels.BoundedChannelOptions(32)
         {
@@ -903,9 +935,10 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     // plain bool is enough.
     private bool _failed;
 
-    public AgentChannelDataPump(IAgentChannelSink inner)
+    public AgentChannelDataPump(IAgentChannelSink inner, Action? onBackpressure = null)
     {
         _inner = inner;
+        _onBackpressure = onBackpressure;
         _pumpTask = Task.Run(RunAsync);
     }
 
@@ -989,6 +1022,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         if (_failed) return;
         _failed = true;
         OnFault(new TailcatException("channel data is not being consumed fast enough", 0, ""));
+        try { _onBackpressure?.Invoke(); } catch { }
     }
 
     public void OnFault(Exception ex)
