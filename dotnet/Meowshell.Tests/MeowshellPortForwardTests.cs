@@ -181,4 +181,16 @@ public sealed class MeowshellPortForwardTests : IDisposable
         Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(400), $"StartAsync returned before both listeners were ready: {sw.Elapsed}");
         Assert.Equal(["127.0.0.1:18080", "127.0.0.1:19090"], forward.BoundAddresses);
     }
+
+    [Fact]
+    public async Task ThrowingStartupLogCallbackDoesNotHideReadiness()
+    {
+        var (options, _) = Fake();
+        await using var forward = await MeowshellPortForward.StartAsync(
+            options with { Mappings = ["8080", "9090"], StartTimeout = TimeSpan.FromSeconds(3) },
+            _ => throw new InvalidOperationException("application logger failed"));
+
+        Assert.Equal(["127.0.0.1:18080", "127.0.0.1:19090"], forward.BoundAddresses);
+    }
+
 }
