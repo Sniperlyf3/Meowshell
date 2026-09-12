@@ -76,6 +76,16 @@ internal sealed class TailcatListener : IAsyncDisposable
         try
         {
             await Process.WaitForExitAsync().ConfigureAwait(false);
+            // Process.Exited / WaitForExitAsync can observe process exit before
+            // BeginErrorReadLine's final buffered ErrorDataReceived callbacks
+            // have run. The parameterless synchronous WaitForExit() is special:
+            // once the process is already dead it also waits for redirected
+            // async stream handlers to finish. Without this drain, a fast
+            // startup failure can lose the *actual* fatal stderr line and leave
+            // diagnostics containing only warnings printed immediately before
+            // it, which made relay/server flakes effectively impossible to
+            // diagnose from CI.
+            Process.WaitForExit();
             if (_stopped) _exited.TrySetResult();
             else _exited.TrySetException(new TailcatException(
                 "tailcat exited unexpectedly", Process.ExitCode, _diagnostics.Tail()));
