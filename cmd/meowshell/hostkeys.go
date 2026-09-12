@@ -115,10 +115,17 @@ func appendKnownHost(knownHostsPath, hostname string, key ssh.PublicKey) error {
 	if err != nil {
 		return fmt.Errorf("recording accepted host key: %w", err)
 	}
-	defer f.Close()
 	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
 	if _, err := fmt.Fprintln(f, line); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("recording accepted host key: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("syncing accepted host key: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing accepted host key: %w", err)
 	}
 	return nil
 }
