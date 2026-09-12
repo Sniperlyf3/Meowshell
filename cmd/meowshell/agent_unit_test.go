@@ -316,6 +316,7 @@ func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) 
 	if !found {
 		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
 	}
+}
 
 type failingGateWriteCloser struct {
 	started chan struct{}
@@ -381,6 +382,4 @@ func TestChannelWriterFailureDrainsPendingWaitGroup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stale data after writer stop reintroduced an unbalanced pending write")
 	}
-}
-
 }
