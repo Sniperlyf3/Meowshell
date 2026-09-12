@@ -81,11 +81,15 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
         {
             const string marker = "SOCKS running at ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var address = line[(at + marker.Length)..].Trim();
-            if (address.StartsWith("socks5h://", StringComparison.OrdinalIgnoreCase))
-                address = address["socks5h://".Length..];
-            if (address.Length > 0) ready.TrySetResult(address);
+            if (at >= 0)
+            {
+                var address = line[(at + marker.Length)..].Trim();
+                if (address.StartsWith("socks5h://", StringComparison.OrdinalIgnoreCase))
+                    address = address["socks5h://".Length..];
+                if (address.Length > 0) ready.TrySetResult(address);
+            }
+
+            try { onLog?.Invoke(line); } catch { }
         }
 
         try
