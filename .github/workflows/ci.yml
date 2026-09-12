@@ -89,6 +89,16 @@ jobs:
           ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
         run: ./build.sh
 
+      # Run the agent E2E suite only after the real binaries exist; the
+      # earlier go test step intentionally runs before ./build.sh and those
+      # tests skip when dist/ is absent.
+      - name: End-to-end test the agent against the binaries just built
+        env:
+          GOTOOLCHAIN: local
+          MEOWSHELL: ${{ github.workspace }}/dist/meowshell_linux_amd64
+          TAILCAT: ${{ github.workspace }}/dist/tailcat_linux_amd64
+        run: go test ./cmd/meowshell/ -count=1
+
       - name: Scan the patched tailcat build input for known vulnerabilities
         env:
           GOTOOLCHAIN: local
@@ -208,6 +218,9 @@ jobs:
         with:
           name: tailcat-binaries
           path: dist
+
+      - name: Start a local DERP relay for the E2E tests
+        run: ./e2e/start-testderp.sh
 
       - name: End-to-end test on this host
         env:
