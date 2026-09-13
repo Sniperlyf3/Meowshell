@@ -18,7 +18,7 @@ import (
 // readability).
 const writeAccessMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
 	windows.FILE_WRITE_ATTRIBUTES | windows.FILE_WRITE_EA |
-	windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE |
+	windows.FILE_DELETE_CHILD | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE |
 	windows.GENERIC_WRITE | windows.GENERIC_ALL
 
 func validateKnownHostsDir(path string) error {
