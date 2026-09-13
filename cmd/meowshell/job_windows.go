@@ -109,21 +109,9 @@ func newKillOnCloseJob(pid int) (*killOnCloseJob, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	process, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false,
-		uint32(pid),
-	)
-	if err != nil {
+	if err := j.ensureAssigned(pid); err != nil {
 		j.Close()
-		return nil, fmt.Errorf("opening tailcat process for job assignment: %w", err)
-	}
-	defer windows.CloseHandle(process)
-
-	if err := windows.AssignProcessToJobObject(j.handle, process); err != nil {
-		j.Close()
-		return nil, fmt.Errorf("assigning tailcat process to job object: %w", err)
+		return nil, err
 	}
 	return j, nil
 }
