@@ -374,3 +374,43 @@ func TestResetSFTPClientClearsMatchedClientAfterTransportIsClosed(t *testing.T) 
 		t.Fatal("matched SFTP client was not cleared")
 	}
 }
+
+
+func TestCancelledSFTPTransferDoesNotBlockFrameReader(t *testing.T) {
+	oldGrace := sftpTransferCancelGrace
+	sftpTransferCancelGrace = 50 * time.Millisecond
+	defer func() { sftpTransferCancelGrace = oldGrace }()
+
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	release := make(chan struct{})
+	defer close(release)
+
+	const id = uint32(77)
+	ch := &agentChannel{
+		sftpFile: &sftp.File{},
+		sftpClose: func() error {
+			<-release // stands in for Close blocked behind an in-flight Read/Write
+			return nil
+		},
+		cancel: func() {},
+	}
+	session.chans[id] = ch
+
+	started := time.Now()
+	session.closeChannel(id, controlMessage{Cancelled: true})
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("close_channel blocked for %s on a stuck SFTP close", elapsed)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, msg := range readControlFrames(t, &out) {
+			if msg.Code == errConnectionLost {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("stuck cancelled SFTP transfer did not escalate to transport teardown")
+}
