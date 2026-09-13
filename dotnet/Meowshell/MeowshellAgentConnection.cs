@@ -528,8 +528,8 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                if (_pendingCloses.TryRemove(new KeyValuePair<uint, TaskCompletionSource>(id, tcs)))
-                    tcs.TrySetException(ex);
+                if (_pendingCloses.TryRemove(id, out var removed))
+                    removed.TrySetException(ex);
                 _channels.TryRemove(id, out _);
                 throw;
             }
