@@ -835,10 +835,22 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private void FaultEverything(Exception ex)
     {
         _connected.TrySetException(ex);
-        foreach (var kv in _pendingOpens) kv.Value.OnFailed(ex);
-        foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
-        foreach (var kv in _pendingCloses) kv.Value.TrySetException(ex);
-        foreach (var kv in _channels) kv.Value.OnFault(ex);
+
+        foreach (var kv in _pendingOpens)
+            if (_pendingOpens.TryRemove(kv.Key, out var pendingOpen))
+                pendingOpen.OnFailed(ex);
+
+        foreach (var kv in _pendingRequests)
+            if (_pendingRequests.TryRemove(kv.Key, out var pendingRequest))
+                pendingRequest.TrySetException(ex);
+
+        foreach (var kv in _pendingCloses)
+            if (_pendingCloses.TryRemove(kv.Key, out var pendingClose))
+                pendingClose.TrySetException(ex);
+
+        foreach (var kv in _channels)
+            if (_channels.TryRemove(kv.Key, out var channel))
+                channel.OnFault(ex);
     }
 
     private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(3);
