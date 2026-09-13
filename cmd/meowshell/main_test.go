@@ -309,3 +309,60 @@ func TestFindTailcatRejectsGroupWritableExecutable(t *testing.T) {
 		t.Fatal("findTailcat accepted a group-writable native executable")
 	}
 }
+
+func TestFindTailcatOnAndroidAcceptsSystemOwnedLibrary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a file owned by a different uid")
+	}
+	saved := runtimeGOOS
+	runtimeGOOS = "android"
+	defer func() { runtimeGOOS = saved }()
+
+	p := writeFakeTailcat(t)
+	// Simulates Android's package installer, which extracts an app's native
+	// libraries as itself (uid 1000, "system"), never as the app's own
+	// per-app uid -- the exact case that made every real device/emulator
+	// run reject tailcat/meowshell once ownership was checked unconditionally.
+	if err := os.Chown(p, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err != nil {
+		t.Fatalf("findTailcat rejected a system-owned native executable on android: %v", err)
+	}
+}
+
+func TestFindTailcatOnAndroidStillRejectsGroupWritableExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	saved := runtimeGOOS
+	runtimeGOOS = "android"
+	defer func() { runtimeGOOS = saved }()
+
+	p := writeFakeTailcat(t)
+	if err := os.Chmod(p, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a group-writable native executable on android")
+	}
+}
+
+func TestFindTailcatOffAndroidStillRejectsForeignOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a file owned by a different uid")
+	}
+	p := writeFakeTailcat(t)
+	if err := os.Chown(p, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a foreign-owned native executable off android")
+	}
+}
