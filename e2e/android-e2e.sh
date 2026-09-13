@@ -44,7 +44,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== pushing binaries =="
-adb shell "rm -rf $DEV; mkdir -p $DEV/home"
+adb shell "rm -rf $DEV; umask 077; mkdir -p $DEV/home; chmod 700 $DEV $DEV/home"
 adb push "$DIST/tailcat_android_$ABI" "$DEV/tailcat" >/dev/null
 adb push "$DIST/meowshell_android_$ABI" "$DEV/meowshell" >/dev/null
 adb shell "chmod 755 $DEV/tailcat $DEV/meowshell"
