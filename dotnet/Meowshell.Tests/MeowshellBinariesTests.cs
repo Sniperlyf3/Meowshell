@@ -31,8 +31,6 @@ public sealed class MeowshellBinariesTests : IDisposable
         var ex = Assert.Throws<IOException>(() => MeowshellBinaries.Locate(_dir, naming));
         Assert.Contains("write-capable access", ex.Message);
     }
-}
-
 
     [Fact]
     public void LocateRejectsUnixBinaryBelowWritableAncestor()
@@ -81,3 +79,4 @@ public sealed class MeowshellBinariesTests : IDisposable
         Assert.Equal(Path.Combine(binaries, naming.FileName("meowshell")), located.Meowshell);
         Assert.Equal(Path.Combine(binaries, naming.FileName("tailcat")), located.Tailcat);
     }
+}
