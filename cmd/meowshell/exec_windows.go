@@ -39,6 +39,14 @@ func runTailcat(bin string, argv, environ []string) error {
 		}
 		return err
 	}
+	if err := job.ensureAssigned(cmd.Process.Pid); err != nil {
+		if keyStdin != nil {
+			_ = keyStdin.Close()
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("protecting Tailcat child: %w", err)
+	}
 
 	if keyStdin != nil {
 		if _, err := keyStdin.Write(keyData); err != nil {
@@ -55,10 +63,10 @@ func runTailcat(bin string, argv, environ []string) error {
 		zeroBytes(keyData)
 	}
 
-	// The named kill-on-close Job Object was created before Start. The patched
-	// Tailcat joins it at the beginning of main, before it can launch any child
-	// process. This closes the Start -> AssignProcessToJobObject race that the
-	// old parent-side-only assignment left open.
+	// The named kill-on-close Job Object was created before Start. The shipped
+	// patched Tailcat joins it at the beginning of main, before it can launch
+	// descendants. The parent-side ensureAssigned above is both a verification
+	// and a fallback for a caller-supplied external Tailcat without that patch.
 	err = cmd.Wait()
 
 	var exit *exec.ExitError
