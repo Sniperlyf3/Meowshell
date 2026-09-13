@@ -212,10 +212,12 @@ type agentChannel struct {
 	writeMu       sync.Mutex
 	writeClosed   bool
 
-	sftpFile       *sftp.File
-	ctx            context.Context
-	cancel         context.CancelFunc
-	isUpload       bool
+	sftpFile          *sftp.File
+	sftpClose         func() error
+	transferCancelOnce sync.Once
+	ctx               context.Context
+	cancel            context.CancelFunc
+	isUpload          bool
 	uploadPath     string
 	uploadTempPath string
 	uploadPreserve bool
@@ -876,13 +878,7 @@ func (a *agentSession) failChannelWrite(channelID uint32, ch *agentChannel, err 
 		case ch.session != nil:
 			ch.session.Close()
 		case ch.sftpFile != nil:
-			if ch.cancel != nil {
-				ch.cancel()
-			}
-			ch.sftpFile.Close()
-			if ch.isUpload {
-				a.cleanupUploadTemp(ch)
-			}
+			a.cancelSFTPTransfer(ch, ch.isUpload)
 		}
 	})
 }
@@ -1109,12 +1105,9 @@ func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 		// Cancellation is intentionally different from normal EOF: never
 		// commit a partially uploaded staging file just because the caller
 		// closed the channel while unwinding a cancelled/failed UploadAsync.
-		stopChannelWriter(ch)
-		if ch.cancel != nil {
-			ch.cancel()
-		}
-		ch.sftpFile.Close()
-		a.cleanupUploadTemp(ch)
+		// File.Close itself can block behind an in-flight pkg/sftp Write, so
+		// cancellation must not perform it on the sole frame-reader goroutine.
+		a.cancelSFTPTransfer(ch, true)
 	case ch.sftpFile != nil && ch.isUpload:
 		// All preceding data frames have already been enqueued by the sole
 		// frame reader. Drain them without blocking that reader, then finalize.
@@ -1124,9 +1117,7 @@ func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 			a.finalizeUpload(channelID, ch)
 		}()
 	case ch.sftpFile != nil:
-		if ch.cancel != nil {
-			ch.cancel()
-		}
+		a.cancelSFTPTransfer(ch, false)
 	case ch.listener != nil:
 		ch.listener.Close()
 		// The only terminal signal a forward channel ever gets (see
@@ -1139,6 +1130,51 @@ func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 		// request was sent.
 		a.writeControl(channelID, controlMessage{Msg: "channel_closed"})
 	}
+}
+
+var sftpTransferCancelGrace = 2 * time.Second
+
+// cancelSFTPTransfer never waits on pkg/sftp.File.Close from the protocol
+// frame reader. File.Read/File.Write and File.Close share the same mutex, so
+// a peer that stops answering can otherwise make "close_channel" block behind
+// the very transfer it is meant to cancel. Give a responsive server a short
+// chance to close just this handle; if it cannot, tear down the SSH transport
+// so the blocked SFTP request is guaranteed to unwind rather than leaking a
+// goroutine indefinitely.
+func (a *agentSession) cancelSFTPTransfer(ch *agentChannel, cleanupUpload bool) {
+	if ch == nil {
+		return
+	}
+	ch.transferCancelOnce.Do(func() {
+		stopChannelWriter(ch)
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+
+		done := make(chan struct{})
+		go func() {
+			if ch.sftpClose != nil {
+				_ = ch.sftpClose()
+			} else if ch.sftpFile != nil {
+				_ = ch.sftpFile.Close()
+			}
+			if cleanupUpload && ch.isUpload {
+				a.cleanupUploadTemp(ch)
+			}
+			close(done)
+		}()
+
+		go func() {
+			timer := time.NewTimer(sftpTransferCancelGrace)
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-timer.C:
+				a.reportConnectionLost(fmt.Errorf("cancelled SFTP transfer did not stop within %s", sftpTransferCancelGrace))
+			}
+		}()
+	})
 }
 
 func (a *agentSession) removeChannel(id uint32) *agentChannel {
@@ -1160,10 +1196,7 @@ func (a *agentSession) closeAllChannels() {
 		case ch.session != nil:
 			ch.session.Close()
 		case ch.sftpFile != nil:
-			if ch.cancel != nil {
-				ch.cancel()
-			}
-			ch.sftpFile.Close()
+			a.cancelSFTPTransfer(ch, ch.isUpload)
 		case ch.listener != nil:
 			ch.listener.Close()
 		}
