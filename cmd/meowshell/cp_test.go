@@ -473,3 +473,24 @@ func TestCPUsageErrors(t *testing.T) {
 		})
 	}
 }
+
+
+func TestUploadFileDirectlyRefusesSymlink(t *testing.T) {
+	_, client, _, _ := newInProcessSFTPClient(t)
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("sensitive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := uploadFile(client, link, "remote.txt", false); err == nil {
+		t.Fatal("uploadFile followed a symlinked source")
+	}
+	if _, err := client.Stat("remote.txt"); err == nil {
+		t.Fatal("uploadFile created a destination for a rejected symlink")
+	}
+}
