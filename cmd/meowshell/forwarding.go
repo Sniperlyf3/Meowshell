@@ -107,7 +107,7 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errConnectionLost, err)
 		return
 	}
-	id, err := a.registerForward(ln)
+	id, stop, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
 		a.writeOpenError(msg.RequestID, errUnknown, err)
@@ -115,7 +115,7 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
-	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+	acceptForwardedConns(ln, msg.MaxConnections, stop, func(conn net.Conn) {
 		proxyForwardedConn(conn, func() (net.Conn, error) {
 			var abort func()
 			if a.tcAddr == "" {
@@ -144,7 +144,7 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
 		return
 	}
-	id, err := a.registerForward(ln)
+	id, stop, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
 		a.writeOpenError(msg.RequestID, errUnknown, err)
@@ -152,7 +152,7 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
-	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+	acceptForwardedConns(ln, msg.MaxConnections, stop, func(conn net.Conn) {
 		proxyForwardedConn(conn, func() (net.Conn, error) {
 			d := net.Dialer{Timeout: tcpDialTimeout}
 			return dialWithTimeout(d.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout, nil)
@@ -172,7 +172,7 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errConnectionLost, err)
 		return
 	}
-	id, err := a.registerForward(ln)
+	id, stop, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
 		a.writeOpenError(msg.RequestID, errUnknown, err)
@@ -180,7 +180,7 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 	}
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
-	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
+	acceptForwardedConns(ln, msg.MaxConnections, stop, func(conn net.Conn) {
 		var abort func()
 		if a.tcAddr == "" {
 			abort = func() {
@@ -201,15 +201,21 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 // number of goroutines, file descriptors, and dial attempts piling up for a
 // single forward. Zero (the default) means unlimited, matching every
 // forward's behavior before this limit existed.
-func acceptForwardedConns(ln net.Listener, maxConnections int, handle func(net.Conn)) {
+func acceptForwardedConns(ln net.Listener, maxConnections int, stop <-chan struct{}, handle func(net.Conn)) <-chan struct{} {
 	var sem chan struct{}
 	if maxConnections > 0 {
 		sem = make(chan struct{}, maxConnections)
 	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			if sem != nil {
-				sem <- struct{}{}
+				select {
+				case sem <- struct{}{}:
+				case <-stop:
+					return
+				}
 			}
 			conn, err := ln.Accept()
 			if err != nil {
@@ -217,6 +223,15 @@ func acceptForwardedConns(ln net.Listener, maxConnections int, handle func(net.C
 					<-sem
 				}
 				return
+			}
+			select {
+			case <-stop:
+				conn.Close()
+				if sem != nil {
+					<-sem
+				}
+				return
+			default:
 			}
 			go func() {
 				defer func() {
@@ -228,6 +243,7 @@ func acceptForwardedConns(ln net.Listener, maxConnections int, handle func(net.C
 			}()
 		}
 	}()
+	return done
 }
 
 // dialWithTimeout bounds a dial func that has no timeout of its own --
@@ -270,8 +286,21 @@ func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network,
 	}
 }
 
-func (a *agentSession) registerForward(ln net.Listener) (uint32, error) {
-	return a.registerChannel(&agentChannel{listener: ln})
+func (a *agentSession) registerForward(ln net.Listener) (uint32, <-chan struct{}, error) {
+	stop := make(chan struct{})
+	id, err := a.registerChannel(&agentChannel{listener: ln, forwardStop: stop})
+	if err != nil {
+		close(stop)
+		return 0, nil, err
+	}
+	return id, stop, nil
+}
+
+func stopForwardAccept(ch *agentChannel) {
+	if ch == nil || ch.forwardStop == nil {
+		return
+	}
+	ch.forwardStopOnce.Do(func() { close(ch.forwardStop) })
 }
 
 // halfCloser is implemented by *net.TCPConn and *net.UnixConn, the two
