@@ -272,6 +272,29 @@ jobs:
           go vet ./...
           go test -v ./... -count=1 -timeout=90s
 
+      - name: Create a private Windows binary staging directory
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'meowshell-dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $acl = Get-Acl $dist
+          $acl.SetAccessRuleProtection($true, $false)
+          foreach ($sid in @(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+          )) {
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+              $sid,
+              [System.Security.AccessControl.FileSystemRights]::FullControl,
+              [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',
+              [System.Security.AccessControl.PropagationFlags]::None,
+              [System.Security.AccessControl.AccessControlType]::Allow
+            )
+            $acl.AddAccessRule($rule)
+          }
+          Set-Acl -Path $dist -AclObject $acl
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: tailcat-binaries
