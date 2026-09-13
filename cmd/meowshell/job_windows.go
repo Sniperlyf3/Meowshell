@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"unsafe"
 
@@ -15,6 +17,19 @@ import (
 // killed/crashes, Windows closes the handle for us and tears the child down.
 type killOnCloseJob struct {
 	handle windows.Handle
+}
+
+func newNamedKillOnCloseJob() (*killOnCloseJob, string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, "", fmt.Errorf("generating Windows Job Object name: %w", err)
+	}
+	name := "Local\\Meowshell-" + hex.EncodeToString(nonce[:])
+	job, err := createKillOnCloseJob(name)
+	if err != nil {
+		return nil, "", err
+	}
+	return job, name, nil
 }
 
 func createKillOnCloseJob(name string) (*killOnCloseJob, error) {
