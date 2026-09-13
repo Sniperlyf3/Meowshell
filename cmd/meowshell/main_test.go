@@ -366,3 +366,21 @@ func TestFindTailcatOffAndroidStillRejectsForeignOwner(t *testing.T) {
 		t.Fatal("findTailcat accepted a foreign-owned native executable off android")
 	}
 }
+
+
+func TestFindTailcatRejectsSafeBinaryInsideWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a native executable in a group/other-writable directory")
+	}
+}
