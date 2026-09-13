@@ -38,13 +38,13 @@ func stageKey(dir string, data []byte) (string, error) {
 	return "-", nil
 }
 
-func prepareStagedKeyStdin() error {
+func prepareStagedKeyStdin() (bool, error) {
 	if stagedKey == nil {
-		return nil
+		return false, nil
 	}
 	f := stagedKey
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewinding staged key for tailcat stdin: %w", err)
+		return false, fmt.Errorf("rewinding staged key for tailcat stdin: %w", err)
 	}
 
 	fd := int(f.Fd())
@@ -55,13 +55,15 @@ func prepareStagedKeyStdin() error {
 			os.Stdin.Fd(),
 			0,
 		); errno != 0 {
-			return fmt.Errorf("placing staged key on stdin: %w", errno)
+			return false, fmt.Errorf("placing staged key on stdin: %w", errno)
 		}
 		if err := f.Close(); err != nil {
-			return fmt.Errorf("closing staged key descriptor: %w", err)
+			_ = os.Stdin.Close()
+			stagedKey = nil
+			return false, fmt.Errorf("closing staged key descriptor: %w", err)
 		}
 	}
-	// dup2 clears FD_CLOEXEC on the destination, but if CreateTemp happened to
+	// dup3 with flags=0 clears FD_CLOEXEC on the destination, but if CreateTemp happened to
 	// allocate fd 0 because the caller started with stdin closed, clear it
 	// explicitly so --key=- still works after exec.
 	if _, _, errno := syscall.Syscall(
@@ -70,10 +72,12 @@ func prepareStagedKeyStdin() error {
 		syscall.F_SETFD,
 		0,
 	); errno != 0 {
-		return fmt.Errorf("making staged key stdin inheritable: %w", errno)
+		_ = os.Stdin.Close()
+		stagedKey = nil
+		return false, fmt.Errorf("making staged key stdin inheritable: %w", errno)
 	}
 	stagedKey = nil
-	return nil
+	return true, nil
 }
 
 func cleanupStagedKey() {
