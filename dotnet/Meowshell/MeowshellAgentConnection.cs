@@ -528,9 +528,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                _channels.TryRemove(id, out _);
                 if (_pendingCloses.TryRemove(id, out var removed))
                     removed.TrySetException(ex);
-                _channels.TryRemove(id, out _);
                 throw;
             }
         }
