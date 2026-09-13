@@ -231,7 +231,9 @@ type agentChannel struct {
 	uploadErrMu sync.Mutex
 	uploadErr   error
 
-	listener net.Listener
+	listener        net.Listener
+	forwardStop     chan struct{}
+	forwardStopOnce sync.Once
 }
 
 type agentSession struct {
@@ -1119,6 +1121,7 @@ func (a *agentSession) closeChannel(channelID uint32, msg controlMessage) {
 	case ch.sftpFile != nil:
 		a.cancelSFTPTransfer(ch, false)
 	case ch.listener != nil:
+		stopForwardAccept(ch)
 		ch.listener.Close()
 		// The only terminal signal a forward channel ever gets (see
 		// CloseForwardAsync's own comment on the .NET side): unlike
@@ -1198,6 +1201,7 @@ func (a *agentSession) closeAllChannels() {
 		case ch.sftpFile != nil:
 			a.cancelSFTPTransfer(ch, ch.isUpload)
 		case ch.listener != nil:
+			stopForwardAccept(ch)
 			ch.listener.Close()
 		}
 	}
