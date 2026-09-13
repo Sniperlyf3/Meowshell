@@ -717,9 +717,15 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 _ = WriteControlAsync(channelId, new AgentMessage { Msg = "close_channel" }, CancellationToken.None);
                 return;
             case "channel_closed":
+                // Make the channel disappear before releasing CloseForwardAsync
+                // waiters. RunContinuationsAsynchronously prevents inline
+                // continuation execution, but the continuation can still run
+                // concurrently on another thread as soon as TrySetResult is
+                // called; completing first made DisposeAsync observably return
+                // while the channel was still present for a brief race window.
+                _channels.TryRemove(channelId, out _);
                 if (_pendingCloses.TryRemove(channelId, out var closedTcs))
                     closedTcs.TrySetResult();
-                _channels.TryRemove(channelId, out _);
                 return;
             case "sftp_result":
                 if (msg.RequestId is not null && _pendingRequests.TryRemove(msg.RequestId, out var resultTcs))
