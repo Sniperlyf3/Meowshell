@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -46,15 +47,27 @@ func (j *killOnCloseJob) ensureAssigned(pid int) error {
 		return result != 0, nil
 	}
 
-	if inJob, err := contains(); err != nil {
-		return fmt.Errorf("checking Tailcat Job Object membership: %w", err)
-	} else if inJob {
-		return nil
+	// The shipped Tailcat self-joins this already-created job at the very
+	// beginning of main, before it can launch descendants. Give that race-free
+	// path a brief chance to complete first. A caller-supplied older Tailcat
+	// will never join, so after this bounded grace period we fall back to the
+	// previous parent-side assignment rather than dropping containment.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if inJob, err := contains(); err != nil {
+			return fmt.Errorf("checking Tailcat Job Object membership: %w", err)
+		} else if inJob {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+
 	if err := windows.AssignProcessToJobObject(j.handle, process); err != nil {
-		// The child can race only in the safe direction and self-join between
-		// our membership check and assignment. Re-check before treating the
-		// assignment error as fatal.
+		// The child can still self-join between our final membership check and
+		// assignment. Re-check before treating the assignment error as fatal.
 		if inJob, checkErr := contains(); checkErr == nil && inJob {
 			return nil
 		}
