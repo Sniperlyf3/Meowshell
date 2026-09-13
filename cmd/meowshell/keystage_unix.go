@@ -49,8 +49,13 @@ func prepareStagedKeyStdin() error {
 
 	fd := int(f.Fd())
 	if fd != int(os.Stdin.Fd()) {
-		if err := syscall.Dup2(fd, int(os.Stdin.Fd())); err != nil {
-			return fmt.Errorf("placing staged key on stdin: %w", err)
+		if _, _, errno := syscall.RawSyscall(
+			syscall.SYS_DUP3,
+			uintptr(fd),
+			os.Stdin.Fd(),
+			0,
+		); errno != 0 {
+			return fmt.Errorf("placing staged key on stdin: %w", errno)
 		}
 		if err := f.Close(); err != nil {
 			return fmt.Errorf("closing staged key descriptor: %w", err)
