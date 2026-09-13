@@ -58,6 +58,8 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	return c.cl.DialTCP(ctx, netip.AddrPortFrom(ip.Unmap(), uint16(port)))
 }
 
+const maxTailcatKeyJSON = 64 << 10
+
 func tailcatKeyFromName(name string) (key.NodePrivate, error) {
 	if name == "" {
 		// Mirrors tailcat's own clientKey(): an empty --key means "use the
@@ -88,7 +90,6 @@ func tailcatKeyFromName(name string) (key.NodePrivate, error) {
 		}
 		path = filepath.Join(confDir, "tailcat", "keys", name+".private.json")
 	}
-	const maxTailcatKeyJSON = 64 << 10
 	f, err := os.Open(path)
 	if err != nil {
 		return key.NodePrivate{}, err
