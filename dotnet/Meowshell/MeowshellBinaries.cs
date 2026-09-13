@@ -55,6 +55,9 @@ internal static class MeowshellBinaries
         if ((directoryMode & writeDirectoryByOthers) != 0)
             throw new IOException($"refusing native binary directory writable by group/other: {directory.FullName}");
 
+        if (!OperatingSystem.IsAndroid())
+            ValidateUnixAncestorDirectories(directory);
+
         var mode = File.GetUnixFileMode(path);
         const UnixFileMode writeByOthers =
             UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
@@ -71,6 +74,24 @@ internal static class MeowshellBinaries
             // only the owner's execute bit; making a private binary executable
             // by group/other broadens access for no functional reason.
             File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static void ValidateUnixAncestorDirectories(DirectoryInfo directory)
+    {
+        for (DirectoryInfo? current = directory.Parent; current is not null; current = current.Parent)
+        {
+            current.Refresh();
+            if ((current.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new IOException($"refusing native binary path through symlink/reparse point: {current.FullName}");
+
+            var mode = File.GetUnixFileMode(current.FullName);
+            const UnixFileMode writeByOthers = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+            if ((mode & writeByOthers) != 0 && (mode & UnixFileMode.StickyBit) == 0)
+            {
+                throw new IOException(
+                    $"refusing native binary path: ancestor directory writable by group/other without sticky bit: {current.FullName}");
+            }
         }
     }
 
