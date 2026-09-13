@@ -33,7 +33,15 @@ internal static class MeowshellAgentProtocol
         buf[4] = frame.Type;
         WriteUInt32BigEndian(buf.AsSpan(5, 4), frame.ChannelId);
         frame.Payload.CopyTo(buf.AsSpan(9));
-        await stream.WriteAsync(buf, cancellationToken).ConfigureAwait(false);
+
+        // A frame is a length-prefixed atomic protocol unit. If caller
+        // cancellation interrupts the underlying stream write after only a
+        // prefix has been committed, the next write is interpreted as the
+        // remainder of this frame and the multiplexed connection is
+        // permanently desynchronized. Honor cancellation before touching the
+        // stream, but once a frame starts, finish that one write intact.
+        cancellationToken.ThrowIfCancellationRequested();
+        await stream.WriteAsync(buf, CancellationToken.None).ConfigureAwait(false);
     }
 
     public static Task WriteControlAsync(Stream stream, uint channelId, AgentMessage message, CancellationToken cancellationToken)
