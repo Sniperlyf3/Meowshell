@@ -57,8 +57,12 @@ func validateNativeExecutableDir(path string) error {
 		return nil
 	}
 
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving native executable directory %s: %w", path, err)
+	}
 	euid := uint32(os.Geteuid())
-	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+	for current := filepath.Clean(absolutePath); ; current = filepath.Dir(current) {
 		fi, err := os.Lstat(current)
 		if err != nil {
 			return fmt.Errorf("checking native executable directory %s: %w", current, err)
