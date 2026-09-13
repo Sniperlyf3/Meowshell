@@ -146,7 +146,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			return
 		}
 		ch := &agentChannel{
-			sftpFile: f, ctx: ctx, cancel: cancel, isUpload: true,
+			sftpFile: f, sftpClose: f.Close, ctx: ctx, cancel: cancel, isUpload: true,
 			uploadPath: msg.Path, uploadTempPath: tempPath,
 			uploadPreserve: msg.Preserve, uploadMode: msg.Mode, uploadModTime: msg.ModTime,
 		}
@@ -173,7 +173,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			a.writeOpenError(msg.RequestID, classifySFTPError(err), fmt.Errorf("opening %s: %w", msg.Path, err))
 			return
 		}
-		ch := &agentChannel{sftpFile: f, ctx: ctx, cancel: cancel}
+		ch := &agentChannel{sftpFile: f, sftpClose: f.Close, ctx: ctx, cancel: cancel}
 		id, err := a.registerChannel(ch)
 		if err != nil {
 			cancel()
