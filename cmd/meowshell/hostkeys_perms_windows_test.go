@@ -178,7 +178,7 @@ func TestValidateKnownHostsDirRejectsWorldDeleteChildAccess(t *testing.T) {
 	}
 	setDACL(t, dir, []windows.EXPLICIT_ACCESS{
 		grantSID(currentUserSID(t), windows.GENERIC_ALL),
-		grantSID(everyone, windows.FILE_DELETE_CHILD),
+		grantSID(everyone, fileDeleteChild),
 	})
 
 	err = validateKnownHostsDir(dir)
