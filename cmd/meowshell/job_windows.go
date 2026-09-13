@@ -19,6 +19,50 @@ type killOnCloseJob struct {
 	handle windows.Handle
 }
 
+var isProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+func (j *killOnCloseJob) ensureAssigned(pid int) error {
+	const processQueryLimitedInformation = 0x1000
+	process, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|processQueryLimitedInformation,
+		false,
+		uint32(pid),
+	)
+	if err != nil {
+		return fmt.Errorf("opening Tailcat process for job assignment: %w", err)
+	}
+	defer windows.CloseHandle(process)
+
+	contains := func() (bool, error) {
+		var result uint32
+		r1, _, callErr := isProcessInJob.Call(
+			uintptr(process),
+			uintptr(j.handle),
+			uintptr(unsafe.Pointer(&result)),
+		)
+		if r1 == 0 {
+			return false, callErr
+		}
+		return result != 0, nil
+	}
+
+	if inJob, err := contains(); err != nil {
+		return fmt.Errorf("checking Tailcat Job Object membership: %w", err)
+	} else if inJob {
+		return nil
+	}
+	if err := windows.AssignProcessToJobObject(j.handle, process); err != nil {
+		// The child can race only in the safe direction and self-join between
+		// our membership check and assignment. Re-check before treating the
+		// assignment error as fatal.
+		if inJob, checkErr := contains(); checkErr == nil && inJob {
+			return nil
+		}
+		return fmt.Errorf("assigning Tailcat process to Job Object: %w", err)
+	}
+	return nil
+}
+
 func newNamedKillOnCloseJob() (*killOnCloseJob, string, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
