@@ -20,6 +20,9 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 			if conn, err := net.Dial("unix", sock); err == nil {
 				if s, err := agent.NewClient(conn).Signers(); err == nil {
 					signers = append(signers, s...)
+					a.authAgentCloser = conn
+				} else {
+					_ = conn.Close()
 				}
 				a.agentForwardSock = sock
 			}
@@ -72,6 +75,15 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 		ssh.PasswordCallback(a.promptPassword),
 	)
 	return methods, nil
+}
+
+
+func (a *agentSession) closeAuthAgent() {
+	if a.authAgentCloser == nil {
+		return
+	}
+	_ = a.authAgentCloser.Close()
+	a.authAgentCloser = nil
 }
 
 func (a *agentSession) parseKeyMaybePrompting(keyBytes []byte) (ssh.Signer, error) {
