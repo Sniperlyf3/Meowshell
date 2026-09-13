@@ -384,3 +384,46 @@ func TestFindTailcatRejectsSafeBinaryInsideWritableDirectory(t *testing.T) {
 		t.Fatal("findTailcat accepted a native executable in a group/other-writable directory")
 	}
 }
+
+
+func TestFindTailcatRejectsSafeBinaryBelowWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	ancestor := t.TempDir()
+	if err := os.Chmod(ancestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ancestor, "private")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a native executable below a replaceable writable ancestor")
+	}
+}
+
+func TestFindTailcatAllowsTrustedStickyWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	ancestor := t.TempDir()
+	if err := os.Chmod(ancestor, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ancestor, "private")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err != nil {
+		t.Fatalf("findTailcat rejected safe binary below trusted sticky ancestor: %v", err)
+	}
+}
