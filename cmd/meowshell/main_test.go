@@ -405,6 +405,13 @@ func TestFindTailcatRejectsSafeBinaryBelowWritableAncestor(t *testing.T) {
 	if _, err := findTailcat(p); err == nil {
 		t.Fatal("findTailcat accepted a native executable below a replaceable writable ancestor")
 	}
+	rel, err := filepath.Rel(".", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(rel); err == nil {
+		t.Fatal("findTailcat accepted a relative native executable path below a replaceable writable ancestor")
+	}
 }
 
 func TestFindTailcatAllowsTrustedStickyWritableAncestor(t *testing.T) {
