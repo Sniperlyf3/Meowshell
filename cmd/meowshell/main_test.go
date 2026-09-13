@@ -405,7 +405,11 @@ func TestFindTailcatRejectsSafeBinaryBelowWritableAncestor(t *testing.T) {
 	if _, err := findTailcat(p); err == nil {
 		t.Fatal("findTailcat accepted a native executable below a replaceable writable ancestor")
 	}
-	rel, err := filepath.Rel(".", p)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(cwd, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +423,7 @@ func TestFindTailcatAllowsTrustedStickyWritableAncestor(t *testing.T) {
 		t.Skip("Unix mode bits do not apply")
 	}
 	ancestor := t.TempDir()
-	if err := os.Chmod(ancestor, 0o1777); err != nil {
+	if err := os.Chmod(ancestor, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(ancestor, "private")
