@@ -50,6 +50,42 @@ public sealed class MeowshellAgentProtocolTests
     }
 
     [Fact]
+    public async Task WriteFrameAsyncHonorsCancellationBeforeWritingAnything()
+    {
+        using var stream = new MemoryStream();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            MeowshellAgentProtocol.WriteFrameAsync(
+                stream,
+                new MeowshellAgentProtocol.AgentFrame(MeowshellAgentProtocol.FrameTypeData, 1, [1, 2, 3]),
+                cancellation.Token));
+
+        Assert.Equal(0, stream.Length);
+    }
+
+    [Fact]
+    public async Task CancellationDuringAFrameCannotLeaveAPartialFrame()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var stream = new CancelCallerDuringWriteStream(cancellation);
+        var payload = Enumerable.Range(0, 4096).Select(i => (byte)i).ToArray();
+
+        await MeowshellAgentProtocol.WriteFrameAsync(
+            stream,
+            new MeowshellAgentProtocol.AgentFrame(MeowshellAgentProtocol.FrameTypeData, 17, payload),
+            cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        stream.Position = 0;
+        var frame = await MeowshellAgentProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        Assert.NotNull(frame);
+        Assert.Equal(17u, frame!.Value.ChannelId);
+        Assert.Equal(payload, frame.Value.Payload);
+    }
+
+    [Fact]
     public async Task ReadFrameAsyncReturnsNullOnCleanEof()
     {
         using var stream = new MemoryStream();
@@ -90,6 +126,16 @@ public sealed class MeowshellAgentProtocolTests
 
         await Assert.ThrowsAsync<TailcatException>(
             () => MeowshellAgentProtocol.ReadFrameAsync(truncatedStream, CancellationToken.None));
+    }
+}
+
+
+file sealed class CancelCallerDuringWriteStream(CancellationTokenSource callerCancellation) : MemoryStream
+{
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        callerCancellation.Cancel();
+        return base.WriteAsync(buffer, cancellationToken);
     }
 }
 
