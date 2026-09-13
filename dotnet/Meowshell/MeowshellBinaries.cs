@@ -37,11 +37,23 @@ internal static class MeowshellBinaries
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
             throw new IOException($"refusing native binary symlink/reparse point: {path}");
 
+        var directory = info.Directory
+            ?? throw new IOException($"native binary has no containing directory: {path}");
+        if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException($"refusing native binary directory symlink/reparse point: {directory.FullName}");
+
         if (OperatingSystem.IsWindows())
         {
+            ValidateWindowsDirectory(directory);
             ValidateWindowsExecutable(info);
             return;
         }
+
+        var directoryMode = File.GetUnixFileMode(directory.FullName);
+        const UnixFileMode writeDirectoryByOthers =
+            UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+        if ((directoryMode & writeDirectoryByOthers) != 0)
+            throw new IOException($"refusing native binary directory writable by group/other: {directory.FullName}");
 
         var mode = File.GetUnixFileMode(path);
         const UnixFileMode writeByOthers =
@@ -59,6 +71,55 @@ internal static class MeowshellBinaries
             // only the owner's execute bit; making a private binary executable
             // by group/other broadens access for no functional reason.
             File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ValidateWindowsDirectory(DirectoryInfo info)
+    {
+        var security = info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier
+            ?? throw new IOException($"refusing native binary directory {info.FullName}: Windows ACL has no owner SID");
+
+        using var identity = WindowsIdentity.GetCurrent();
+        var current = identity.User
+            ?? throw new IOException($"refusing native binary directory {info.FullName}: current Windows identity has no user SID");
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+
+        bool Trusted(IdentityReference sid) =>
+            sid.Equals(current) || sid.Equals(admins) || sid.Equals(system);
+
+        if (!Trusted(owner))
+            throw new IOException(
+                $"refusing native binary directory {info.FullName}: not owned by the current user, Administrators, or SYSTEM");
+
+        const FileSystemRights writeCapable =
+            FileSystemRights.Write |
+            FileSystemRights.Modify |
+            FileSystemRights.FullControl |
+            FileSystemRights.ChangePermissions |
+            FileSystemRights.TakeOwnership |
+            FileSystemRights.Delete |
+            FileSystemRights.DeleteSubdirectoriesAndFiles |
+            FileSystemRights.CreateFiles |
+            FileSystemRights.CreateDirectories |
+            FileSystemRights.AppendData |
+            FileSystemRights.WriteAttributes |
+            FileSystemRights.WriteExtendedAttributes;
+
+        var rules = security.GetAccessRules(
+            includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType != AccessControlType.Allow)
+                continue;
+            if ((rule.FileSystemRights & writeCapable) == 0)
+                continue;
+            if (Trusted(rule.IdentityReference))
+                continue;
+            throw new IOException(
+                $"refusing native binary directory {info.FullName}: grants write-capable access to {rule.IdentityReference.Value}");
         }
     }
 
