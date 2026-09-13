@@ -116,6 +116,7 @@ func agentCmd(args []string) error {
 
 	auth, err := session.buildAuthMethods(cfg)
 	if err != nil {
+		session.closeAuthAgent()
 		session.writeError(0, errAuthFailed, err)
 		return err
 	}
@@ -132,6 +133,11 @@ func agentCmd(args []string) error {
 		proxyURL:       cfg.ProxyURL,
 		auth:           auth,
 	})
+	// Agent-backed signers only need their local SSH_AUTH_SOCK connection
+	// while the SSH handshakes above are in progress. Keep it alive across
+	// every jump-host/final-host authentication, then release it promptly
+	// instead of retaining a file descriptor for the connection's lifetime.
+	session.closeAuthAgent()
 	if err != nil {
 		session.writeError(0, classifyConnectError(err), err)
 		return err
@@ -262,6 +268,7 @@ type agentSession struct {
 	nextPromptID atomic.Uint64
 
 	agentForwardSock     string
+	authAgentCloser      io.Closer
 	agentForwardingReady bool
 
 	tcAddr       tailcat.Addr
