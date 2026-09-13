@@ -12,13 +12,13 @@ diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
 -		path := keyPath(*flagKey)
 -		j, err := os.ReadFile(path)
 +		j, path, err := readKeyJSON(*flagKey)
-@@ -1728,3 +1726,24 @@ func keyIsPath(name string) bool {
+@@ -1728,3 +1726,35 @@ func keyIsPath(name string) bool {
  	return strings.ContainsAny(name, `/\`)
  }
  
 +func readKeyJSON(name string) ([]byte, string, error) {
++	const maxKeyJSON = 64 << 10
 +	if name == "-" {
-+		const maxKeyJSON = 64 << 10
 +		j, err := io.ReadAll(io.LimitReader(os.Stdin, maxKeyJSON+1))
 +		closeErr := os.Stdin.Close()
 +		if err != nil {
@@ -33,7 +33,18 @@ diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
 +		return j, "stdin", nil
 +	}
 +	path := keyPath(name)
-+	j, err := os.ReadFile(path)
-+	return j, path, err
++	f, err := os.Open(path)
++	if err != nil {
++		return nil, path, err
++	}
++	defer f.Close()
++	j, err := io.ReadAll(io.LimitReader(f, maxKeyJSON+1))
++	if err != nil {
++		return nil, path, err
++	}
++	if len(j) > maxKeyJSON {
++		return nil, path, fmt.Errorf("private key JSON from %s exceeds %d bytes", path, maxKeyJSON)
++	}
++	return j, path, nil
 +}
 +
