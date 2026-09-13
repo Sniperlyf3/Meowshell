@@ -88,6 +88,15 @@ func TestParentJobSelfJoinClosesStartupRace(t *testing.T) {
 		job.Close()
 		t.Fatal(err)
 	}
+	// Production runTailcat performs this verification/fallback immediately
+	// after Start. It must observe the child's self-join rather than racing it
+	// with a second assignment to the same Job Object.
+	if err := job.ensureAssigned(cmd.Process.Pid); err != nil {
+		job.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		t.Fatalf("verifying child self-join: %v", err)
+	}
 	defer func() {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
