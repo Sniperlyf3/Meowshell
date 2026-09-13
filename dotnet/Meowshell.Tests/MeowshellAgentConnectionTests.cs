@@ -417,7 +417,7 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
         await using var _ = connection;
 
-        _ = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
         Assert.True(connection.ChannelCountForTests > 0);
 
         await connection.StopAsync();

@@ -77,6 +77,7 @@ internal static class MeowshellBinaries
         }
     }
 
+    [UnsupportedOSPlatform("windows")]
     private static void ValidateUnixAncestorDirectories(DirectoryInfo directory)
     {
         for (DirectoryInfo? current = directory.Parent; current is not null; current = current.Parent)
