@@ -27,14 +27,6 @@ func (e *hostKeyChangedError) Error() string {
 }
 func (e *hostKeyChangedError) Unwrap() error { return e.err }
 
-// hostKeyUnknownError is the other half of the host key story: the host is
-// absent from known_hosts and its key was not accepted, because the user
-// declined it or because nothing was listening to be asked. That is a
-// question ("this host is new -- trust it?"), where hostKeyChangedError is a
-// warning, and a client has to be able to tell the two apart to show a user
-// anything sensible. classifyConnectError maps this to errHostKeyUnknown;
-// without it a declined or unanswerable prompt arrived as the untyped
-// errUnknown, indistinguishable from any other connection failure.
 type hostKeyUnknownError struct {
 	hostname string
 	reason   string
@@ -132,10 +124,17 @@ func appendKnownHost(knownHostsPath, hostname string, key ssh.PublicKey) error {
 	if err != nil {
 		return fmt.Errorf("recording accepted host key: %w", err)
 	}
-	defer f.Close()
 	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
 	if _, err := fmt.Fprintln(f, line); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("recording accepted host key: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("syncing accepted host key: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing accepted host key: %w", err)
 	}
 	return nil
 }

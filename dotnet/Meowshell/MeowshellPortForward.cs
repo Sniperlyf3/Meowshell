@@ -58,7 +58,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
         {
@@ -96,20 +96,27 @@ public sealed class MeowshellPortForward : IAsyncDisposable
 
         void HandleLog(string line)
         {
-            onLog?.Invoke(line);
             const string marker = "forwarding ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var rest = line[(at + marker.Length)..];
-            var end = rest.IndexOf(' ');
-            if (end <= 0) return;
-            lock (bound)
+            if (at >= 0)
             {
-                if (bound.Count < options.Mappings.Count)
-                    bound.Add(rest[..end]);
-                if (bound.Count == options.Mappings.Count)
-                    ready.TrySetResult();
+                var rest = line[(at + marker.Length)..];
+                var end = rest.IndexOf(' ');
+                if (end > 0)
+                {
+                    lock (bound)
+                    {
+                        if (bound.Count < options.Mappings.Count)
+                            bound.Add(rest[..end]);
+                        if (bound.Count == options.Mappings.Count)
+                            ready.TrySetResult();
+                    }
+                }
             }
+
+            // Application logging is observational only. It must neither hide
+            // readiness when it throws nor be silently dropped by the wrapper.
+            try { onLog?.Invoke(line); } catch { }
         }
 
         try

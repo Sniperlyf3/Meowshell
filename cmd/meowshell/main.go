@@ -68,6 +68,7 @@ executable, then on $PATH.
 `
 
 func main() {
+	startManagedParentWatchdog()
 	if err := joinParentJobFromEnv(); err != nil {
 		fmt.Fprintf(os.Stderr, "meowshell: %v\n", err)
 		os.Exit(1)
@@ -265,9 +266,13 @@ func stagingDir(home string) string {
 }
 
 func keyFromStdin(dir string) (string, error) {
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<16))
+	const maxKeyJSON = 64 << 10
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxKeyJSON+1))
 	if err != nil {
 		return "", fmt.Errorf("reading key from stdin: %w", err)
+	}
+	if len(data) > maxKeyJSON {
+		return "", fmt.Errorf("key from stdin exceeds %d bytes", maxKeyJSON)
 	}
 	if err := validateKey(data); err != nil {
 		return "", err
@@ -386,12 +391,15 @@ func findTailcat(explicit string) (string, error) {
 			return "", false
 		}
 		tried = append(tried, p)
-		fi, err := os.Stat(p)
-		if err != nil || fi.IsDir() {
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 {
 			return "", false
 		}
 
 		if runtimeGOOS != "windows" && fi.Mode()&0o111 == 0 {
+			return "", false
+		}
+		if err := validateNativeExecutable(p, fi); err != nil {
 			return "", false
 		}
 		return p, true
@@ -412,7 +420,9 @@ func findTailcat(explicit string) (string, error) {
 		}
 	}
 	if p, err := exec.LookPath("tailcat"); err == nil {
-		return p, nil
+		if p, ok := check(p); ok {
+			return p, nil
+		}
 	}
 	tried = append(tried, "$PATH")
 	return "", fmt.Errorf("no tailcat binary found (looked in %s); set $TAILCAT_BIN or pass --tailcat", strings.Join(tried, ", "))

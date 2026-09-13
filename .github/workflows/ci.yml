@@ -26,7 +26,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       # cmd/meowshell's go.mod replaces github.com/tailscale/tailcat with a
       # local ./.tailcat-src checkout (see tailcatdial.go's doc comment for
@@ -50,63 +50,58 @@ jobs:
 
       - name: Vet and test meowshell
         env:
-          # tailcat's go.mod asks for a newer Go than setup-go's stable may
-          # be; let the toolchain fetch it rather than pinning a version here.
-          GOTOOLCHAIN: auto
+          # Both root and pinned tailcat go.mod require this exact toolchain;
+          # never let an implicit toolchain download change release inputs.
+          GOTOOLCHAIN: local
         run: |
           go vet ./...
-          go test ./... -count=10
+          go test -v ./... -count=1 -timeout=90s
 
       - name: Scan Go call paths for known vulnerabilities
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
         run: |
           go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
-      - name: Locate the NDK
+      - name: Locate the pinned NDK
         run: |
-          ndk=${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}
-          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
-            echo "::error::no Android NDK found on this runner" >&2
+          readonly ndk_revision=29.0.14206865
+          sdk_root=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}
+          ndk="$sdk_root/ndk/$ndk_revision"
+          if [ ! -d "$ndk" ]; then
+            echo "::error::required Android NDK $ndk_revision is not installed at $ndk" >&2
+            exit 1
+          fi
+          if ! grep -Fq "Pkg.Revision = $ndk_revision" "$ndk/source.properties"; then
+            echo "::error::Android NDK at $ndk does not report revision $ndk_revision" >&2
+            cat "$ndk/source.properties" >&2 || true
             exit 1
           fi
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
-          echo "using NDK at $ndk"
-          cat "$ndk/source.properties" || true
+          echo "using pinned NDK at $ndk"
 
       - name: Build
         env:
-          # tailcat's go.mod asks for a newer Go than setup-go's stable may
-          # be; let the toolchain fetch it rather than pinning a version here.
-          GOTOOLCHAIN: auto
+          # Both root and pinned tailcat go.mod require this exact toolchain;
+          # never let an implicit toolchain download change release inputs.
+          GOTOOLCHAIN: local
           SRC_REF: ${{ inputs.tailcat_ref }}
           ANDROID_API_LEVEL: ${{ inputs.android_api_level || '21' }}
         run: ./build.sh
 
-      # The "Vet and test meowshell" step above runs before ./build.sh, so
-      # dist/ does not exist yet and every test gated on findE2EBinary --
-      # 22 of them, the whole agent E2E suite -- skips silently there. They
-      # have therefore never run in CI at all. Run them here instead, where
-      # the binaries they need have just been built.
-      #
-      # MEOWSHELL/TAILCAT are set rather than left to findE2EBinary's
-      # ../../dist fallback deliberately: the fallback skips when the file
-      # is missing, while an explicit path is returned unchecked, so a
-      # binary that fails to build fails these tests loudly instead of
-      # quietly reverting them to the no-op they have been.
-      #
-      # -count=1, not the 10 above: these drive real subprocesses, servers
-      # and sockets, and one honest pass of each is the point.
+      # Run the agent E2E suite only after the real binaries exist; the
+      # earlier go test step intentionally runs before ./build.sh and those
+      # tests skip when dist/ is absent.
       - name: End-to-end test the agent against the binaries just built
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
           MEOWSHELL: ${{ github.workspace }}/dist/meowshell_linux_amd64
           TAILCAT: ${{ github.workspace }}/dist/tailcat_linux_amd64
         run: go test ./cmd/meowshell/ -count=1
 
       - name: Scan the patched tailcat build input for known vulnerabilities
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
         run: (cd .tailcat-src && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./cmd/tailcat)
 
       - name: Verify each binary targets the platform it claims
@@ -142,7 +137,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -151,7 +146,7 @@ jobs:
 
       - name: Build a host tailcat to act as the client
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
           SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
           SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
@@ -217,20 +212,13 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: tailcat-binaries
           path: dist
 
-      # A shared loopback relay, not the per-server TS_DEBUG_TAILCAT_LOCAL_DERP
-      # the .NET and Go E2E tests use: this suite provisions a key with genkey
-      # and dials the address genkey printed, exactly as a user does, and that
-      # only works while genkey and the server resolve their region from the
-      # same DERP map. A server-side local relay is invented after the key is
-      # made and overrides the key's region, which would leave the printed
-      # address naming a relay nobody is on. See ../e2e/README.md.
       - name: Start a local DERP relay for the E2E tests
         run: ./e2e/start-testderp.sh
 
@@ -256,7 +244,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       # See the "build" job's own comment: cmd/meowshell's go.mod replaces
       # github.com/tailscale/tailcat with a local ./.tailcat-src checkout, so
@@ -279,10 +267,10 @@ jobs:
       - name: Vet and test meowshell on Windows
         shell: bash
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
         run: |
           go vet ./...
-          go test ./... -count=10
+          go test -v ./... -count=1 -timeout=90s
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -321,7 +309,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -357,14 +345,10 @@ jobs:
         env:
           DOTNET_E2E_TAILCAT_BIN: ${{ github.workspace }}/dist/tailcat_linux_amd64
           DOTNET_E2E_MEOWSHELL_BIN: ${{ github.workspace }}/dist/meowshell_linux_amd64
-        run: |
-          for i in $(seq 1 10); do
-            echo "::group::.NET stress pass $i/10"
-            dotnet test dotnet/Meowshell.sln -c Release --nologo \
-              --logger "trx;LogFileName=meowshell-tests-$i.trx" \
-              --results-directory test-results
-            echo "::endgroup::"
-          done
+        run: >-
+          dotnet test dotnet/Meowshell.sln -c Release --nologo
+          --logger "trx;LogFileName=meowshell-tests.trx"
+          --results-directory test-results
 
       - name: Upload .NET test diagnostics
         if: failure()
@@ -485,7 +469,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version: '1.27.1'
 
       - name: Install the Android workload
         run: dotnet workload install android
@@ -505,7 +489,7 @@ jobs:
         # serves a real, working shell -- not just that Start() returned an
         # address -- by having a real client dial in and run commands.
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
           SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
           SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}

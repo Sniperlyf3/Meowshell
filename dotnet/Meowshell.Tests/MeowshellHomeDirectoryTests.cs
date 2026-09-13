@@ -1,4 +1,6 @@
 using Meowshell;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace Meowshell.Tests;
 
@@ -34,6 +36,19 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
         MeowshellHomeDirectory.EnsureSecure(target); // must not throw
+    }
+
+    [Fact]
+    public void EnsureSecureAcceptsOwnerOnlyDirectoryWithSetGroupBit()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var target = Path.Combine(_dir, "meowshell-setgid");
+        Directory.CreateDirectory(target);
+        File.SetUnixFileMode(target,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.SetGroup);
+
+        MeowshellHomeDirectory.EnsureSecure(target); // Android commonly yields 2700.
     }
 
     [Fact]
@@ -95,4 +110,28 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         // created and verified must not throw.
         Assert.Equal(dir, MeowshellHomeDirectory.ResolveDefault());
     }
+
+    [Fact]
+    public void EnsureSecureRejectsWindowsHomeReadableByBuiltinUsers()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var target = Path.Combine(_dir, "windows-readable-home");
+        Directory.CreateDirectory(target);
+
+        var info = new DirectoryInfo(target);
+        var security = info.GetAccessControl();
+        var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(
+            users,
+            FileSystemRights.ReadAndExecute | FileSystemRights.ListDirectory,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        info.SetAccessControl(security);
+
+        var ex = Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
+        Assert.Contains("read/write access", ex.Message);
+    }
+
 }

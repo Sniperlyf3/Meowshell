@@ -53,7 +53,7 @@ public static class TailcatClient
     private static ProcessStartInfo Prepare(TailcatClientOptions options)
     {
         var (_, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(tailcat)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -198,7 +198,7 @@ public static class TailcatClient
         var last = lines[^1];
         var wantPrefix = key.Client ? "nodekey:" : "tc";
         if (!last.StartsWith(wantPrefix, StringComparison.Ordinal))
-            throw UnexpectedOutput("genkey", $"expected {(key.Client ? "a public key (\"nodekey:...\")" : "a tailcat address (\"tc...\")")}, got: {last}");
+            throw UnexpectedOutput("genkey", $"expected {(key.Client ? "a public key (\"nodekey:...\")" : "a tailcat address (\"tc...\")")}; raw output was omitted because malformed native output may contain credential-like material");
         return last;
     }
 
@@ -232,7 +232,7 @@ public static class TailcatClient
         }
         catch (JsonException ex)
         {
-            throw UnexpectedOutput("parse", $"couldn't parse its JSON ({ex.Message}): {result.Stdout}");
+            throw UnexpectedOutput("parse", $"couldn't parse its JSON ({ex.Message}); raw decoded address data was omitted because it can contain a preshared key");
         }
     }
 
@@ -245,7 +245,9 @@ public static class TailcatClient
         var result = await RunAsync(options, "resolve", address).ConfigureAwait(false);
         if (!result.Success) throw Failure("resolve", result);
         if (!result.Stdout.StartsWith("tc", StringComparison.Ordinal))
-            throw UnexpectedOutput("resolve", $"expected a tailcat address, got: {result.Stdout}");
+            throw UnexpectedOutput(
+                "resolve",
+                "expected a tailcat address; raw output was omitted because it may contain credential-like address material");
         return new TailcatAddress(result.Stdout);
     }
 
@@ -389,7 +391,7 @@ public static class TailcatClient
     public static async Task<TailcatEnvironment> GetEnvironmentAsync(TailcatClientOptions options)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -405,10 +407,15 @@ public static class TailcatClient
         return TailcatEnvironment.Parse(result.Stdout);
     }
 
+    // Keep bearer-like Tailcat addresses and caller filesystem paths out of
+    // timeout/output-limit exception text. The arguments are already in the
+    // child ProcessStartInfo; diagnostics need only identify the operation.
+    internal static string CpTimeoutCommand(IReadOnlyList<string> _) => "meowshell cp";
+
     private static Task<TailcatResult> RunMeowshellCpAsync(TailcatClientOptions options, IReadOnlyList<string> cpArgs)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -425,6 +432,6 @@ public static class TailcatClient
 
         psi.Environment["TAILCAT_BIN"] = tailcat;
         TailcatProcessEnvironment.ApplyHome(psi, options.HomeDirectory);
-        return RunAsync(psi, options.Timeout, "meowshell cp " + string.Join(' ', cpArgs));
+        return RunAsync(psi, options.Timeout, CpTimeoutCommand(cpArgs));
     }
 }

@@ -11,7 +11,14 @@ import (
 	"time"
 )
 
+const maxForwardConnections = 65_535
+
 func (a *agentSession) openForwardChannel(msg controlMessage) {
+	if msg.MaxConnections < 0 || msg.MaxConnections > maxForwardConnections {
+		a.writeOpenError(msg.RequestID, errProtocolError,
+			fmt.Errorf("max_connections must be between 0 (unlimited) and %d", maxForwardConnections))
+		return
+	}
 	switch msg.Kind {
 	case "forward_local":
 		a.openLocalForward(msg)
@@ -54,6 +61,9 @@ func listenUnix(path string) (net.Listener, error) {
 	if path == "" {
 		return nil, fmt.Errorf("a unix listen_network needs a non-empty socket path")
 	}
+	if err := validateSocketParent(path); err != nil {
+		return nil, err
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("refusing to remove non-socket path %s", path)
@@ -91,7 +101,12 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
-	client := a.forwardClient()
+	client, err := a.forwardClient()
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errConnectionLost, err)
+		return
+	}
 	id, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
@@ -102,13 +117,28 @@ func (a *agentSession) openLocalForward(msg controlMessage) {
 
 	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
 		proxyForwardedConn(conn, func() (net.Conn, error) {
-			return dialWithTimeout(client.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
+			var abort func()
+			if a.tcAddr == "" {
+				// *ssh.Client.Dial has no cancellable request primitive. If a
+				// remote SSH server stops answering forwarded-channel opens,
+				// returning a timeout without closing the transport leaves the
+				// dial goroutine blocked forever. Abort the SSH connection so
+				// the request actually unwinds instead of becoming a leak.
+				abort = func() {
+					a.reportConnectionLost(fmt.Errorf("forward dial to %s timed out after %s", msg.RemoteAddr, tcpDialTimeout))
+				}
+			}
+			return dialWithTimeout(client.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout, abort)
 		})
 	})
 }
 
 func (a *agentSession) openRemoteForward(msg controlMessage) {
 	client := a.client()
+	if client == nil {
+		a.writeOpenError(msg.RequestID, errConnectionLost, fmt.Errorf("SSH connection is no longer available"))
+		return
+	}
 	ln, err := client.Listen("tcp", msg.ListenAddr)
 	if err != nil {
 		a.writeOpenError(msg.RequestID, errUnknown, fmt.Errorf("asking the remote to listen on %s: %w", msg.ListenAddr, err))
@@ -124,7 +154,8 @@ func (a *agentSession) openRemoteForward(msg controlMessage) {
 
 	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
 		proxyForwardedConn(conn, func() (net.Conn, error) {
-			return dialWithTimeout(net.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout)
+			d := net.Dialer{Timeout: tcpDialTimeout}
+			return dialWithTimeout(d.Dial, "tcp", msg.RemoteAddr, tcpDialTimeout, nil)
 		})
 	})
 }
@@ -135,7 +166,12 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 		a.writeOpenError(msg.RequestID, errUnknown, err)
 		return
 	}
-	client := a.forwardClient()
+	client, err := a.forwardClient()
+	if err != nil {
+		ln.Close()
+		a.writeOpenError(msg.RequestID, errConnectionLost, err)
+		return
+	}
 	id, err := a.registerForward(ln)
 	if err != nil {
 		ln.Close()
@@ -145,7 +181,13 @@ func (a *agentSession) openSOCKSForward(msg controlMessage) {
 	a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, BoundAddr: ln.Addr().String()})
 
 	acceptForwardedConns(ln, msg.MaxConnections, func(conn net.Conn) {
-		serveSOCKS5(conn, client, msg.SocksUsername, msg.SocksPassword)
+		var abort func()
+		if a.tcAddr == "" {
+			abort = func() {
+				a.reportConnectionLost(fmt.Errorf("SOCKS forward dial timed out after %s", tcpDialTimeout))
+			}
+		}
+		serveSOCKS5(conn, client, msg.SocksUsername, msg.SocksPassword, abort)
 	})
 }
 
@@ -196,7 +238,7 @@ func acceptForwardedConns(ln net.Listener, maxConnections int, handle func(net.C
 // forwarding, which already enforces tcpDialTimeout internally. If the dial
 // does eventually complete after the timeout, the orphaned connection is
 // closed rather than leaked.
-func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network, addr string, timeout time.Duration) (net.Conn, error) {
+func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network, addr string, timeout time.Duration, onTimeout func()) (net.Conn, error) {
 	type result struct {
 		conn net.Conn
 		err  error
@@ -206,10 +248,19 @@ func dialWithTimeout(dial func(network, addr string) (net.Conn, error), network,
 		conn, err := dial(network, addr)
 		ch <- result{conn, err}
 	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case res := <-ch:
 		return res.conn, res.err
-	case <-time.After(timeout):
+	case <-timer.C:
+		if onTimeout != nil {
+			onTimeout()
+		}
+		// If the underlying dial eventually returns after the timeout, close
+		// the late connection. For the plain-SSH case onTimeout closes the
+		// transport, which also forces the otherwise-uncancellable Dial call
+		// itself to unwind.
 		go func() {
 			if res := <-ch; res.conn != nil {
 				res.conn.Close()
@@ -279,7 +330,7 @@ var socksHandshakeTimeout = 30 * time.Second
 
 func serveSOCKS5(conn net.Conn, client interface {
 	Dial(network, addr string) (net.Conn, error)
-}, username, password string) {
+}, username, password string, abortDialOnTimeout func()) {
 	defer func() {
 		if r := recover(); r != nil {
 			conn.Close()
@@ -385,7 +436,7 @@ func serveSOCKS5(conn net.Conn, client interface {
 	port := binary.BigEndian.Uint16(portBuf)
 	target := net.JoinHostPort(host, fmt.Sprint(port))
 
-	remote, err := dialWithTimeout(client.Dial, "tcp", target, tcpDialTimeout)
+	remote, err := dialWithTimeout(client.Dial, "tcp", target, tcpDialTimeout, abortDialOnTimeout)
 	if err != nil {
 		writeSOCKS5Reply(conn, 0x05)
 		conn.Close()

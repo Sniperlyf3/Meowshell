@@ -29,7 +29,7 @@ func TestDialWithTimeoutDoesNotHangForever(t *testing.T) {
 	}
 
 	started := time.Now()
-	conn, err := dialWithTimeout(blockingDial, "tcp", "unresponsive.example:1234", 50*time.Millisecond)
+	conn, err := dialWithTimeout(blockingDial, "tcp", "unresponsive.example:1234", 50*time.Millisecond, nil)
 	if conn != nil {
 		conn.Close()
 	}
@@ -177,7 +177,7 @@ func TestServeSOCKS5RejectsNoAuthWhenNotOffered(t *testing.T) {
 		if err != nil {
 			return
 		}
-		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "") // no auth required
+		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "", nil) // no auth required
 	}()
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
@@ -381,7 +381,7 @@ func TestServeSOCKS5EnforcesHandshakeDeadline(t *testing.T) {
 		if err != nil {
 			return
 		}
-		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "")
+		serveSOCKS5(conn, fakeSOCKSDialer{}, "", "", nil)
 	}()
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
@@ -396,5 +396,47 @@ func TestServeSOCKS5EnforcesHandshakeDeadline(t *testing.T) {
 	buf := make([]byte, 1)
 	if n, err := conn.Read(buf); err != io.EOF {
 		t.Fatalf("read = (%d, %v), want (0, io.EOF): the server should have closed its side after the handshake deadline", n, err)
+	}
+}
+
+func TestOpenForwardChannelRejectsExcessiveMaxConnectionsBeforeBinding(t *testing.T) {
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	session.openForwardChannel(controlMessage{
+		Msg: "open_channel", Kind: "forward_local", RequestID: "too-many",
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:80",
+		MaxConnections: maxForwardConnections + 1,
+	})
+
+	msgs := readControlFrames(t, &out)
+	if len(msgs) != 1 || msgs[0].RequestID != "too-many" || msgs[0].Code != errProtocolError {
+		t.Fatalf("excessive max_connections response = %+v, want one protocol error", msgs)
+	}
+}
+
+func TestDialWithTimeoutAbortUnblocksStuckDial(t *testing.T) {
+	abort := make(chan struct{})
+	dialDone := make(chan struct{})
+	blockingDial := func(network, addr string) (net.Conn, error) {
+		defer close(dialDone)
+		<-abort
+		return nil, fmt.Errorf("aborted")
+	}
+
+	_, err := dialWithTimeout(
+		blockingDial,
+		"tcp",
+		"stuck.example:22",
+		50*time.Millisecond,
+		func() { close(abort) },
+	)
+	if err == nil {
+		t.Fatal("dialWithTimeout returned no timeout error")
+	}
+
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("timeout abort did not unwind the underlying dial goroutine")
 	}
 }

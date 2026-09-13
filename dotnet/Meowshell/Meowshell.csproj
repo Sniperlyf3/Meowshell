@@ -47,6 +47,7 @@
        it needs to be explicit. -->
   <ItemGroup>
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
   </ItemGroup>
 
   <!-- Depending on the runtime packages here, rather than leaving it to

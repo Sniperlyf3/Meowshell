@@ -151,7 +151,8 @@ public sealed class TailcatClientTests : IDisposable
         var ex = await Assert.ThrowsAsync<TailcatException>(() =>
             TailcatClient.GenerateKeyAsync(options, new TailcatKeyOptions { Name = "key" }));
         Assert.Equal(0, ex.ExitCode);
-        Assert.Contains("not-an-address", ex.Message);
+        Assert.DoesNotContain("not-an-address", ex.Message);
+        Assert.Contains("raw output was omitted", ex.Message);
     }
 
     [Fact]
@@ -264,9 +265,12 @@ public sealed class TailcatClientTests : IDisposable
     [Fact]
     public async Task ResolveThrowsOnUnexpectedOutputShape()
     {
-        var (options, _) = Fake("echo not-an-address\n");
+        const string secretLike = "tcSECRET-CAPABILITY";
+        var (options, _) = Fake($"echo prefix-{secretLike}\n");
         var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.ResolveAsync(options, "tcSHORT"));
         Assert.Equal(0, ex.ExitCode);
+        Assert.DoesNotContain(secretLike, ex.ToString());
+        Assert.Contains("raw output was omitted", ex.ToString());
     }
 
     [Fact]
@@ -644,4 +648,99 @@ public sealed class TailcatClientTests : IDisposable
         var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.GetEnvironmentAsync(options));
         Assert.Equal(1, ex.ExitCode);
     }
+
+    [Fact]
+    public void AndroidCpTimeoutLabelDoesNotContainCapabilityOrPaths()
+    {
+        const string secretAddress = "tcSECRET-CAPABILITY";
+        const string secretPath = "/private/customer/database.dump";
+        var label = TailcatClient.CpTimeoutCommand(
+            ["-r", secretPath, secretAddress + ":backup/database.dump"]);
+
+        Assert.Equal("meowshell cp", label);
+        Assert.DoesNotContain(secretAddress, label);
+        Assert.DoesNotContain(secretPath, label);
+    }
+
+
+    [Fact]
+    public void BinaryLocatorAddsOnlyOwnerExecutePermission()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var bin = Path.Combine(_dir, "perm-bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var path = Path.Combine(bin, naming.FileName(name));
+            File.WriteAllText(path, "stub");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        _ = MeowshellBinaries.Locate(bin, naming);
+
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var mode = File.GetUnixFileMode(Path.Combine(bin, naming.FileName(name)));
+            Assert.True((mode & UnixFileMode.UserExecute) != 0);
+            Assert.Equal((UnixFileMode)0, mode & (UnixFileMode.GroupExecute | UnixFileMode.OtherExecute));
+        }
+    }
+
+    [Fact]
+    public void BinaryLocatorRejectsGroupWritableNativeBinary()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var bin = Path.Combine(_dir, "unsafe-bin");
+        Directory.CreateDirectory(bin);
+        var naming = BinaryNaming.ForCurrentPlatform();
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var path = Path.Combine(bin, naming.FileName(name));
+            File.WriteAllText(path, "stub");
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                UnixFileMode.GroupWrite);
+        }
+
+        Assert.Throws<IOException>(() => MeowshellBinaries.Locate(bin, naming));
+    }
+
+
+    [Theory]
+    [InlineData("1e999s")]
+    [InlineData("999999999999999999999999999999999999999999999999999999999999999999h")]
+    public void GoDurationOverflowReturnsFalseInsteadOfThrowing(string value)
+    {
+        var ok = GoDuration.TryParse(value, out _);
+        Assert.False(ok);
+    }
+
+    [Fact]
+    public void TailcatAddressRejectsNullAndDefaultValueCannotMasqueradeAsAnAddress()
+    {
+        Assert.Throws<ArgumentNullException>(() => new TailcatAddress(null!));
+
+        var address = default(TailcatAddress);
+        Assert.Throws<InvalidOperationException>(() => address.ToString());
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            string _ = address;
+        });
+    }
+
+    [Fact]
+    public async Task ParseMalformedJsonDoesNotEchoDecodedPresharedKey()
+    {
+        const string secret = "psk:THIS-MUST-NOT-APPEAR-IN-DIAGNOSTICS";
+        var (options, _) = Fake($"printf '{{\"PresharedKey\":\"{secret}\",BROKEN}}\n'");
+        var ex = await Assert.ThrowsAsync<TailcatException>(
+            () => TailcatClient.ParseAsync(options, new TailcatAddress("tcQUJDRA")));
+
+        Assert.DoesNotContain(secret, ex.ToString());
+        Assert.Contains("raw decoded address data was omitted", ex.ToString());
+    }
+
 }

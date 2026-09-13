@@ -11,6 +11,7 @@ public readonly record struct TailcatAddress
     /// <exception cref="FormatException"><paramref name="value"/> is not syntactically a tailcat address.</exception>
     public TailcatAddress(string value)
     {
+        ArgumentNullException.ThrowIfNull(value);
         if (!value.StartsWith("tc", StringComparison.Ordinal) || value.Length == 2)
             throw new FormatException($"\"{value}\" is not a tailcat address.");
 
@@ -34,10 +35,11 @@ public readonly record struct TailcatAddress
     }
 
     /// <summary>The address itself.</summary>
-    public override string ToString() => _value;
+    public override string ToString() =>
+        _value ?? throw new InvalidOperationException("an uninitialized TailcatAddress has no value");
 
     /// <summary>The address itself.</summary>
-    public static implicit operator string(TailcatAddress address) => address._value;
+    public static implicit operator string(TailcatAddress address) => address.ToString();
 
     /// <summary>Wraps <paramref name="value"/>, validating the tailcat address syntax.</summary>
     public static implicit operator TailcatAddress(string value) => new(value);

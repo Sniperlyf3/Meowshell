@@ -128,9 +128,12 @@ type dirMeta struct {
 }
 
 func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve bool) error {
-	fi, err := os.Stat(localPath)
+	fi, err := os.Lstat(localPath)
 	if err != nil {
 		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to follow it (symlinks are not supported by cp)", localPath)
 	}
 	if !fi.IsDir() {
 		return uploadFile(sf, localPath, remotePath, preserve)

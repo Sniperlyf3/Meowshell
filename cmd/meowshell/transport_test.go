@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,11 +64,17 @@ func TestTailcatDialerRejectsCanceledContext(t *testing.T) {
 // a hostile or unresponsive jump host during TestJumpDialerRespectsContext.
 type blockingJumpClient struct {
 	unblock chan struct{}
+	once    sync.Once
 }
 
 func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
 	<-b.unblock
 	return nil, errors.New("dial finished after being unblocked, too late to matter")
+}
+
+func (b *blockingJumpClient) Close() error {
+	b.once.Do(func() { close(b.unblock) })
+	return nil
 }
 
 // TestJumpDialerRespectsContext is a regression test: jumpDialer's returned
@@ -77,9 +84,10 @@ func (b *blockingJumpClient) Dial(network, addr string) (net.Conn, error) {
 // timeout dialSSHClient thinks it's enforcing.
 func TestJumpDialerRespectsContext(t *testing.T) {
 	unblock := make(chan struct{})
-	t.Cleanup(func() { close(unblock) })
+	client := &blockingJumpClient{unblock: unblock}
+	t.Cleanup(func() { _ = client.Close() })
 
-	dial := jumpDialer(&blockingJumpClient{unblock: unblock}, "host:22")
+	dial := jumpDialer(client, "host:22")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -106,13 +114,16 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
+const validTailcatAddress = "tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1"
+
 func TestLooksLikeTailcatAddress(t *testing.T) {
 	cases := []struct {
 		dest string
 		want bool
 	}{
-		{"tcpGFwWCCCAiC8CWRmU8Bh0If_O_VgzekQvOSa1sJo-6FEOuZSXGFrWCCOgRnXVZlBMOhYT2IA-bDVKrvHkvoCwZSFA5ZtmwzpJmFxWCC1_Zamsrq9_iP73WYNbE6NfssVj2moLObKm-IqlLlHzGFygaFhToGmYWhhVGE0aTEyNy4wLjAuMWE2ZG5vbmVhcxmlQ2FkGaPRYXj1", true},
+		{validTailcatAddress, true},
 		{"tc", false},
+		{"tcZm9v", false}, // base64-looking hostname, but not a structurally valid Tailcat address
 		{"tcp://example.com", false},
 		{"example.com:2222", false},
 		{"user@example.com", false},
@@ -324,7 +335,7 @@ func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 		if name != "device.example.com" {
 			t.Fatalf("TXT lookup name = %q", name)
 		}
-		return []string{"other=value", "tailcat=tcQUJDRA"}, nil
+		return []string{"other=value", "tailcat=" + validTailcatAddress}, nil
 	}
 	t.Cleanup(func() { lookupAgentTXT = old })
 
@@ -332,8 +343,8 @@ func TestResolveAgentDestinationFromTailcatTXT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !isTailcat || got != "tcQUJDRA" {
-		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, "tcQUJDRA")
+	if !isTailcat || got != validTailcatAddress {
+		t.Fatalf("resolveAgentDestination = (%q, %v), want (%q, true)", got, isTailcat, validTailcatAddress)
 	}
 }
 
@@ -387,5 +398,15 @@ func TestResolveAgentDestinationRejectsMalformedTailcatTXT(t *testing.T) {
 
 	if _, _, err := resolveAgentDestination(context.Background(), "device.example.com", true); err == nil {
 		t.Fatal("malformed tailcat TXT record was accepted")
+	}
+}
+
+func TestProxyDialerRejectsCredentialsOverPlainHTTP(t *testing.T) {
+	_, err := proxyDialer("http://user:secret@127.0.0.1:8080", "backend.example:22")
+	if err == nil {
+		t.Fatal("proxyDialer accepted credentials over plaintext HTTP")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("proxy rejection exposed password: %v", err)
 	}
 }

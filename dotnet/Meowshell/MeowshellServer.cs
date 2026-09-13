@@ -32,7 +32,7 @@ public readonly record struct BinaryNaming(string Prefix, string Suffix)
 /// <summary>Configuration for a <see cref="MeowshellServer"/>.</summary>
 public sealed record MeowshellOptions : TailcatListenerOptions
 {
-    /// <summary>Scratch directory for the address handoff file. Use CacheDir.</summary>
+    /// <summary>Private scratch directory for the address handoff file. On Android use an app-owned child of CacheDir (for example CacheDir/meowshell), not CacheDir itself: platform-managed app roots may intentionally grant group/traverse bits even though the sandbox remains isolated.</summary>
     public required string WorkDirectory { get; init; }
 
     /// <summary>How long the server may live before it is shut down.</summary>
@@ -84,7 +84,7 @@ public sealed record MeowshellOptions : TailcatListenerOptions
         {
             BinaryDirectory = ctx.ApplicationInfo!.NativeLibraryDir!,
             HomeDirectory = Path.Combine(ctx.FilesDir!.AbsolutePath, "meowshell"),
-            WorkDirectory = ctx.CacheDir!.AbsolutePath,
+            WorkDirectory = Path.Combine(ctx.CacheDir!.AbsolutePath, "meowshell"),
             Lifetime = lifetime,
         };
 #else
@@ -182,8 +182,8 @@ public sealed class MeowshellServer : IAsyncDisposable
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
 
-        Directory.CreateDirectory(options.WorkDirectory);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.WorkDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var addressFile = Path.Combine(
             options.WorkDirectory, $"tailcat-addr-{Guid.NewGuid():N}");
 

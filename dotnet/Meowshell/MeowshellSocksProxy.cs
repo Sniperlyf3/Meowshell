@@ -47,7 +47,7 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
         TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
         {
@@ -79,14 +79,17 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
 
         void HandleLog(string line)
         {
-            onLog?.Invoke(line);
             const string marker = "SOCKS running at ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
-            if (at < 0) return;
-            var address = line[(at + marker.Length)..].Trim();
-            if (address.StartsWith("socks5h://", StringComparison.OrdinalIgnoreCase))
-                address = address["socks5h://".Length..];
-            if (address.Length > 0) ready.TrySetResult(address);
+            if (at >= 0)
+            {
+                var address = line[(at + marker.Length)..].Trim();
+                if (address.StartsWith("socks5h://", StringComparison.OrdinalIgnoreCase))
+                    address = address["socks5h://".Length..];
+                if (address.Length > 0) ready.TrySetResult(address);
+            }
+
+            try { onLog?.Invoke(line); } catch { }
         }
 
         try

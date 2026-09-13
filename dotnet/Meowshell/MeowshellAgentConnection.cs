@@ -65,6 +65,8 @@ public sealed record MeowshellSftpEntry(string Name, long Size, uint Mode, DateT
 /// <summary>A persistent, multiplexed connection to a tailcat address or a general SSH host, driving "meowshell agent" as a long-lived subprocess. Open a shell, run a command, browse files, and forward a port all over the same login.</summary>
 public sealed class MeowshellAgentConnection : IAsyncDisposable
 {
+    private const int DefaultMaxForwardConnections = 256;
+    private const int MaxForwardConnections = 65_535;
     private readonly Process _process;
     private readonly JobObject? _job;
     private readonly Stream _stdin;
@@ -121,15 +123,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="jumpHosts">Intermediate TCP SSH hosts to tunnel through first, closest-to-here first.</param>
     /// <param name="knownHostsPath">known_hosts file for TCP-transport host-key verification (default: $HOME/.meowshell/known_hosts).</param>
     /// <param name="proxyUrl">A SOCKS5 or HTTP CONNECT proxy to reach the first TCP hop through.</param>
-    /// <param name="configureConnection">
-    /// Runs on the new connection before any protocol traffic, and is the only place the prompts raised
-    /// during the handshake -- <see cref="HostKeyPromptRequested"/>, <see cref="PasswordRequested"/>,
-    /// <see cref="PassphraseRequested"/>, <see cref="KeyboardInteractiveRequested"/>,
-    /// <see cref="SignRequested"/> -- can be subscribed to in time to be asked: this method does not
-    /// return until the handshake has already been decided. Without it, a first connection to a host
-    /// absent from <paramref name="knownHostsPath"/> cannot be accepted by anyone, and fails with
-    /// <see cref="MeowshellErrorCode.HostKeyUnknown"/>. An exception thrown here fails the connection.
-    /// </param>
+    /// <param name="configureConnection">Runs after the native process starts but before any protocol traffic is sent, allowing callers to attach prompt and log handlers in time for the handshake.</param>
     /// <param name="cancellationToken">Cancels waiting for the connection to settle; does not cancel or stop the connection itself once returned.</param>
     /// <exception cref="TailcatException">The connection failed to establish within <see cref="TailcatClientOptions.Timeout"/>; <see cref="TailcatException.Code"/> names why when the agent reported a typed reason.</exception>
     public static async Task<MeowshellAgentConnection> ConnectAsync(
@@ -139,7 +133,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        Directory.CreateDirectory(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -165,14 +159,6 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         var connection = new MeowshellAgentConnection(process, job);
         try
         {
-            // Before anything is written to the agent, and so before it can
-            // raise a single prompt: the handshake is over by the time this
-            // method returns, so a caller subscribing to HostKeyPromptRequested
-            // et al on the returned object is always too late to be asked --
-            // this is the one instant at which those handlers can be attached.
-            // Log subscribers get the same deal, catching the agent's stderr
-            // from its first line rather than from whenever the caller got a
-            // reference back.
             configureConnection?.Invoke(connection);
 
             process.ErrorDataReceived += (_, e) =>
@@ -432,9 +418,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="listenAddress">Local <c>[address]:port</c> to listen on.</param>
     /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
     /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
-    /// <param name="maxConnections">Caps how many connections this forward services at once; further connections queue in the listen backlog (or get refused once that fills) instead of piling up unbounded goroutines and file descriptors on the agent. Zero (the default) means unlimited.</param>
+    /// <param name="maxConnections">Caps how many connections this forward services at once; further connections queue in the listen backlog (or get refused once that fills) instead of piling up unbounded goroutines and file descriptors on the agent. Zero means unlimited; the default is 256.</param>
     /// <param name="cancellationToken">Cancels the open request.</param>
-    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+    public Task<MeowshellForward> OpenLocalForwardAsync(string listenAddress, string remoteAddress, bool allowNonLoopbackBind = false, int maxConnections = DefaultMaxForwardConnections, CancellationToken cancellationToken = default) =>
         OpenForwardAsync("forward_local", listenAddress, remoteAddress, listenNetwork: null, allowNonLoopbackBind, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-L" over a Unix domain socket at <paramref name="socketPath"/> instead of a TCP port -- the recommended local endpoint whenever the caller can hand the path to whatever will connect to it.</summary>
@@ -442,7 +428,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="remoteAddress">Destination <c>host:port</c> reached through the SSH client.</param>
     /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the open request.</param>
-    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+    public Task<MeowshellForward> OpenLocalForwardOnUnixSocketAsync(string socketPath, string remoteAddress, int maxConnections = DefaultMaxForwardConnections, CancellationToken cancellationToken = default) =>
         OpenForwardAsync("forward_local", socketPath, remoteAddress, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-R": asks the remote to listen on <paramref name="listenAddress"/>, forwarding each connection it accepts to <paramref name="localAddress"/> on this machine.</summary>
@@ -450,7 +436,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="localAddress">Local destination <c>host:port</c> to forward accepted connections to.</param>
     /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the open request.</param>
-    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, int maxConnections = 0, CancellationToken cancellationToken = default) =>
+    public Task<MeowshellForward> OpenRemoteForwardAsync(string listenAddress, string localAddress, int maxConnections = DefaultMaxForwardConnections, CancellationToken cancellationToken = default) =>
         OpenForwardAsync("forward_remote", listenAddress, localAddress, listenNetwork: null, allowNonLoopbackBind: false, socksUsername: null, socksPassword: null, maxConnections, cancellationToken);
 
     /// <summary>"-D": runs a local SOCKS5 proxy on <paramref name="listenAddress"/>. By default requires RFC 1929 SOCKS5 auth with a random token -- read it back from <see cref="MeowshellForward.SocksUsername"/>/<see cref="MeowshellForward.SocksPassword"/>.</summary>
@@ -461,7 +447,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="allowNonLoopbackBind">Allow binding somewhere other than loopback.</param>
     /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the open request.</param>
-    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, int maxConnections = 0, CancellationToken cancellationToken = default)
+    public Task<MeowshellForward> OpenSocksForwardAsync(string listenAddress, bool requireAuth = true, string? socksUsername = null, string? socksPassword = null, bool allowNonLoopbackBind = false, int maxConnections = DefaultMaxForwardConnections, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
         return OpenForwardAsync("forward_socks", listenAddress, remoteAddress: null, listenNetwork: null, allowNonLoopbackBind, socksUsername, socksPassword, maxConnections, cancellationToken);
@@ -474,7 +460,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="socksPassword">Fixed SOCKS5 password, instead of a generated one.</param>
     /// <param name="maxConnections">See <see cref="OpenLocalForwardAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the open request.</param>
-    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, int maxConnections = 0, CancellationToken cancellationToken = default)
+    public Task<MeowshellForward> OpenSocksForwardOnUnixSocketAsync(string socketPath, bool requireAuth = false, string? socksUsername = null, string? socksPassword = null, int maxConnections = DefaultMaxForwardConnections, CancellationToken cancellationToken = default)
     {
         (socksUsername, socksPassword) = ResolveSocksAuth(requireAuth, socksUsername, socksPassword);
         return OpenForwardAsync("forward_socks", socketPath, remoteAddress: null, listenNetwork: "unix", allowNonLoopbackBind: false, socksUsername, socksPassword, maxConnections, cancellationToken);
@@ -483,7 +469,16 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private static (string? Username, string? Password) ResolveSocksAuth(bool requireAuth, string? username, string? password)
     {
         if (!requireAuth) return (null, null);
-        if (username is not null && password is not null) return (username, password);
+        if ((username is null) != (password is null))
+            throw new ArgumentException("SOCKS username and password must be supplied together.");
+        if (username is not null && password is not null)
+        {
+            if (System.Text.Encoding.UTF8.GetByteCount(username) > 255)
+                throw new ArgumentException("SOCKS username must fit in 255 UTF-8 bytes.", nameof(username));
+            if (System.Text.Encoding.UTF8.GetByteCount(password) > 255)
+                throw new ArgumentException("SOCKS password must fit in 255 UTF-8 bytes.", nameof(password));
+            return (username, password);
+        }
         return GenerateSocksToken();
     }
 
@@ -493,8 +488,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     private Task<MeowshellForward> OpenForwardAsync(string kind, string listenAddress, string? remoteAddress, string? listenNetwork, bool allowNonLoopbackBind, string? socksUsername, string? socksPassword, int maxConnections, CancellationToken cancellationToken)
     {
-        if (maxConnections < 0)
-            throw new ArgumentOutOfRangeException(nameof(maxConnections), maxConnections, "maxConnections must not be negative (0 means unlimited).");
+        if (maxConnections < 0 || maxConnections > MaxForwardConnections)
+            throw new ArgumentOutOfRangeException(
+                nameof(maxConnections), maxConnections,
+                $"maxConnections must be between 0 (explicitly unlimited) and {MaxForwardConnections}.");
 
         var request = new AgentMessage
         {
@@ -526,11 +523,26 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         // closed.
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingCloses[id] = tcs;
+        var closeSent = false;
         try
         {
             await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
+            closeSent = true;
             using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
             await tcs.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancellation should stop the caller waiting, not leave a
+            // listener running remotely. If the token fired before the
+            // close frame made it onto the wire, send one best-effort with
+            // an uncancelled token; duplicate close_channel is harmless on
+            // the agent side if a partial/canceled write actually got through.
+            if (!closeSent)
+            {
+                try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
+            }
+            throw;
         }
         finally
         {
@@ -578,7 +590,10 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             OnOpened: (channelId, opened) =>
             {
                 var (result, sink) = makeResult(channelId, opened);
-                if (sink is not null) _channels[channelId] = new AgentChannelDataPump(sink);
+                if (sink is not null)
+                    _channels[channelId] = new AgentChannelDataPump(
+                        sink,
+                        () => FailBackpressuredChannel(channelId));
                 tcs.TrySetResult(result);
             },
             OnFailed: ex => tcs.TrySetException(ex));
@@ -591,6 +606,34 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         finally
         {
             _pendingOpens.TryRemove(requestId, out _);
+        }
+    }
+
+    private void FailBackpressuredChannel(uint channelId)
+    {
+        if (!_channels.TryRemove(channelId, out _))
+            return;
+
+        // Do not await from the shared read loop. The whole purpose of the
+        // bounded per-channel pump is to isolate a stalled consumer from every
+        // other multiplexed channel; cleanup must preserve that property.
+        _ = CloseBackpressuredChannelAsync(channelId);
+    }
+
+    private async Task CloseBackpressuredChannelAsync(uint channelId)
+    {
+        try
+        {
+            await WriteControlAsync(
+                channelId,
+                new AgentMessage { Msg = "close_channel", Cancelled = true },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Connection teardown/faulting will clean up the native side if
+            // the close cannot be written. The local channel is already
+            // faulted and removed, so there is nothing useful to surface here.
         }
     }
 
@@ -895,6 +938,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     private readonly record struct QueueItem(bool IsData, byte Stream, ReadOnlyMemory<byte> Data, AgentMessage? Control);
 
     private readonly IAgentChannelSink _inner;
+    private readonly Action? _onBackpressure;
     private readonly System.Threading.Channels.Channel<QueueItem> _queue =
         System.Threading.Channels.Channel.CreateBounded<QueueItem>(new System.Threading.Channels.BoundedChannelOptions(32)
         {
@@ -910,9 +954,10 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     // plain bool is enough.
     private bool _failed;
 
-    public AgentChannelDataPump(IAgentChannelSink inner)
+    public AgentChannelDataPump(IAgentChannelSink inner, Action? onBackpressure = null)
     {
         _inner = inner;
+        _onBackpressure = onBackpressure;
         _pumpTask = Task.Run(RunAsync);
     }
 
@@ -996,6 +1041,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         if (_failed) return;
         _failed = true;
         OnFault(new TailcatException("channel data is not being consumed fast enough", 0, ""));
+        try { _onBackpressure?.Invoke(); } catch { }
     }
 
     public void OnFault(Exception ex)

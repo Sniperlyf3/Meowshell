@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+"github.com/tailscale/tailcat"
 	"golang.org/x/net/proxy"
 )
 
@@ -37,9 +38,12 @@ func tailcatDialer(tailcatBin string, argv []string) dialer {
 		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
+			_ = stdin.Close()
 			return nil, err
 		}
 		if err := cmd.Start(); err != nil {
+			_ = stdin.Close()
+			_ = stdout.Close()
 			return nil, err
 		}
 		return &pipeConn{cmd: cmd, stdout: stdout, stdin: stdin}, nil
@@ -76,6 +80,11 @@ func jumpDialer(via jumpClient, hostPort string) dialer {
 		case res := <-ch:
 			return res.conn, res.err
 		case <-ctx.Done():
+			// Closing the jump SSH transport is the only available
+			// cancellation primitive for *ssh.Client.Dial. It forces the
+			// in-flight channel-open to unwind instead of leaking one
+			// goroutine per timed-out attempt.
+			_ = via.Close()
 			go func() {
 				if res := <-ch; res.conn != nil {
 					res.conn.Close()
@@ -88,6 +97,7 @@ func jumpDialer(via jumpClient, hostPort string) dialer {
 
 type jumpClient interface {
 	Dial(network, addr string) (net.Conn, error)
+	Close() error
 }
 
 func splitUserHost(dest, defaultPort string) (username, hostPort string) {
@@ -120,9 +130,13 @@ func proxyDialer(proxyURL, hostPort string) (dialer, error) {
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("invalid --proxy URL: missing host")
 	}
+	if u.Scheme == "http" && u.User != nil {
+		return nil, fmt.Errorf("refusing proxy credentials over plaintext http; use https or socks5")
+	}
 	switch u.Scheme {
 	case "socks5", "socks5h":
-		d, err := proxy.SOCKS5("tcp", u.Host, proxyAuthFromURL(u), proxy.Direct)
+		base := &net.Dialer{Timeout: tcpDialTimeout}
+		d, err := proxy.SOCKS5("tcp", u.Host, proxyAuthFromURL(u), base)
 		if err != nil {
 			return nil, fmt.Errorf("configuring SOCKS5 proxy %q: %w", u.Redacted(), err)
 		}
@@ -137,7 +151,7 @@ func proxyDialer(proxyURL, hostPort string) (dialer, error) {
 			return dialHTTPConnectProxy(ctx, u, hostPort)
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported --proxy scheme %q (want socks5 or http)", u.Scheme)
+		return nil, fmt.Errorf("unsupported --proxy scheme %q (want socks5, socks5h, http, or https)", u.Scheme)
 	}
 }
 
@@ -264,10 +278,9 @@ func resolveAgentDestination(ctx context.Context, dest string, allowTXT bool) (s
 }
 
 func looksLikeTailcatAddress(dest string) bool {
-	rest, ok := strings.CutPrefix(dest, "tc")
-	if !ok || rest == "" {
+	if !strings.HasPrefix(dest, "tc") {
 		return false
 	}
-	_, err := base64.RawURLEncoding.DecodeString(rest)
+	_, err := tailcat.ParseAddr(tailcat.Addr(dest))
 	return err == nil
 }

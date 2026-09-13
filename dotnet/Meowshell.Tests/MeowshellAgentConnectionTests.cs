@@ -377,6 +377,24 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     /// this measures that CloseAsync() actually blocks for roughly that long
     /// instead of returning immediately.</summary>
     [Fact]
+    public async Task CancelledForwardCloseStillStopsRemoteListener()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => forward.CloseAsync(cancellation.Token));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "CLOSED", TimeSpan.FromSeconds(5)),
+            "cancelling CloseAsync before its write completed left the remote forward running");
+    }
+
+    [Fact]
     public async Task CloseAsyncWaitsForTheAgentsChannelClosedAcknowledgment()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -391,68 +409,6 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
 
         Assert.True(started.Elapsed >= TimeSpan.FromMilliseconds(250),
             $"CloseAsync() returned after {started.Elapsed}, want it to have waited for the agent's delayed channel_closed acknowledgment (~300ms)");
-    }
-
-    /// <summary>
-    /// The destination e2e/fakeagent recognizes as "prompt during the
-    /// handshake instead of connecting straight away" -- see that program's
-    /// promptDestination.
-    /// </summary>
-    private const string PromptDestination = "prompt-before-connect";
-
-    /// <summary>
-    /// Regression test: every prompt hook is an instance event on the object
-    /// ConnectAsync returns, and ConnectAsync does not return until the
-    /// handshake is over -- so there was no instant at which a caller could
-    /// subscribe before those prompts were raised, and trust-on-first-use was
-    /// simply not implementable against this API. configureConnection is that
-    /// instant. Covers a password prompt as well as the host key one, since
-    /// the hook has to cover every prompt raised during the handshake, not
-    /// just the first.
-    /// </summary>
-    [Fact]
-    public async Task ConfigureConnectionSubscribesInTimeForTheHandshakePrompts()
-    {
-        if (OperatingSystem.IsWindows()) return;
-        var fingerprints = new List<string>();
-        if (await ConnectToFakeAgentAsync(PromptDestination, connection =>
-        {
-            connection.HostKeyPromptRequested += (prompt, _) =>
-            {
-                fingerprints.Add(prompt.Fingerprint);
-                return Task.FromResult(true);
-            };
-            connection.PasswordRequested += (_, _) => Task.FromResult("hunter2");
-        }) is not var (connection, resultsPath)) return;
-        await using var _ = connection;
-
-        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY ACCEPT true", TimeSpan.FromSeconds(5)),
-            "the host key prompt raised during the handshake never reached the handler configureConnection attached");
-        Assert.True(await WaitForResultAsync(resultsPath, "PASSWORD ANSWER hunter2", TimeSpan.FromSeconds(5)),
-            "the password prompt raised during the handshake never reached the handler configureConnection attached");
-        // The prompt's payload has to survive the trip, not just the
-        // subscription: a handler asked with an empty fingerprint has
-        // nothing to show a user deciding whether to trust the host.
-        Assert.NotEmpty(fingerprints);
-        Assert.All(fingerprints, fingerprint => Assert.StartsWith("SHA256:", fingerprint));
-    }
-
-    /// <summary>
-    /// The behavior configureConnection exists to fix, pinned so the two
-    /// halves stay distinguishable: with nobody subscribed, a prompt raised
-    /// during the handshake is answered "cancelled", which on the agent side
-    /// is what makes an unknown host key a host_key_unknown failure rather
-    /// than a silently accepted key.
-    /// </summary>
-    [Fact]
-    public async Task WithoutConfigureConnectionHandshakePromptsGoUnanswered()
-    {
-        if (OperatingSystem.IsWindows()) return;
-        if (await ConnectToFakeAgentAsync(PromptDestination) is not var (connection, resultsPath)) return;
-        await using var _ = connection;
-
-        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY CANCELLED", TimeSpan.FromSeconds(5)),
-            "a host key prompt with no handler attached must be declined, never accepted by default");
     }
 
     private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
@@ -481,4 +437,120 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
             return false;
         }
     }
+
+    [Fact]
+    public async Task OpenLocalForwardRejectsAnExcessiveMaxConnections()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => connection.OpenLocalForwardAsync(
+                "127.0.0.1:0", "10.0.0.1:80", maxConnections: 65_536));
+    }
+
+    [Fact]
+    public async Task SocksAuthRejectsPartialOrOversizedCredentials()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => connection.OpenSocksForwardAsync(
+                "127.0.0.1:0", socksUsername: "only-user", socksPassword: null));
+
+        var tooLong = new string('x', 256);
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => connection.OpenSocksForwardAsync(
+                "127.0.0.1:0", socksUsername: tooLong, socksPassword: "password"));
+    }
+
+
+    private sealed class BlockingDataSink(TaskCompletionSource entered, TaskCompletionSource release) : IAgentChannelSink
+    {
+        public async Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data)
+        {
+            entered.TrySetResult();
+            await release.Task;
+        }
+
+        public Task OnControlAsync(AgentMessage msg) => Task.CompletedTask;
+        public void OnFault(Exception ex) { }
+    }
+
+    [Fact]
+    public async Task ReceiveBackpressureRequestsRemoteChannelCleanupExactlyOnce()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var backpressure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCount = 0;
+
+        var pump = new AgentChannelDataPump(
+            new BlockingDataSink(entered, release),
+            () =>
+            {
+                Interlocked.Increment(ref callbackCount);
+                backpressure.TrySetResult();
+            });
+
+        // The pump consumes the first item and blocks in the inner sink.
+        await pump.OnDataAsync(0, new byte[] { 1 });
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Fill its 32-entry bounded queue, then overflow it. Every producer
+        // call must return synchronously; the overflow faults only this
+        // channel and asks the owner to close the remote side.
+        for (var i = 0; i < 40; i++)
+            await pump.OnDataAsync(0, new byte[] { 2 });
+
+        await backpressure.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, Volatile.Read(ref callbackCount));
+
+        // Further frames for the failed channel must not request repeated
+        // close operations.
+        for (var i = 0; i < 10; i++)
+            await pump.OnDataAsync(0, new byte[] { 3 });
+        Assert.Equal(1, Volatile.Read(ref callbackCount));
+
+        release.TrySetResult();
+    }
+
+
+    private const string PromptDestination = "prompt-before-connect";
+
+    [Fact]
+    public async Task ConfigureConnectionSubscribesInTimeForTheHandshakePrompts()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var fingerprints = new List<string>();
+        if (await ConnectToFakeAgentAsync(PromptDestination, connection =>
+        {
+            connection.HostKeyPromptRequested += (prompt, _) =>
+            {
+                fingerprints.Add(prompt.Fingerprint);
+                return Task.FromResult(true);
+            };
+            connection.PasswordRequested += (_, _) => Task.FromResult("hunter2");
+        }) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY ACCEPT true", TimeSpan.FromSeconds(5)));
+        Assert.True(await WaitForResultAsync(resultsPath, "PASSWORD ANSWER hunter2", TimeSpan.FromSeconds(5)));
+        Assert.NotEmpty(fingerprints);
+        Assert.All(fingerprints, fingerprint => Assert.StartsWith("SHA256:", fingerprint));
+    }
+
+    [Fact]
+    public async Task WithoutConfigureConnectionHandshakePromptsGoUnanswered()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync(PromptDestination) is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        Assert.True(await WaitForResultAsync(resultsPath, "HOST_KEY CANCELLED", TimeSpan.FromSeconds(5)));
+    }
+
 }

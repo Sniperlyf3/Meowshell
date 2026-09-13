@@ -342,3 +342,35 @@ func TestCancelledUploadPreservesExistingDestination(t *testing.T) {
 	}
 	t.Fatalf("cancelled upload changed destination or left staging file behind")
 }
+
+func TestResetSFTPClientDoesNotCloseNewerReplacement(t *testing.T) {
+	session, current, _, _ := newInProcessSFTPClient(t)
+	stale := &sftp.Client{}
+
+	session.resetSFTPClient(stale)
+
+	session.sftpMu.Lock()
+	got := session.sftpClient
+	session.sftpMu.Unlock()
+	if got != current {
+		t.Fatal("timeout for a stale SFTP client cleared the newer active client")
+	}
+}
+
+func TestResetSFTPClientClearsMatchedClientAfterTransportIsClosed(t *testing.T) {
+	session, current, _, breakTransport := newInProcessSFTPClient(t)
+
+	// resetSFTPClient is a cleanup helper, not a cancellation primitive:
+	// pkg/sftp.Client.Close may wait for its receive loop while the transport
+	// is still live. Production timeout recovery closes SSH first, and
+	// closeHops now does the same before resetting this field.
+	breakTransport()
+	session.resetSFTPClient(current)
+
+	session.sftpMu.Lock()
+	got := session.sftpClient
+	session.sftpMu.Unlock()
+	if got != nil {
+		t.Fatal("matched SFTP client was not cleared")
+	}
+}

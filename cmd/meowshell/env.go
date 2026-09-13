@@ -24,10 +24,12 @@ type resolver struct {
 	isFile    func(string) bool
 	isDir     func(string) bool
 	writable  func(string) bool
-	mkdirAll  func(string) error
-	realpath  func(string) string
-	goos      string
-	uidIsRoot bool
+	mkdirAll   func(string) error
+	privateDir func(string) error
+	realpath   func(string) string
+	goos       string
+	uid        int
+	uidIsRoot  bool
 }
 
 func newResolver() *resolver {
@@ -51,7 +53,8 @@ func newResolver() *resolver {
 			os.Remove(name)
 			return true
 		},
-		mkdirAll: func(p string) error { return os.MkdirAll(p, 0o700) },
+		mkdirAll:   func(p string) error { return os.MkdirAll(p, 0o700) },
+		privateDir: ensurePrivateRuntimeDir,
 		realpath: func(p string) string {
 			if r, err := filepath.EvalSymlinks(p); err == nil {
 				return r
@@ -59,6 +62,7 @@ func newResolver() *resolver {
 			return p
 		},
 		goos:      runtimeGOOS,
+		uid:       os.Getuid(),
 		uidIsRoot: os.Getuid() == 0,
 	}
 }
@@ -174,7 +178,14 @@ func (r *resolver) home() (string, []string) {
 	if p := r.termuxPrefix(); p != "" {
 		cands = append(cands, path.Join(path.Dir(p), "home"))
 	}
-	cands = append(cands, "/data/local/tmp/meowshell", filepath.Join(os.TempDir(), "meowshell"))
+	// Shared temporary directories need a different rule from an
+	// explicitly inherited HOME: use a per-UID name and verify the actual
+	// filesystem object is private/owned before trusting it as HOME. A fixed
+	// ".../meowshell" name was pre-creatable by another local user.
+	fallbacks := []string{
+		fmt.Sprintf("/data/local/tmp/meowshell-%d", r.uid),
+		filepath.Join(os.TempDir(), fmt.Sprintf("meowshell-%d", r.uid)),
+	}
 
 	var readOnly string
 	for _, c := range cands {
@@ -187,6 +198,14 @@ func (r *resolver) home() (string, []string) {
 		}
 		if readOnly == "" {
 			readOnly = p
+		}
+	}
+	for _, p := range fallbacks {
+		if r.privateDir == nil || r.privateDir(p) != nil {
+			continue
+		}
+		if r.writable(p) {
+			return p, warns
 		}
 	}
 	if readOnly != "" {

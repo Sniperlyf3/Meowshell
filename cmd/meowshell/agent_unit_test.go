@@ -282,13 +282,109 @@ func TestRegisterChannelSkipsZeroAndActiveIDs(t *testing.T) {
 	}
 }
 
-// TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures pins the one
-// distinction a client cannot recover any other way. "This host is new" is a
-// question worth putting to a user; "this host's key changed" is a warning;
-// and an untyped "unknown" is neither, which is what a declined or
-// unanswered host key prompt used to classify as. Both errors reach
-// classifyConnectError wrapped -- by dialSSHClient's own "connecting to %s"
-// and by the ssh handshake -- so the classification has to survive that.
+func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) {
+	oldTimeout := openChannelTimeout
+	openChannelTimeout = 100 * time.Millisecond
+	defer func() { openChannelTimeout = oldTimeout }()
+
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	release := make(chan struct{})
+	defer close(release)
+	session.openChannelHandler = func(controlMessage) { <-release }
+
+	session.dispatchOpenChannel(controlMessage{
+		Msg: "open_channel", Kind: "shell", RequestID: "slow-open",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(session.openChannelSlots) != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(session.openChannelSlots) != 0 {
+		t.Fatal("timed-out channel open permanently held an openChannelSlots entry")
+	}
+
+	msgs := readControlFrames(t, &out)
+	found := false
+	for _, msg := range msgs {
+		if msg.RequestID == "slow-open" && msg.Code == errTimeout {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
+	}
+}
+
+type failingGateWriteCloser struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *failingGateWriteCloser) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return 0, fmt.Errorf("simulated write failure")
+}
+
+func (*failingGateWriteCloser) Close() error { return nil }
+
+func TestChannelWriterFailureDrainsPendingWaitGroup(t *testing.T) {
+	var out bytes.Buffer
+	session := newAgentSession(nil, &out)
+	writer := &failingGateWriteCloser{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	ch := &agentChannel{stdin: writer}
+	const id = uint32(7)
+	session.chans[id] = ch
+	session.startChannelWriter(id, ch)
+
+	// First write enters the worker and blocks. Queue additional writes behind
+	// it so a failure of the in-flight write leaves pending work to account for.
+	session.handleData(id, []byte("first"))
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("writer never started first write")
+	}
+	session.handleData(id, []byte("second"))
+	session.handleData(id, []byte("third"))
+
+	waitDone := make(chan struct{})
+	go func() {
+		ch.writePending.Wait()
+		close(waitDone)
+	}()
+
+	close(writer.release)
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("writePending remained non-zero after writer failure drained queued writes")
+	}
+
+	// Once the writer has failed/stopped, stale data for the removed channel
+	// must not create a new pending count after the worker is gone.
+	session.handleData(id, []byte("stale"))
+	waitDone2 := make(chan struct{})
+	go func() {
+		ch.writePending.Wait()
+		close(waitDone2)
+	}()
+	select {
+	case <-waitDone2:
+	case <-time.After(time.Second):
+		t.Fatal("stale data after writer stop reintroduced an unbalanced pending write")
+	}
+}
+
+
 func TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -306,5 +402,16 @@ func TestClassifyConnectErrorDistinguishesTheTwoHostKeyFailures(t *testing.T) {
 				t.Errorf("classifyConnectError(%v) = %q, want %q", wrapped, got, tc.want)
 			}
 		})
+	}
+}
+
+
+func TestConnectTargetForDiagnosticsRedactsTailcatCapability(t *testing.T) {
+	const secret = "tc-secret-capability"
+	if got := connectTargetForDiagnostics(secret, true); got != "tailcat destination" {
+		t.Fatalf("tailcat diagnostic target = %q, want redacted label", got)
+	}
+	if got := connectTargetForDiagnostics("user@example.com:22", false); got != "user@example.com:22" {
+		t.Fatalf("ordinary SSH diagnostic target = %q, want original host", got)
 	}
 }
