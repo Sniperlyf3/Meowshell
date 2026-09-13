@@ -101,10 +101,16 @@ else
 	fail "published address is a different identity from the provisioned one"
 fi
 
-if out=$(timeout 90 "$TAILCAT" ssh "$provisioned" "echo $MARKER; echo P=\$PATH" 2>&1); then
+if out=$(timeout 90 "$TAILCAT" ssh "$provisioned" \
+	'for f in /proc/$/fd/*; do p=$(readlink "$f" 2>/dev/null || true); case "$p" in *meowshell-key-*) echo KEY_FD_LEAK;; esac; done; echo '"$MARKER"'; echo P=$PATH' 2>&1); then
 	indent "$out"
 	assert_grep "remote command ran"           "$MARKER"  "$out"
 	assert_grep "remote command had a PATH"    "P=/.*bin" "$out"
+	if printf '%s\n' "$out" | grep -q "KEY_FD_LEAK"; then
+		fail "remote command inherited the staged private-key descriptor"
+	else
+		pass "remote command inherited no staged private-key descriptor"
+	fi
 else
 	indent "$out"; echo "--- server log (redacted) ---"; redact < "$work/server.log" || true
 	fail "could not open a session"
