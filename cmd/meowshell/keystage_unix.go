@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 )
@@ -24,21 +25,55 @@ func stageKey(dir string, data []byte) (string, error) {
 		f.Close()
 		return "", fmt.Errorf("writing staged key: %w", err)
 	}
-
-	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), syscall.F_SETFD, 0); errno != 0 {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		f.Close()
-		return "", fmt.Errorf("clearing close-on-exec on staged key: %w", errno)
+		return "", fmt.Errorf("rewinding staged key: %w", err)
 	}
 
+	// Tailcat's patched --key=- reads the JSON from stdin. Keep the anonymous
+	// file CLOEXEC here; runTailcat duplicates it onto fd 0 immediately before
+	// exec. That avoids leaving a private-key descriptor >= 3 inheritable by
+	// Tailcat's later ssh/exec children.
 	stagedKey = f
-	return fdPath(f.Fd()), nil
+	return "-", nil
 }
 
-func fdPath(fd uintptr) string {
-	if runtimeGOOS == "linux" || runtimeGOOS == "android" {
-		return fmt.Sprintf("/proc/self/fd/%d", fd)
+func prepareStagedKeyStdin() error {
+	if stagedKey == nil {
+		return nil
 	}
-	return fmt.Sprintf("/dev/fd/%d", fd)
+	f := stagedKey
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewinding staged key for tailcat stdin: %w", err)
+	}
+
+	fd := int(f.Fd())
+	if fd != int(os.Stdin.Fd()) {
+		if err := syscall.Dup2(fd, int(os.Stdin.Fd())); err != nil {
+			return fmt.Errorf("placing staged key on stdin: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("closing staged key descriptor: %w", err)
+		}
+	}
+	// dup2 clears FD_CLOEXEC on the destination, but if CreateTemp happened to
+	// allocate fd 0 because the caller started with stdin closed, clear it
+	// explicitly so --key=- still works after exec.
+	if _, _, errno := syscall.Syscall(
+		syscall.SYS_FCNTL,
+		os.Stdin.Fd(),
+		syscall.F_SETFD,
+		0,
+	); errno != 0 {
+		return fmt.Errorf("making staged key stdin inheritable: %w", errno)
+	}
+	stagedKey = nil
+	return nil
 }
 
-func cleanupStagedKey() {}
+func cleanupStagedKey() {
+	if stagedKey != nil {
+		_ = stagedKey.Close()
+		stagedKey = nil
+	}
+}
