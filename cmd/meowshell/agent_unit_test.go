@@ -297,24 +297,38 @@ func TestDispatchOpenChannelTimesOutWithoutPermanentlyHoldingSlot(t *testing.T) 
 		Msg: "open_channel", Kind: "shell", RequestID: "slow-open",
 	})
 
+	// The timeout goroutine releases the openChannelSlots entry before it
+	// writes the error frame (agent.go's dispatchOpenChannel: release(),
+	// then writeOpenError()), so polling the slot count alone -- as this
+	// test used to -- can observe the release and read out before the frame
+	// is actually written, and reading out at all without outMu races the
+	// writer regardless. Poll for the frame itself, under the same lock the
+	// writer uses, until it shows up or the deadline passes.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(session.openChannelSlots) != 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if len(session.openChannelSlots) != 0 {
-		t.Fatal("timed-out channel open permanently held an openChannelSlots entry")
-	}
-
-	msgs := readControlFrames(t, &out)
+	var msgs []controlMessage
 	found := false
-	for _, msg := range msgs {
-		if msg.RequestID == "slow-open" && msg.Code == errTimeout {
-			found = true
+	for time.Now().Before(deadline) {
+		session.outMu.Lock()
+		snapshot := bytes.NewBuffer(append([]byte(nil), out.Bytes()...))
+		session.outMu.Unlock()
+		msgs = readControlFrames(t, snapshot)
+		for _, msg := range msgs {
+			if msg.RequestID == "slow-open" && msg.Code == errTimeout {
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if !found {
 		t.Fatalf("timed-out open did not produce request-correlated timeout: %+v", msgs)
+	}
+
+	if len(session.openChannelSlots) != 0 {
+		t.Fatal("timed-out channel open permanently held an openChannelSlots entry")
 	}
 }
 
