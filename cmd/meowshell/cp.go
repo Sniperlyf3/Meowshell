@@ -197,11 +197,27 @@ func upload(sf *sftp.Client, localPath, remotePath string, recursive, preserve b
 }
 
 func uploadFile(sf *sftp.Client, localPath, remotePath string, preserve bool) error {
+	before, err := os.Lstat(localPath)
+	if err != nil {
+		return err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to follow it (symlinks are not supported by cp)", localPath)
+	}
+
 	src, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
+
+	opened, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(before, opened) {
+		return fmt.Errorf("%s changed while it was being opened; refusing to copy a different file", localPath)
+	}
 
 	// Staged to a sibling path and committed via commitUpload (an atomic
 	// rename when the server supports it) rather than sf.Create(remotePath)
@@ -227,14 +243,10 @@ func uploadFile(sf *sftp.Client, localPath, remotePath string, preserve bool) er
 		return fmt.Errorf("finishing upload of %s: %w", remotePath, err)
 	}
 	if preserve {
-		fi, err := src.Stat()
-		if err != nil {
+		if err := sf.Chtimes(tempPath, opened.ModTime(), opened.ModTime()); err != nil {
 			return err
 		}
-		if err := sf.Chtimes(tempPath, fi.ModTime(), fi.ModTime()); err != nil {
-			return err
-		}
-		if err := sf.Chmod(tempPath, fi.Mode().Perm()); err != nil {
+		if err := sf.Chmod(tempPath, opened.Mode().Perm()); err != nil {
 			return err
 		}
 	}
