@@ -73,9 +73,16 @@ func runTailcat(bin string, argv, environ []string) error {
 		}
 	}
 
-	if err := prepareStagedKeyStdin(); err != nil {
+	keyOnStdin, err := prepareStagedKeyStdin()
+	if err != nil {
 		cleanupStagedKey()
 		return err
 	}
-	return syscall.Exec(bin, argv, environ)
+	if err := syscall.Exec(bin, argv, environ); err != nil {
+		if keyOnStdin {
+			_ = os.Stdin.Close()
+		}
+		return err
+	}
+	return nil
 }
