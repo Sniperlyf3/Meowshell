@@ -34,11 +34,22 @@ public sealed class MeowshellMoshConnection : IAsyncDisposable
         _readLoop = Task.Run(ReadLoopAsync);
     }
 
+    /// <summary>Diagnostic output from meowshell/tailcat (connection setup, errors). Raised on a background thread.</summary>
     public event Action<string>? Log;
+
+    /// <summary>An unrecognized host key on the SSH bootstrap. No handler (or the handler throwing) rejects the key.</summary>
     public event Func<MeowshellHostKeyPrompt, CancellationToken, Task<bool>>? HostKeyPromptRequested;
+
+    /// <summary>A password is needed. No handler cancels the auth attempt.</summary>
     public event Func<string, CancellationToken, Task<string>>? PasswordRequested;
+
+    /// <summary>An encrypted supplied private key needs its passphrase. No handler cancels the auth attempt.</summary>
     public event Func<CancellationToken, Task<string>>? PassphraseRequested;
+
+    /// <summary>A keyboard-interactive (OTP/PAM) challenge. May fire more than once per connection attempt. No handler cancels the auth attempt.</summary>
     public event Func<MeowshellKeyboardInteractivePrompt, CancellationToken, Task<string[]>>? KeyboardInteractiveRequested;
+
+    /// <summary>A Keystore-backed key needs to sign something, under the algorithm in <see cref="MeowshellSignRequest.Algorithm"/>. No handler refuses the signature.</summary>
     public event Func<MeowshellSignRequest, CancellationToken, Task<byte[]>>? SignRequested;
 
     /// <summary>Raw terminal output after the Mosh state machine has reconstructed it.</summary>
@@ -47,6 +58,7 @@ public sealed class MeowshellMoshConnection : IAsyncDisposable
     /// <summary>Raised when the native Mosh process terminates unexpectedly or its framed protocol fails.</summary>
     public event EventHandler<Exception>? ConnectionLost;
 
+    /// <summary>Whether the SSH bootstrap and Mosh handoff have both completed and the connection has not since been stopped.</summary>
     public bool IsConnected => _connected.Task.IsCompletedSuccessfully && Volatile.Read(ref _stopped) == 0;
 
     /// <summary>
@@ -268,6 +280,7 @@ public sealed class MeowshellMoshConnection : IAsyncDisposable
             throw new ObjectDisposedException(nameof(MeowshellMoshConnection));
     }
 
+    /// <summary>Ends the connection and releases everything it holds.</summary>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
