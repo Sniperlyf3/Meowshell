@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/pkg/sftp v1.13.11
 	github.com/tailscale/tailcat v0.6.0
+	github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
@@ -27,7 +28,7 @@ require (
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
 	github.com/go4org/hashtriemap v0.0.0-20260824042624-45fcf11fca0e // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
+	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208e0c414138bcde9bf // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
