@@ -1,0 +1,32 @@
+name: Mosh dependency sums
+
+on:
+  push:
+    branches: [feature/mosh-agent]
+
+permissions:
+  contents: read
+
+jobs:
+  sums:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+      - name: Fetch tailcat source
+        run: |
+          SRC_REF=$(tr -d '[:space:]' < tailcat.ref)
+          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
+          git -C .tailcat-src checkout --detach FETCH_HEAD
+      - name: Resolve and print dependency changes
+        run: |
+          cp go.sum /tmp/go.sum.before
+          cp go.mod /tmp/go.mod.before
+          go mod tidy
+          echo '--- GO.MOD DIFF ---'
+          diff -u /tmp/go.mod.before go.mod || true
+          echo '--- GO.SUM ADDITIONS ---'
+          comm -13 <(sort /tmp/go.sum.before) <(sort go.sum)
