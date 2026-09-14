@@ -366,3 +366,75 @@ func TestFindTailcatOffAndroidStillRejectsForeignOwner(t *testing.T) {
 		t.Fatal("findTailcat accepted a foreign-owned native executable off android")
 	}
 }
+
+
+func TestFindTailcatRejectsSafeBinaryInsideWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a native executable in a group/other-writable directory")
+	}
+}
+
+
+func TestFindTailcatRejectsSafeBinaryBelowWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	ancestor := t.TempDir()
+	if err := os.Chmod(ancestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ancestor, "private")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err == nil {
+		t.Fatal("findTailcat accepted a native executable below a replaceable writable ancestor")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(cwd, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(rel); err == nil {
+		t.Fatal("findTailcat accepted a relative native executable path below a replaceable writable ancestor")
+	}
+}
+
+func TestFindTailcatAllowsTrustedStickyWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits do not apply")
+	}
+	ancestor := t.TempDir()
+	if err := os.Chmod(ancestor, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ancestor, "private")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tailcat")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findTailcat(p); err != nil {
+		t.Fatalf("findTailcat rejected safe binary below trusted sticky ancestor: %v", err)
+	}
+}

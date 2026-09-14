@@ -709,6 +709,30 @@ public sealed class TailcatClientTests : IDisposable
     }
 
 
+    [Fact]
+    public void BinaryLocatorRejectsSafeBinariesInsideWritableDirectory()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var bin = Path.Combine(_dir, "replaceable-bin");
+        Directory.CreateDirectory(bin);
+        File.SetUnixFileMode(bin,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
+
+        var naming = BinaryNaming.ForCurrentPlatform();
+        foreach (var name in new[] { "meowshell", "tailcat" })
+        {
+            var path = Path.Combine(bin, naming.FileName(name));
+            File.WriteAllText(path, "stub");
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        Assert.Throws<IOException>(() => MeowshellBinaries.Locate(bin, naming));
+    }
+
     [Theory]
     [InlineData("1e999s")]
     [InlineData("999999999999999999999999999999999999999999999999999999999999999999h")]

@@ -395,6 +395,37 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     }
 
     [Fact]
+    public async Task ConcurrentForwardCloseCallsBothComplete()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "delay-close-ack");
+
+        var first = forward.CloseAsync();
+        var second = forward.CloseAsync();
+
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, connection.ChannelCountForTests);
+    }
+
+    [Fact]
+    public async Task StopAsyncDrainsTrackedChannels()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        Assert.True(connection.ChannelCountForTests > 0);
+
+        await connection.StopAsync();
+
+        Assert.Equal(0, connection.ChannelCountForTests);
+    }
+
+    [Fact]
     public async Task CloseAsyncWaitsForTheAgentsChannelClosedAcknowledgment()
     {
         if (OperatingSystem.IsWindows()) return;

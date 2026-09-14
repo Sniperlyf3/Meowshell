@@ -77,3 +77,14 @@ func TestTailcatKeyFromNameUsesSavedClientDefault(t *testing.T) {
 		}
 	})
 }
+
+
+func TestTailcatKeyFromNameRejectsOversizedKeyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge.private.json")
+	if err := os.WriteFile(path, make([]byte, maxTailcatKeyJSON+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tailcatKeyFromName(path); err == nil {
+		t.Fatal("oversized key file was accepted")
+	}
+}

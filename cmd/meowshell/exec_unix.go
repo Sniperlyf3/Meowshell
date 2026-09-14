@@ -67,11 +67,22 @@ func runTailcat(bin string, argv, environ []string) error {
 			return fmt.Errorf("managed parent process %d is no longer this process's parent", managedHostPID)
 		}
 		environ = setEnv(environ, [][2]string{{managedParentPIDEnv, strconv.Itoa(managedHostPID)}})
-		return syscall.Exec(bin, argv, environ)
+	} else {
+		if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0); errno != 0 {
+			fmt.Fprintf(os.Stderr, "# warning: could not arm the parent-death signal: %v\n", errno)
+		}
 	}
 
-	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0); errno != 0 {
-		fmt.Fprintf(os.Stderr, "# warning: could not arm the parent-death signal: %v\n", errno)
+	keyOnStdin, err := prepareStagedKeyStdin()
+	if err != nil {
+		cleanupStagedKey()
+		return err
 	}
-	return syscall.Exec(bin, argv, environ)
+	if err := syscall.Exec(bin, argv, environ); err != nil {
+		if keyOnStdin {
+			_ = os.Stdin.Close()
+		}
+		return err
+	}
+	return nil
 }

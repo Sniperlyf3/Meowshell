@@ -16,9 +16,15 @@ import (
 // deliberately left out, matching the reasoning validateKnownHostsPath
 // already applies on Unix (rejecting group/other WRITE, not mere
 // readability).
+// FILE_DELETE_CHILD (0x0040) is the directory right that lets a trustee
+// delete/replace children even without write-data permission on the directory.
+// x/sys/windows does not expose a named constant for it in every supported
+// version, so keep the Win32 access-mask value here explicitly.
+const fileDeleteChild windows.ACCESS_MASK = 0x0040
+
 const writeAccessMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
 	windows.FILE_WRITE_ATTRIBUTES | windows.FILE_WRITE_EA |
-	windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE |
+	fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE |
 	windows.GENERIC_WRITE | windows.GENERIC_ALL
 
 func validateKnownHostsDir(path string) error {

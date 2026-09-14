@@ -9,8 +9,14 @@ import (
 )
 
 func runTailcat(bin string, argv, environ []string) error {
+	job, jobName, err := newNamedKillOnCloseJob()
+	if err != nil {
+		return fmt.Errorf("creating Tailcat containment job: %w", err)
+	}
+	defer job.Close()
+
 	cmd := exec.Command(bin, argv[1:]...)
-	cmd.Env = environ
+	cmd.Env = setEnv(environ, [][2]string{{parentJobEnv, jobName}})
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 
 	keyData := takeStagedKey()
@@ -33,6 +39,14 @@ func runTailcat(bin string, argv, environ []string) error {
 		}
 		return err
 	}
+	if err := job.ensureAssigned(cmd.Process.Pid); err != nil {
+		if keyStdin != nil {
+			_ = keyStdin.Close()
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("protecting Tailcat child: %w", err)
+	}
 
 	if keyStdin != nil {
 		if _, err := keyStdin.Write(keyData); err != nil {
@@ -49,19 +63,10 @@ func runTailcat(bin string, argv, environ []string) error {
 		zeroBytes(keyData)
 	}
 
-	// Windows has no PR_SET_PDEATHSIG equivalent. Put tailcat in a
-	// kill-on-close Job Object instead so an abrupt meowshell termination
-	// cannot strand the long-lived child. Treat failure as fatal rather than
-	// silently running without the lifecycle guarantee.
-	job, err := newKillOnCloseJob(cmd.Process.Pid)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		cleanupStagedKey()
-		return fmt.Errorf("protecting tailcat child: %w", err)
-	}
-	defer job.Close()
-
+	// The named kill-on-close Job Object was created before Start. The shipped
+	// patched Tailcat joins it at the beginning of main, before it can launch
+	// descendants. The parent-side ensureAssigned above is both a verification
+	// and a fallback for a caller-supplied external Tailcat without that patch.
 	err = cmd.Wait()
 
 	var exit *exec.ExitError

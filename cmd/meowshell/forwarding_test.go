@@ -226,7 +226,7 @@ func TestAcceptForwardedConnsLimitsConcurrency(t *testing.T) {
 	release := make(chan struct{})
 	handled := make(chan struct{}, totalConns)
 
-	acceptForwardedConns(ln, maxConnections, func(conn net.Conn) {
+	acceptForwardedConns(ln, maxConnections, make(chan struct{}), func(conn net.Conn) {
 		defer conn.Close()
 		mu.Lock()
 		cur++
@@ -310,7 +310,7 @@ func TestAcceptForwardedConnsZeroMeansUnlimited(t *testing.T) {
 	release := make(chan struct{})
 	handled := make(chan struct{}, totalConns)
 
-	acceptForwardedConns(ln, 0, func(conn net.Conn) {
+	acceptForwardedConns(ln, 0, make(chan struct{}), func(conn net.Conn) {
 		defer conn.Close()
 		mu.Lock()
 		cur++
@@ -439,4 +439,53 @@ func TestDialWithTimeoutAbortUnblocksStuckDial(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout abort did not unwind the underlying dial goroutine")
 	}
+}
+
+
+func TestClosingForwardStopsAcceptLoopWhileAtConnectionLimit(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	done := acceptForwardedConns(ln, 1, stop, func(conn net.Conn) {
+		defer conn.Close()
+		close(handlerStarted)
+		<-releaseHandler
+	})
+
+	first, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first forwarded connection never reached handler")
+	}
+
+	// With the only slot occupied, the accept loop is blocked waiting for the
+	// semaphore. Closing the listener alone cannot wake that wait. The explicit
+	// stop signal must make the accept goroutine exit even though the active
+	// forwarded connection is deliberately left running.
+	second, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	close(stop)
+	_ = ln.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("forward accept loop stayed blocked at maxConnections after close")
+	}
+
+	close(releaseHandler)
 }

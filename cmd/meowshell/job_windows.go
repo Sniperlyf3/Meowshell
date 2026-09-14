@@ -3,7 +3,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,6 +18,75 @@ import (
 // killed/crashes, Windows closes the handle for us and tears the child down.
 type killOnCloseJob struct {
 	handle windows.Handle
+}
+
+var isProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+func (j *killOnCloseJob) ensureAssigned(pid int) error {
+	const processQueryLimitedInformation = 0x1000
+	process, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|processQueryLimitedInformation,
+		false,
+		uint32(pid),
+	)
+	if err != nil {
+		return fmt.Errorf("opening Tailcat process for job assignment: %w", err)
+	}
+	defer windows.CloseHandle(process)
+
+	contains := func() (bool, error) {
+		var result uint32
+		r1, _, callErr := isProcessInJob.Call(
+			uintptr(process),
+			uintptr(j.handle),
+			uintptr(unsafe.Pointer(&result)),
+		)
+		if r1 == 0 {
+			return false, callErr
+		}
+		return result != 0, nil
+	}
+
+	// The shipped Tailcat self-joins this already-created job at the very
+	// beginning of main, before it can launch descendants. Give that race-free
+	// path a brief chance to complete first. A caller-supplied older Tailcat
+	// will never join, so after this bounded grace period we fall back to the
+	// previous parent-side assignment rather than dropping containment.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if inJob, err := contains(); err != nil {
+			return fmt.Errorf("checking Tailcat Job Object membership: %w", err)
+		} else if inJob {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := windows.AssignProcessToJobObject(j.handle, process); err != nil {
+		// The child can still self-join between our final membership check and
+		// assignment. Re-check before treating the assignment error as fatal.
+		if inJob, checkErr := contains(); checkErr == nil && inJob {
+			return nil
+		}
+		return fmt.Errorf("assigning Tailcat process to Job Object: %w", err)
+	}
+	return nil
+}
+
+func newNamedKillOnCloseJob() (*killOnCloseJob, string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, "", fmt.Errorf("generating Windows Job Object name: %w", err)
+	}
+	name := "Local\\Meowshell-" + hex.EncodeToString(nonce[:])
+	job, err := createKillOnCloseJob(name)
+	if err != nil {
+		return nil, "", err
+	}
+	return job, name, nil
 }
 
 func createKillOnCloseJob(name string) (*killOnCloseJob, error) {
@@ -50,21 +122,9 @@ func newKillOnCloseJob(pid int) (*killOnCloseJob, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	process, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false,
-		uint32(pid),
-	)
-	if err != nil {
+	if err := j.ensureAssigned(pid); err != nil {
 		j.Close()
-		return nil, fmt.Errorf("opening tailcat process for job assignment: %w", err)
-	}
-	defer windows.CloseHandle(process)
-
-	if err := windows.AssignProcessToJobObject(j.handle, process); err != nil {
-		j.Close()
-		return nil, fmt.Errorf("assigning tailcat process to job object: %w", err)
+		return nil, err
 	}
 	return j, nil
 }

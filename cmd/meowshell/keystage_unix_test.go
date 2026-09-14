@@ -1,0 +1,67 @@
+//go:build unix
+
+package main
+
+import (
+	"os"
+	"os/exec"
+	"syscall"
+	"testing"
+)
+
+func TestStageKeyUsesStdinHandoffWithoutInheritableExtraFD(t *testing.T) {
+	cleanupStagedKey()
+	t.Cleanup(cleanupStagedKey)
+
+	arg, err := stageKey(t.TempDir(), []byte(`{"Private":"test-private-key"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arg != "-" {
+		t.Fatalf("stageKey argument = %q, want stdin marker '-'", arg)
+	}
+	if stagedKey == nil {
+		t.Fatal("stageKey did not retain the anonymous staging descriptor")
+	}
+	if _, err := os.Stat(stagedKey.Name()); !os.IsNotExist(err) {
+		t.Fatalf("anonymous staging file still has a filesystem name: %v", err)
+	}
+
+	flags, _, errno := syscall.Syscall(
+		syscall.SYS_FCNTL,
+		stagedKey.Fd(),
+		syscall.F_GETFD,
+		0,
+	)
+	if errno != 0 {
+		t.Fatalf("F_GETFD: %v", errno)
+	}
+	if flags&syscall.FD_CLOEXEC == 0 {
+		t.Fatal("staged key descriptor is inheritable before runTailcat prepares stdin")
+	}
+}
+
+
+func TestRunTailcatClosesKeyStdinWhenExecFails(t *testing.T) {
+	if os.Getenv("MEOWSHELL_TEST_EXEC_FAIL_KEY_STDIN") == "1" {
+		if _, err := stageKey(t.TempDir(), []byte(`{"Private":"test-private-key"}`)); err != nil {
+			t.Fatal(err)
+		}
+		err := runTailcat("/definitely/not/a/real/tailcat", []string{"tailcat", "serve"}, os.Environ())
+		if err == nil {
+			t.Fatal("runTailcat unexpectedly succeeded")
+		}
+		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, os.Stdin.Fd(), syscall.F_GETFD, 0)
+		if errno != syscall.EBADF {
+			t.Fatalf("stdin after failed exec: errno=%v, want EBADF so the staged key is no longer open", errno)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunTailcatClosesKeyStdinWhenExecFails$")
+	cmd.Env = append(os.Environ(), "MEOWSHELL_TEST_EXEC_FAIL_KEY_STDIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exec-failure helper: %v\n%s", err, out)
+	}
+}

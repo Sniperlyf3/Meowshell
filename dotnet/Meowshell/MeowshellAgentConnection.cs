@@ -509,46 +509,33 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     internal async Task CloseForwardAsync(uint id, CancellationToken cancellationToken)
     {
-        // Unlike a shell/exec channel, the agent never sends "exit_status" --
-        // it acknowledges a forward's close explicitly instead, with its own
-        // "channel_closed" (see agent.go's closeChannel), sent only once
-        // ch.listener.Close() has actually returned. Waiting for it here
-        // means a caller can trust that by the time CloseAsync() returns,
-        // the port is genuinely free again (e.g. safe to rebind) rather than
-        // merely that the close request was sent. This explicit close is
-        // also still the only terminal signal that exists at all for a
-        // forward, so it has to also be what removes the local entry:
-        // without it, every forward ever opened on a connection stays in
-        // _channels for the connection's whole lifetime, not just until it's
-        // closed.
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingCloses[id] = tcs;
-        var closeSent = false;
-        try
+        // A forward has exactly one remote close acknowledgement. Share one
+        // completion source between every concurrent CloseAsync caller rather
+        // than letting later callers overwrite an earlier _pendingCloses[id]
+        // entry and strand that earlier caller forever.
+        var created = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = _pendingCloses.GetOrAdd(id, created);
+        var ownsClose = ReferenceEquals(tcs, created);
+
+        if (ownsClose)
         {
-            await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, cancellationToken).ConfigureAwait(false);
-            closeSent = true;
-            using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-            await tcs.Task.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // Cancellation should stop the caller waiting, not leave a
-            // listener running remotely. If the token fired before the
-            // close frame made it onto the wire, send one best-effort with
-            // an uncancelled token; duplicate close_channel is harmless on
-            // the agent side if a partial/canceled write actually got through.
-            if (!closeSent)
+            try
             {
-                try { await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false); } catch { }
+                // Once a close is requested, cancellation should only stop a
+                // particular caller waiting; it must not leave the remote
+                // listener running. Send the single close frame uncancelled.
+                await WriteControlAsync(id, new AgentMessage { Msg = "close_channel" }, CancellationToken.None).ConfigureAwait(false);
             }
-            throw;
+            catch (Exception ex)
+            {
+                _channels.TryRemove(id, out _);
+                if (_pendingCloses.TryRemove(id, out var removed))
+                    removed.TrySetException(ex);
+                throw;
+            }
         }
-        finally
-        {
-            _pendingCloses.TryRemove(id, out _);
-            _channels.TryRemove(id, out _);
-        }
+
+        await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // Each open_channel request carries its own request ID, correlated
@@ -730,10 +717,15 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 _ = WriteControlAsync(channelId, new AgentMessage { Msg = "close_channel" }, CancellationToken.None);
                 return;
             case "channel_closed":
+                // Make the channel disappear before releasing CloseForwardAsync
+                // waiters. RunContinuationsAsynchronously prevents inline
+                // continuation execution, but the continuation can still run
+                // concurrently on another thread as soon as TrySetResult is
+                // called; completing first made DisposeAsync observably return
+                // while the channel was still present for a brief race window.
+                _channels.TryRemove(channelId, out _);
                 if (_pendingCloses.TryRemove(channelId, out var closedTcs))
-                {
                     closedTcs.TrySetResult();
-                }
                 return;
             case "sftp_result":
                 if (msg.RequestId is not null && _pendingRequests.TryRemove(msg.RequestId, out var resultTcs))
@@ -843,10 +835,22 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     private void FaultEverything(Exception ex)
     {
         _connected.TrySetException(ex);
-        foreach (var kv in _pendingOpens) kv.Value.OnFailed(ex);
-        foreach (var kv in _pendingRequests) kv.Value.TrySetException(ex);
-        foreach (var kv in _pendingCloses) kv.Value.TrySetException(ex);
-        foreach (var kv in _channels) kv.Value.OnFault(ex);
+
+        foreach (var kv in _pendingOpens)
+            if (_pendingOpens.TryRemove(kv.Key, out var pendingOpen))
+                pendingOpen.OnFailed(ex);
+
+        foreach (var kv in _pendingRequests)
+            if (_pendingRequests.TryRemove(kv.Key, out var pendingRequest))
+                pendingRequest.TrySetException(ex);
+
+        foreach (var kv in _pendingCloses)
+            if (_pendingCloses.TryRemove(kv.Key, out var pendingClose))
+                pendingClose.TrySetException(ex);
+
+        foreach (var kv in _channels)
+            if (_channels.TryRemove(kv.Key, out var channel))
+                channel.OnFault(ex);
     }
 
     private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(3);

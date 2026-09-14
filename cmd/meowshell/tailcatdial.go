@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -57,6 +58,8 @@ func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	return c.cl.DialTCP(ctx, netip.AddrPortFrom(ip.Unmap(), uint16(port)))
 }
 
+const maxTailcatKeyJSON = 64 << 10
+
 func tailcatKeyFromName(name string) (key.NodePrivate, error) {
 	if name == "" {
 		// Mirrors tailcat's own clientKey(): an empty --key means "use the
@@ -87,10 +90,19 @@ func tailcatKeyFromName(name string) (key.NodePrivate, error) {
 		}
 		path = filepath.Join(confDir, "tailcat", "keys", name+".private.json")
 	}
-	j, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return key.NodePrivate{}, err
 	}
+	defer f.Close()
+	j, err := io.ReadAll(io.LimitReader(f, maxTailcatKeyJSON+1))
+	if err != nil {
+		return key.NodePrivate{}, err
+	}
+	if len(j) > maxTailcatKeyJSON {
+		return key.NodePrivate{}, fmt.Errorf("key file %s exceeds %d bytes", path, maxTailcatKeyJSON)
+	}
+	defer clear(j)
 	var conf tailcat.PrivateKey
 	if err := json.Unmarshal(j, &conf); err != nil {
 		return key.NodePrivate{}, fmt.Errorf("parsing %s: %w", path, err)

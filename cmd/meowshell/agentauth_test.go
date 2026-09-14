@@ -370,3 +370,29 @@ func TestKeystoreSignFailureIsReportedAsAnAuthFailure(t *testing.T) {
 		t.Errorf("classifyConnectError(%v) = %q, want %q", wrapped, got, errAuthFailed)
 	}
 }
+
+
+type trackingCloser struct {
+	closed int
+}
+
+func (c *trackingCloser) Close() error {
+	c.closed++
+	return nil
+}
+
+func TestCloseAuthAgentIsIdempotent(t *testing.T) {
+	session := newAgentSession(nil, nil)
+	closer := &trackingCloser{}
+	session.authAgentCloser = closer
+
+	session.closeAuthAgent()
+	session.closeAuthAgent()
+
+	if closer.closed != 1 {
+		t.Fatalf("auth-agent connection closed %d times, want exactly once", closer.closed)
+	}
+	if session.authAgentCloser != nil {
+		t.Fatal("auth-agent connection reference was retained after close")
+	}
+}

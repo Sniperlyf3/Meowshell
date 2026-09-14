@@ -168,3 +168,21 @@ func TestValidateKnownHostsFileRejectsASymlink(t *testing.T) {
 		t.Fatalf("validateKnownHostsFile on a symlink = %v, want a reparse-point rejection", err)
 	}
 }
+
+
+func TestValidateKnownHostsDirRejectsWorldDeleteChildAccess(t *testing.T) {
+	dir := t.TempDir()
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("CreateWellKnownSid(WinWorldSid): %v", err)
+	}
+	setDACL(t, dir, []windows.EXPLICIT_ACCESS{
+		grantSID(currentUserSID(t), windows.GENERIC_ALL),
+		grantSID(everyone, fileDeleteChild),
+	})
+
+	err = validateKnownHostsDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "write access") {
+		t.Fatalf("validateKnownHostsDir with world FILE_DELETE_CHILD = %v, want a write-access rejection", err)
+	}
+}
