@@ -3,6 +3,7 @@ module github.com/Sniperlyf3/meowshell
 go 1.27.1
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/pkg/sftp v1.13.11
 	github.com/tailscale/tailcat v0.6.0
 	github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e
@@ -30,7 +31,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/creachadair/msync v0.8.1 // indirect
-	github.com/creack/pty v1.1.24 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/dgryski/go-metro v0.0.0-20180109044635-280f6062b5bc // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
