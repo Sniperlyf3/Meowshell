@@ -14,6 +14,7 @@ import (
 
 func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, error) {
 	var signers []ssh.Signer
+	var configuredSigners []ssh.Signer
 
 	if !cfg.DisableAgent {
 		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
@@ -48,6 +49,7 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 			}
 		}
 		signers = append(signers, signer)
+		configuredSigners = append(configuredSigners, signer)
 	}
 
 	for i, keyID := range cfg.KeystoreKeyIDs {
@@ -58,12 +60,20 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 		if err != nil {
 			return nil, fmt.Errorf("parsing keystore public key %q: %w", keyID, err)
 		}
-		signers = append(signers, &keystoreSigner{
+		signer := &keystoreSigner{
 			session:     a,
 			keyID:       keyID,
 			pub:         pub,
 			allowLegacy: cfg.AllowLegacyKeyAlgorithms,
-		})
+		}
+		signers = append(signers, signer)
+		configuredSigners = append(configuredSigners, signer)
+	}
+
+	if cfg.AgentForwarding && a.agentForwardSock == "" && len(configuredSigners) > 0 {
+		if err := a.startConfiguredForwardAgent(configuredSigners); err != nil {
+			return nil, err
+		}
 	}
 
 	var methods []ssh.AuthMethod
@@ -76,7 +86,6 @@ func (a *agentSession) buildAuthMethods(cfg controlMessage) ([]ssh.AuthMethod, e
 	)
 	return methods, nil
 }
-
 
 func (a *agentSession) closeAuthAgent() {
 	if a.authAgentCloser == nil {
