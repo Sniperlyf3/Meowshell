@@ -1,0 +1,193 @@
+diff --git a/cmd/tailcat/forward.go b/cmd/tailcat/forward.go
+--- a/cmd/tailcat/forward.go
++++ b/cmd/tailcat/forward.go
+@@ -24,6 +24,7 @@ func forwardCommand(parent *ff.FlagSet) *ff.Command {
+ 	fs := ff.NewFlagSet("forward").SetParent(parent)
+ 	bind := fs.StringLong("bind", "127.0.0.1", "listen address; used as the local address when a mapping only specifies a port")
+ 	openBrowser := fs.BoolLong("open-browser", "open a web browser to the local listener once it's listening; requires exactly one port mapping")
++	udp := fs.BoolLong("udp", "forward UDP datagrams instead of TCP streams")
+ 	return &ff.Command{
+ 		Name:      "forward",
+ 		Usage:     "tailcat forward [flags] <tc-addr> <[local:]remote-port|local-port:remote-ip:remote-port> [<...> ...]",
+@@ -42,6 +43,9 @@ server to be running as an exit node. For example:
+ 		Flags: fs,
+ 		Exec: func(ctx context.Context, args []string) error {
+ 			var onListen func(net.Listener)
++			if *udp && *openBrowser {
++				return usagef("--open-browser cannot be combined with --udp")
++			}
+ 			if *openBrowser {
+ 				if len(args) > 2 {
+ 					return usagef("--open-browser requires exactly one port mapping")
+@@ -49,6 +53,9 @@ server to be running as an exit node. For example:
+ 				}
+ 				onListen = openBrowserToListener
+ 			}
++			if *udp {
++				return runUDPForward(ctx, getLogf(), *bind, args)
++			}
+ 			return runForward(ctx, getLogf(), *bind, args, onListen)
+ 		},
+ 	}
+diff --git a/cmd/tailcat/udp_forward.go b/cmd/tailcat/udp_forward.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/tailcat/udp_forward.go
+@@ -0,0 +1,157 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"os"
++	"os/signal"
++	"sync"
++	"syscall"
++	"time"
++
++	"github.com/tailscale/tailcat"
++	"tailscale.com/types/logger"
++)
++
++const udpForwardIdleTimeout = 2 * time.Minute
++
++type udpForwardFlow struct {
++	remote tailcat.ConnPacketConn
++	client *net.UDPAddr
++}
++
++func runUDPForward(ctx context.Context, logf logger.Logf, bind string, args []string) error {
++	if len(args) < 2 {
++		return usagef("forward --udp takes a <tc-addr> and at least one port mapping")
++	}
++
++	cl := newClient(logf, tailcatAddrArg(args[0]), clientKey())
++	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
++	defer stop()
++
++	listeners := make([]*net.UDPConn, 0, len(args)-1)
++	var listenersWG sync.WaitGroup
++	defer func() {
++		stop()
++		for _, conn := range listeners {
++			_ = conn.Close()
++		}
++		listenersWG.Wait()
++		_ = cl.Close()
++	}()
++
++	for _, spec := range args[1:] {
++		mapping, err := parseForwardSpec(bind, spec)
++		if err != nil {
++			return usagef("mapping %q is invalid: %v", spec, err)
++		}
++		addr, err := net.ResolveUDPAddr("udp", mapping.listenAddr)
++		if err != nil {
++			return fmt.Errorf("resolve UDP listen address %s: %w", mapping.listenAddr, err)
++		}
++		conn, err := net.ListenUDP("udp", addr)
++		if err != nil {
++			return fmt.Errorf("listen UDP on %s: %w", mapping.listenAddr, err)
++		}
++		listeners = append(listeners, conn)
++		fmt.Fprintf(os.Stderr, "# forwarding udp %s -> remote %s\n", conn.LocalAddr(), mapping.remoteTarget())
++		listenersWG.Add(1)
++		go udpForwardListener(ctx, logf, cl, conn, mapping, &listenersWG)
++	}
++
++	<-ctx.Done()
++	return nil
++}
++
++func udpForwardListener(ctx context.Context, logf logger.Logf, cl *tailcat.Client, local *net.UDPConn, mapping forwardSpec, listenersWG *sync.WaitGroup) {
++	defer listenersWG.Done()
++
++	var mu sync.Mutex
++	flows := map[string]*udpForwardFlow{}
++	var flowsWG sync.WaitGroup
++	defer func() {
++		mu.Lock()
++		for _, flow := range flows {
++			_ = flow.remote.Close()
++		}
++		mu.Unlock()
++		flowsWG.Wait()
++	}()
++
++	buf := make([]byte, 65535)
++	for {
++		n, clientAddr, err := local.ReadFromUDP(buf)
++		if err != nil {
++			return
++		}
++		if n > tailcat.MaxUDPPayload {
++			logf("dropping UDP datagram from %s: %d bytes exceeds tailcat maximum %d", clientAddr, n, tailcat.MaxUDPPayload)
++			continue
++		}
++
++		key := clientAddr.String()
++		mu.Lock()
++		flow := flows[key]
++		mu.Unlock()
++		if flow == nil {
++			remote, err := dialUDPForward(ctx, cl, mapping)
++			if err != nil {
++				if ctx.Err() == nil {
++					logf("dial UDP remote target %s: %v", mapping.remoteTarget(), err)
++				}
++				continue
++			}
++			flow = &udpForwardFlow{remote: remote, client: clientAddr}
++			mu.Lock()
++			if existing := flows[key]; existing != nil {
++				mu.Unlock()
++				_ = remote.Close()
++				flow = existing
++			} else {
++				flows[key] = flow
++				flowsWG.Add(1)
++				mu.Unlock()
++				go func(key string, f *udpForwardFlow) {
++					defer flowsWG.Done()
++					udpForwardResponses(local, f)
++					mu.Lock()
++					if flows[key] == f {
++						delete(flows, key)
++					}
++					mu.Unlock()
++				}(key, flow)
++			}
++		}
++
++		_ = flow.remote.SetDeadline(time.Now().Add(udpForwardIdleTimeout))
++		if _, err := flow.remote.Write(buf[:n]); err != nil {
++			if ctx.Err() == nil {
++				logf("forward UDP to remote target %s: %v", mapping.remoteTarget(), err)
++			}
++			_ = flow.remote.Close()
++		}
++	}
++}
++
++func dialUDPForward(ctx context.Context, cl *tailcat.Client, mapping forwardSpec) (tailcat.ConnPacketConn, error) {
++	if mapping.target.IsValid() {
++		return cl.DialUDP(ctx, mapping.target)
++	}
++	return cl.DialUDPPort(ctx, mapping.port)
++}
++
++func udpForwardResponses(local *net.UDPConn, flow *udpForwardFlow) {
++	defer flow.remote.Close()
++	buf := make([]byte, tailcat.MaxUDPPayload)
++	for {
++		n, err := flow.remote.Read(buf)
++		if err != nil {
++			return
++		}
++		_ = flow.remote.SetDeadline(time.Now().Add(udpForwardIdleTimeout))
++		if _, err := local.WriteToUDP(buf[:n], flow.client); err != nil {
++			return
++		}
++	}
++}
