@@ -41,8 +41,33 @@ if [ -z "$APK" ]; then
 	find dotnet/Meowshell.AndroidProbe/bin -type f >&2 || true
 	exit 1
 fi
-echo "== installing $APK =="
 
+# android-emulator-runner considers the device booted once
+# sys.boot_completed=1, but on a cold boot system_server can still be
+# bringing framework services online (or briefly restart) after that point.
+# In particular, adb install talks to the package service and otherwise
+# intermittently fails with "Can't find service: package" / Broken pipe.
+# Wait for the service we actually depend on, not just the boot property.
+echo "== waiting for Android package manager =="
+package_ready=0
+for _ in $(seq 60); do
+	if adb shell service check package 2>/dev/null | grep -q 'found'; then
+		# Require one real package-manager command too. This catches the small
+		# window where the binder service is registered but not yet usable.
+		if adb shell cmd package path android >/dev/null 2>&1; then
+			package_ready=1
+			break
+		fi
+	fi
+	sleep 1
+done
+if [ "$package_ready" != 1 ]; then
+	echo "FAIL Android package manager did not become ready after boot" >&2
+	adb shell service check package >&2 || true
+	exit 1
+fi
+
+echo "== installing $APK =="
 adb uninstall "$APP_ID" >/dev/null 2>&1 || true
 adb install -r "$APK"
 
