@@ -9,17 +9,20 @@ public sealed record MeowshellPortForwardOptions : TailcatListenerOptions
     /// <summary>The tailcat address to forward to.</summary>
     public required string Address { get; init; }
 
-    /// <summary>At least one port mapping: a bare port, <c>local:remote</c>, or <c>local:remote-ip:remote-port</c> (the server must be an exit node). A local port of 0 asks the OS for a free port.</summary>
+    /// <summary>At least one port mapping: a bare port, <c>local:remote</c>, or <c>local:remote-ip:remote-port</c> (the server must be an exit node for an arbitrary remote IP). A local port of 0 asks the OS for a free port.</summary>
     public required IReadOnlyList<string> Mappings { get; init; }
 
     /// <summary>Listen address, used as the local address for a mapping that only specifies a port. Empty means tailcat's own default (127.0.0.1). Passed to tailcat's own <c>--bind</c>.</summary>
     public string? Bind { get; init; }
 
+    /// <summary>Forward UDP datagrams instead of TCP streams.</summary>
+    public bool Udp { get; init; }
+
     /// <summary>tailcat client key name or path (see 'tailcat genkey').</summary>
     public string? ClientKey { get; init; }
 }
 
-/// <summary>Forwards local TCP ports to a tailcat server, until stopped.</summary>
+/// <summary>Forwards local TCP streams or UDP datagrams to a tailcat server, until stopped.</summary>
 public sealed class MeowshellPortForward : IAsyncDisposable
 {
     private readonly TailcatListener _listener;
@@ -71,6 +74,8 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         psi.ArgumentList.Add("forward");
         if (!string.IsNullOrEmpty(options.Bind))
             psi.ArgumentList.Add($"--bind={options.Bind}");
+        if (options.Udp)
+            psi.ArgumentList.Add("--udp");
         if (!string.IsNullOrEmpty(options.ClientKey))
             psi.ArgumentList.Add($"--key={options.ClientKey}");
         if (!string.IsNullOrEmpty(options.DerpMapUrl))
@@ -96,7 +101,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
 
         void HandleLog(string line)
         {
-            const string marker = "forwarding ";
+            var marker = options.Udp ? "forwarding udp " : "forwarding ";
             var at = line.IndexOf(marker, StringComparison.Ordinal);
             if (at >= 0)
             {
