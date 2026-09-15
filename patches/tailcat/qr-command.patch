@@ -2,7 +2,7 @@ diff --git a/cmd/tailcat/qr.go b/cmd/tailcat/qr.go
 new file mode 100644
 --- /dev/null
 +++ b/cmd/tailcat/qr.go
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,60 @@
 +package main
 +
 +import (
