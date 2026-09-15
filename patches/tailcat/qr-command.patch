@@ -1,9 +1,8 @@
 diff --git a/cmd/tailcat/qr.go b/cmd/tailcat/qr.go
 new file mode 100644
-index 0000000..d3a2b31
 --- /dev/null
 +++ b/cmd/tailcat/qr.go
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,53 @@
 +package main
 +
 +import (
@@ -15,6 +14,7 @@ index 0000000..d3a2b31
 +
 +	"github.com/peterbourgon/ff/v4"
 +	qrcode "github.com/skip2/go-qrcode"
++	"github.com/tailscale/tailcat"
 +)
 +
 +func qrCommand(parent *ff.FlagSet) *ff.Command {
@@ -50,8 +50,8 @@ index 0000000..d3a2b31
 +			if addr == "" {
 +				return usagef("qr requires a tailcat address argument or stdin")
 +			}
-+			if _, err := parseAddrOrDNSName(addr); err != nil {
-+				return err
++			if _, err := tailcat.ParseAddr(tailcat.Addr(addr)); err != nil {
++				return usagef("invalid tailcat address: %v", err)
 +			}
 +			qr, err := qrcode.New(addr, qrcode.Medium)
 +			if err != nil {
@@ -64,7 +64,6 @@ index 0000000..d3a2b31
 +	}
 +}
 +diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
-+index cb7f144..d455c80 100644
 +--- a/cmd/tailcat/tailcat.go
 ++++ b/cmd/tailcat/tailcat.go
 +@@ -212,6 +212,7 @@ func newRootCommand() *ff.Command {
