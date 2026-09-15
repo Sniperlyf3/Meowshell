@@ -1,0 +1,77 @@
+diff --git a/cmd/tailcat/qr.go b/cmd/tailcat/qr.go
+new file mode 100644
+index 0000000..d3a2b31
+--- /dev/null
++++ b/cmd/tailcat/qr.go
+@@ -0,0 +1,50 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++
++	"github.com/peterbourgon/ff/v4"
++	qrcode "github.com/skip2/go-qrcode"
++)
++
++func qrCommand(parent *ff.FlagSet) *ff.Command {
++	fs := ff.NewFlagSet("qr").SetParent(parent)
++	return &ff.Command{
++		Name:      "qr",
++		Usage:     "tailcat qr [<tc-addr>]",
++		ShortHelp: "render a tailcat address as a terminal QR code",
++		LongHelp: `Render a tailcat address as a QR code directly in the terminal.
++
++If no address argument is provided, the address is read from standard input,
++so this composes naturally with commands such as:
++
++	tailcat resolve tc... | tailcat qr
++
++Tailcat addresses can contain bearer credential material. The QR code is
++generated locally and nothing is sent to an external service.`,
++		Flags: fs,
++		Exec: func(ctx context.Context, args []string) error {
++			if len(args) > 1 {
++				return usagef("qr takes at most one tailcat address")
++			}
++			var addr string
++			if len(args) == 1 {
++				addr = strings.TrimSpace(args[0])
++			} else {
++				data, err := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
++				if err != nil {
++					return fmt.Errorf("reading tailcat address: %w", err)
++				}
++				addr = strings.TrimSpace(string(data))
++			}
++			if addr == "" {
++				return usagef("qr requires a tailcat address argument or stdin")
++			}
++			if _, err := parseAddrOrDNSName(addr); err != nil {
++				return err
++			}
++			qr, err := qrcode.New(addr, qrcode.Medium)
++			if err != nil {
++				return fmt.Errorf("encoding QR code: %w", err)
++			}
++			fmt.Fprintln(os.Stderr, "# warning: this QR contains a Tailcat address; treat it as secret credential material")
++			fmt.Print(qr.ToSmallString(false))
++			return nil
++		},
++	}
++}
++diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
++index cb7f144..d455c80 100644
++--- a/cmd/tailcat/tailcat.go
+++++ b/cmd/tailcat/tailcat.go
++@@ -212,6 +212,7 @@ func newRootCommand() *ff.Command {
++ 			cpCommand(rootFS),
++ 			lsCommand(rootFS),
++ 			forwardCommand(rootFS),
+++			qrCommand(rootFS),
++ 			browseCommand(rootFS),
++ 			{
++ 				Name:      "parse",
