@@ -56,6 +56,7 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/windows-parent-job.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/managed-parent-watchdog.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/forward-preflight-ping.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/qr-command.patch"
+git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/udp-forward.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,
 # separately from the PickBestRegion path above) needs a working interface
