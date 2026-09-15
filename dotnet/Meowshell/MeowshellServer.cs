@@ -65,6 +65,9 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     /// <summary>Let a client's forward/SOCKS channels reach any port this machine can dial, not just the SSH/files ports above -- tailcat's own "exit-node" service. Passed to meowshell's own <c>--exit-node</c>.</summary>
     public bool AllowExitNode { get; init; }
 
+    /// <summary>Additional Tailcat serve targets such as <c>80</c>, <c>443</c>, <c>8000-8010</c>, or <c>all</c>. These use Tailcat's native serve grammar and can be combined with shell/files/exit-node services.</summary>
+    public IReadOnlyList<string> ServeTargets { get; init; } = [];
+
     /// <summary>Run this command for every session instead of a login shell, like OpenSSH's ForceCommand. Empty runs a normal login shell.</summary>
     public IReadOnlyList<string> ForcedCommand { get; init; } = [];
 
@@ -88,15 +91,6 @@ public sealed record MeowshellOptions : TailcatListenerOptions
             Lifetime = lifetime,
         };
 #else
-        // N3: this used to be Path.Combine(Path.GetTempPath(), "meowshell")
-        // -- a fixed, predictable name inside a directory every local user
-        // can write to, so anyone who got there first could plant a
-        // symlink at that exact path (redirecting session key material and
-        // known_hosts, since this becomes HOME for the spawned process,
-        // wherever they chose) or simply leave the directory readable by
-        // others. MeowshellHomeDirectory.ResolveDefault() resolves a
-        // private, per-user location instead and verifies (or establishes)
-        // that it's actually private before handing it back.
         var homeDir = MeowshellHomeDirectory.ResolveDefault();
         return new MeowshellOptions
         {
@@ -108,7 +102,7 @@ public sealed record MeowshellOptions : TailcatListenerOptions
     }
 }
 
-/// <summary>Runs a tailcat shell server for a bounded period and shuts it down afterwards.</summary>
+/// <summary>Runs a tailcat server for a bounded period and shuts it down afterwards.</summary>
 public sealed class MeowshellServer : IAsyncDisposable
 {
     private readonly MeowshellOptions _options;
@@ -119,7 +113,7 @@ public sealed class MeowshellServer : IAsyncDisposable
 
     internal Task DeadlineTaskForTests => _deadlineTask;
 
-    /// <summary>The tailcat address clients connect to: <c>tailcat ssh &lt;address&gt;</c>.</summary>
+    /// <summary>The tailcat address clients connect to.</summary>
     public string Address { get; private set; } = "";
 
     /// <summary>UTC instant at which the server shuts itself down.</summary>
@@ -148,13 +142,6 @@ public sealed class MeowshellServer : IAsyncDisposable
     }
 
     /// <summary>Starts the server and returns once it has published an address.</summary>
-    /// <param name="options">Where the binaries live and how the session is configured.</param>
-    /// <param name="cancellationToken">Abandons the start; the process is cleaned up.</param>
-    /// <param name="onLog">Diagnostic output from tailcat, called as it arrives -- also fires when StartAsync itself throws, unlike the <see cref="Log"/> event.</param>
-    /// <exception cref="ArgumentException">Both authentication modes were set, nothing was chosen to serve, or <see cref="MeowshellOptions.Files"/> was combined with a forced command on the ssh/no-auth-ssh service.</exception>
-    /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
-    /// <exception cref="TailcatException">tailcat exited before publishing an address.</exception>
-    /// <exception cref="TimeoutException">No address appeared within <see cref="TailcatListenerOptions.StartTimeout"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
@@ -164,28 +151,19 @@ public sealed class MeowshellServer : IAsyncDisposable
 
         var hasSSH = !string.IsNullOrEmpty(options.AuthorizedKeys) || options.InsecureNoAuth;
         if (!string.IsNullOrEmpty(options.AuthorizedKeys) && options.InsecureNoAuth)
-        {
-            throw new ArgumentException(
-                "Set at most one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
-        }
-        if (!hasSSH && string.IsNullOrEmpty(options.Files) && !options.AllowExitNode && options.ForcedCommand.Count == 0)
-        {
-            throw new ArgumentException(
-                "Set at least one of AuthorizedKeys, InsecureNoAuth, Files, AllowExitNode, or ForcedCommand.", nameof(options));
-        }
+            throw new ArgumentException("Set at most one of AuthorizedKeys or InsecureNoAuth.", nameof(options));
+        if (options.ServeTargets.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("ServeTargets cannot contain blank entries.", nameof(options));
+        if (!hasSSH && string.IsNullOrEmpty(options.Files) && !options.AllowExitNode && options.ServeTargets.Count == 0 && options.ForcedCommand.Count == 0)
+            throw new ArgumentException("Set at least one of AuthorizedKeys, InsecureNoAuth, Files, AllowExitNode, ServeTargets, or ForcedCommand.", nameof(options));
         if (!string.IsNullOrEmpty(options.Files) && hasSSH && options.ForcedCommand.Count > 0)
-        {
-            throw new ArgumentException(
-                "Files cannot be combined with a ForcedCommand on the ssh/no-auth-ssh service, which would allow nothing but that command.",
-                nameof(options));
-        }
+            throw new ArgumentException("Files cannot be combined with a ForcedCommand on the ssh/no-auth-ssh service, which would allow nothing but that command.", nameof(options));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
 
         MeowshellHomeDirectory.EnsureSecure(options.WorkDirectory);
         MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
-        var addressFile = Path.Combine(
-            options.WorkDirectory, $"tailcat-addr-{Guid.NewGuid():N}");
+        var addressFile = Path.Combine(options.WorkDirectory, $"tailcat-addr-{Guid.NewGuid():N}");
 
         var psi = new ProcessStartInfo
         {
@@ -208,9 +186,7 @@ public sealed class MeowshellServer : IAsyncDisposable
             psi.RedirectStandardInput = true;
         }
         else if (options.EphemeralKey)
-        {
             psi.ArgumentList.Add("--key=new");
-        }
         if (!string.IsNullOrEmpty(options.DerpMapUrl))
             psi.ArgumentList.Add($"--derpmap-url={options.DerpMapUrl}");
         if (options.Verbose)
@@ -223,6 +199,8 @@ public sealed class MeowshellServer : IAsyncDisposable
             psi.ArgumentList.Add($"--files={options.Files}");
         if (options.AllowExitNode)
             psi.ArgumentList.Add("--exit-node");
+        if (options.ServeTargets.Count > 0)
+            psi.ArgumentList.Add($"--services={string.Join(',', options.ServeTargets.Select(target => target.Trim()))}");
         if (options.ForcedCommand.Count > 0)
         {
             psi.ArgumentList.Add("--");
@@ -253,12 +231,6 @@ public sealed class MeowshellServer : IAsyncDisposable
 
             if (options.PrivateKeyJson is not null)
             {
-                // Bounded by StartTimeout the same way WaitForAddressAsync
-                // below is: a plain, unbounded WriteAsync here means a child
-                // that starts but never consumes stdin can hang StartAsync
-                // indefinitely, before StartTimeout ever gets a chance to
-                // apply -- and the caller's own cancellationToken alone
-                // wouldn't add a bound if they left it at the default.
                 using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 writeTimeout.CancelAfter(options.StartTimeout);
                 try
@@ -273,8 +245,7 @@ public sealed class MeowshellServer : IAsyncDisposable
                 process.StandardInput.Close();
             }
 
-            server.Address = await server.WaitForAddressAsync(cancellationToken)
-                .ConfigureAwait(false);
+            server.Address = await server.WaitForAddressAsync(cancellationToken).ConfigureAwait(false);
             server.StartDeadline();
             return server;
         }
@@ -296,20 +267,17 @@ public sealed class MeowshellServer : IAsyncDisposable
         {
             if (File.Exists(_addressFile))
             {
-                var text = (await File.ReadAllTextAsync(_addressFile, cancellationToken)
-                    .ConfigureAwait(false)).Trim();
+                var text = (await File.ReadAllTextAsync(_addressFile, cancellationToken).ConfigureAwait(false)).Trim();
                 if (text.Length > 0) return text;
             }
-            await _listener.ThrowIfExitedAsync(
-                "tailcat exited before publishing an address", cancellationToken).ConfigureAwait(false);
+            await _listener.ThrowIfExitedAsync("tailcat exited before publishing an address", cancellationToken).ConfigureAwait(false);
             try
             {
                 await Task.Delay(50, timeout.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException(
-                    $"tailcat published no address within {_options.StartTimeout}");
+                throw new TimeoutException($"tailcat published no address within {_options.StartTimeout}");
             }
         }
     }
@@ -342,11 +310,6 @@ public sealed class MeowshellServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
-        // Observed rather than left to fault silently as an unobserved task
-        // exception: StopAsync() above already cancels _deadline, so this
-        // normally only awaits OperationCanceledException home, but nothing
-        // upstream should have to trust that StartDeadline's background task
-        // can never fail any other way.
         try { await _deadlineTask.ConfigureAwait(false); } catch { }
         _deadline.Dispose();
         await _listener.DisposeAsync().ConfigureAwait(false);
