@@ -38,7 +38,7 @@ index 6e18144..d625155 100644
  			return runForward(ctx, getLogf(), *bind, args, onListen)
  		},
  	}
-@@ -135,6 +143,143 @@ func forwardListener(ctx context.Context, logf logger.Logf, cl *tailcat.Client,
+@@ -135,6 +143,137 @@ func forwardListener(ctx context.Context, logf logger.Logf, cl *tailcat.Client,
  	}
  }
 +
