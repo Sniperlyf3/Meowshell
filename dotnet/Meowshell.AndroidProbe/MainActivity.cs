@@ -112,19 +112,21 @@ public sealed class MainActivity : Activity
             await using var session = await TailcatSshSession.ConnectAsync(clientOptions, address);
 
             var marker = $"ssh-probe-{Guid.NewGuid():N}";
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+            // Start consuming the PTY before sending input. The real app always
+            // has a terminal reader active while the user types; starting the
+            // reader only after both commands were sent let a fast Android
+            // emulator accumulate an artificial burst of tiny protocol frames
+            // and trip the per-channel backpressure guard before this probe had
+            // even attempted its first read.
+            var readTask = ReadUntilMarkerAsync(session.Output, marker, timeout.Token);
+
             await session.WriteAsync(Encoding.UTF8.GetBytes($"echo {marker}\n"));
             await session.WriteAsync(Encoding.UTF8.GetBytes("exit\n"));
 
-            var buffer = new byte[4096];
-            var seen = new StringBuilder();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            while (!seen.ToString().Contains(marker))
-            {
-                var read = await session.Output.ReadAsync(buffer, timeout.Token);
-                if (read == 0) break;
-                seen.Append(Encoding.UTF8.GetString(buffer, 0, read));
-            }
-            if (!seen.ToString().Contains(marker))
+            var seen = await readTask;
+            if (!seen.Contains(marker, StringComparison.Ordinal))
                 throw new InvalidOperationException($"marker never appeared in the session's output ({seen.Length} chars read)");
 
             await session.Completed;
@@ -134,5 +136,18 @@ public sealed class MainActivity : Activity
         {
             Log.Error(Tag, $"PROBE_SSH_FAIL {ex}");
         }
+    }
+
+    private static async Task<string> ReadUntilMarkerAsync(Stream output, string marker, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[4096];
+        var seen = new StringBuilder();
+        while (!seen.ToString().Contains(marker, StringComparison.Ordinal))
+        {
+            var read = await output.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            seen.Append(Encoding.UTF8.GetString(buffer, 0, read));
+        }
+        return seen.ToString();
     }
 }
