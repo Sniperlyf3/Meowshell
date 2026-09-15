@@ -40,7 +40,7 @@ public sealed class MeowshellAgentExecutionE2ETests : IDisposable
 
         var ex = await Assert.ThrowsAsync<TailcatException>(() =>
             connection.RunCommandAsync("sleep 10", TimeSpan.FromMilliseconds(150)));
-        Assert.Equal(MeowshellErrorCode.Timeout, ex.TypedCode);
+        Assert.Equal(MeowshellErrorCode.Timeout, ex.Code);
 
         var after = await connection.RunCommandAsync("printf still-alive", TimeSpan.FromSeconds(5));
         Assert.Equal(0, after.ExitCode);
