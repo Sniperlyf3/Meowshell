@@ -63,14 +63,14 @@ new file mode 100644
 +		},
 +	}
 +}
-+diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
-+--- a/cmd/tailcat/tailcat.go
-++++ b/cmd/tailcat/tailcat.go
-+@@ -212,6 +212,7 @@ func newRootCommand() *ff.Command {
-+ 			cpCommand(rootFS),
-+ 			lsCommand(rootFS),
-+ 			forwardCommand(rootFS),
-++			qrCommand(rootFS),
-+ 			browseCommand(rootFS),
-+ 			{
-+ 				Name:      "parse",
+diff --git a/cmd/tailcat/tailcat.go b/cmd/tailcat/tailcat.go
+--- a/cmd/tailcat/tailcat.go
++++ b/cmd/tailcat/tailcat.go
+@@ -212,6 +212,7 @@ func newRootCommand() *ff.Command {
+ 			cpCommand(rootFS),
+ 			lsCommand(rootFS),
+ 			forwardCommand(rootFS),
++			qrCommand(rootFS),
+ 			browseCommand(rootFS),
+ 			{
+ 				Name:      "parse",
