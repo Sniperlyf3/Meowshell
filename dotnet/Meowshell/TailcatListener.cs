@@ -40,9 +40,6 @@ internal sealed class TailcatListener : IAsyncDisposable
     {
         process.EnableRaisingEvents = true;
         var listener = new TailcatListener(process, gracePeriod);
-        // Subscribe before Start: a malformed command can exit quickly enough
-        // that registering afterwards misses Exited and leaves Completed hung.
-        process.Exited += (_, _) => listener.StartExitObserver();
         process.OutputDataReceived += (_, e) =>
         {
             if (e.Data is null) return;
@@ -60,9 +57,24 @@ internal sealed class TailcatListener : IAsyncDisposable
             try { listener.Log?.Invoke(e.Data); } catch { }
             try { onLog?.Invoke(e.Data); } catch { }
         };
+
         listener._job = MeowshellProcessControl.Start(process);
+
+        // Start redirected readers before allowing the exit observer to run.
+        // A child can exit immediately after Process.Start(); if Exited is
+        // observed before BeginErrorReadLine(), WaitForExit() has no active
+        // async reader to drain and diagnostics can be snapshotted as empty.
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+
+        // Subscribe after the readers are active. If the process already died
+        // in the small window between Start() and this subscription, HasExited
+        // below detects it and starts the observer explicitly, so no fast exit
+        // can be missed.
+        process.Exited += (_, _) => listener.StartExitObserver();
+        if (process.HasExited)
+            listener.StartExitObserver();
+
         return listener;
     }
 
