@@ -4,7 +4,7 @@
 # Targets default to every platform upstream releases for, plus Android.
 # Android needs the NDK, because those binaries are built with cgo so that
 # name resolution goes through bionic; point ANDROID_NDK_HOME at an NDK
-# (r19+, unified toolchain). Linux and Windows are pure Go and need nothing.
+# (r19+, unified toolchain).
 #
 #   ./build.sh                      # everything the toolchain allows
 #   PLATFORMS=linux ./build.sh      # just one OS
@@ -55,6 +55,7 @@ git -C "$SRC_DIR" apply --unidiff-zero "$REPO_DIR/patches/tailcat/key-from-stdin
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/windows-parent-job.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/managed-parent-watchdog.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/forward-preflight-ping.patch"
+git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/qr-command.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,
 # separately from the PickBestRegion path above) needs a working interface
@@ -64,7 +65,7 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/forward-preflight-ping.patch"
 # file's comments for the detail. Added via `go get`, which computes
 # go.mod/go.sum correctly, rather than hand-patching them.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/android-netmon-interface-getter.patch"
-(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0)
+(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e)
 
 # tailcat's SSH server hardcodes /bin/sh and /usr/local/bin:/usr/bin:/bin
 # for the session shell and PATH, neither of which exist on Android --
