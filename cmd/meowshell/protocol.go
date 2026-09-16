@@ -90,6 +90,10 @@ const (
 type controlMessage struct {
 	Msg string `json:"msg"`
 
+	// NodeKey is the public Tailcat client identity. It is present only on
+	// the successful "connected" frame for a Tailcat transport.
+	NodeKey string `json:"node_key,omitempty"`
+
 	Kind    string   `json:"kind,omitempty"`
 	Command []string `json:"command,omitempty"`
 	Pty     *bool    `json:"pty,omitempty"`

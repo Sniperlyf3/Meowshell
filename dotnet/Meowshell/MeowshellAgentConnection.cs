@@ -106,6 +106,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <summary>A Keystore-backed key needs to sign something, under the algorithm in <see cref="MeowshellSignRequest.Algorithm"/>. No handler refuses the signature.</summary>
     public event Func<MeowshellSignRequest, CancellationToken, Task<byte[]>>? SignRequested;
 
+    /// <summary>The public Tailcat client identity used by this connection, in <c>nodekey:&lt;hex&gt;</c> form. Null for ordinary TCP SSH transports.</summary>
+    public string? TailcatNodeKey { get; private set; }
+
     private MeowshellAgentConnection(Process process, JobObject? job)
     {
         _process = process;
@@ -697,6 +700,9 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         switch (msg.Msg)
         {
             case "connected":
+                // node_key is optional for backward compatibility with older agents.
+                // It is public identity material only; the private Tailcat key never crosses the protocol.
+                TailcatNodeKey = msg.NodeKey;
                 _connected.TrySetResult();
                 return;
             case "prompt_request":
@@ -1078,7 +1084,7 @@ internal sealed class AgentRequestResponseSink(TaskCompletionSource<int> complet
 
 internal sealed class AgentDownloadSink : IAgentChannelSink
 {
-    private readonly Pipe _pipe = new();
+    private readonly Pipe _pipe = AgentPipeFactory.CreateOutputPipe();
     private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public long TotalBytes { get; set; }
@@ -1120,8 +1126,8 @@ public sealed class MeowshellAgentShellChannel : IAgentChannelSink, IAsyncDispos
 {
     private readonly MeowshellAgentConnection _connection;
     private readonly uint _id;
-    private readonly Pipe _stdout = new();
-    private readonly Pipe _stderr = new();
+    private readonly Pipe _stdout = AgentPipeFactory.CreateOutputPipe();
+    private readonly Pipe _stderr = AgentPipeFactory.CreateOutputPipe();
     private readonly TaskCompletionSource<int> _exitCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal MeowshellAgentShellChannel(MeowshellAgentConnection connection, uint id)
