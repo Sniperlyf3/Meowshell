@@ -153,7 +153,13 @@ func agentCmd(args []string) error {
 		}
 	}
 
-	if err := session.writeControl(0, controlMessage{Msg: "connected"}); err != nil {
+	connected := controlMessage{Msg: "connected"}
+	if session.tcAddr != "" {
+		// Only the public Tailcat client identity crosses the control protocol.
+		// The private node key remains process-local and is never serialized.
+		connected.NodeKey = session.tcKey.Public().String()
+	}
+	if err := session.writeControl(0, connected); err != nil {
 		return err
 	}
 	return <-frameErrCh
@@ -218,17 +224,17 @@ type agentChannel struct {
 	writeMu       sync.Mutex
 	writeClosed   bool
 
-	sftpFile          *sftp.File
-	sftpClose         func() error
+	sftpFile           *sftp.File
+	sftpClose          func() error
 	transferCancelOnce sync.Once
-	ctx               context.Context
-	cancel            context.CancelFunc
-	isUpload          bool
-	uploadPath     string
-	uploadTempPath string
-	uploadPreserve bool
-	uploadMode     uint32
-	uploadModTime  int64
+	ctx                context.Context
+	cancel             context.CancelFunc
+	isUpload           bool
+	uploadPath         string
+	uploadTempPath     string
+	uploadPreserve     bool
+	uploadMode         uint32
+	uploadModTime      int64
 	// uploadErr, once set, is terminal: a write to sftpFile failed, so
 	// finalizeUpload must report that failure instead of exit_status 0 --
 	// closing the file cleanly afterward says nothing about the data

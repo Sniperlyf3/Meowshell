@@ -112,6 +112,8 @@ internal sealed class AgentMessage
 {
     public string Msg { get; set; } = "";
 
+    public string? NodeKey { get; set; }
+
     public string? Kind { get; set; }
     public string[]? Command { get; set; }
     public bool? Pty { get; set; }

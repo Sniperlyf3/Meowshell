@@ -14,6 +14,9 @@ public sealed class TailcatSshSession : IAsyncDisposable
     /// <summary>Raw bytes the remote pseudo-terminal produced. Do not read this concurrently from more than one place.</summary>
     public Stream Output => _channel.Output;
 
+    /// <summary>The public Tailcat client identity used for this session, in <c>nodekey:&lt;hex&gt;</c> form.</summary>
+    public string? TailcatNodeKey => _connection.TailcatNodeKey;
+
     /// <summary>Resolves when the session ends: successfully after <see cref="StopAsync"/>, or when a session running a command finishes on its own. Faults with a <see cref="TailcatException"/> if the connection is lost unexpectedly.</summary>
     public Task Completed => _exited.Task;
 

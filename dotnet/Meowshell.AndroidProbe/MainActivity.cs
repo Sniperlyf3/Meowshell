@@ -110,6 +110,10 @@ public sealed class MainActivity : Activity
                 HomeDirectory = shellOptions.HomeDirectory,
             };
             await using var session = await TailcatSshSession.ConnectAsync(clientOptions, address);
+            if (string.IsNullOrWhiteSpace(session.TailcatNodeKey) ||
+                !session.TailcatNodeKey.StartsWith("nodekey:", StringComparison.Ordinal))
+                throw new InvalidOperationException("Tailcat agent did not expose its public node key");
+            Log.Info(Tag, "PROBE_NODE_KEY_PASS");
 
             var marker = $"ssh-probe-{Guid.NewGuid():N}";
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
