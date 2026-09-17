@@ -57,6 +57,10 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/managed-parent-watchdog.patch
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/forward-preflight-ping.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/qr-command.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/udp-forward.patch"
+# MeowSSH needs path information from the exact live Tailcat engine rather than
+# from a second diagnostic process. Keep this as a small reviewed patch on the
+# pinned source until Tailcat exposes an equivalent stable API upstream.
+git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/live-path-status.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,
 # separately from the PickBestRegion path above) needs a working interface
@@ -67,6 +71,11 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/udp-forward.patch"
 # go.mod/go.sum correctly, rather than hand-patching them.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/android-netmon-interface-getter.patch"
 (cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e)
+
+# The live-path API exists only in our pinned-source patch, so upstream tests
+# run before build.sh cannot cover it. Exercise the patched package here before
+# any release binary is produced.
+(cd "$SRC_DIR" && go test . -run '^(TestClientPathStatusBeforeStartIsUnknown|TestPathStatusFieldsDoNotClaimRelayedByteSemantics)$' -count=1)
 
 # tailcat's SSH server hardcodes /bin/sh and /usr/local/bin:/usr/bin:/bin
 # for the session shell and PATH, neither of which exist on Android --
