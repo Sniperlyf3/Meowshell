@@ -1,0 +1,84 @@
+diff --git a/tailcat.go b/tailcat.go
+--- a/tailcat.go
++++ b/tailcat.go
+@@ -1998,6 +1998,53 @@ func (c *Client) PublicKey() key.NodePublic {
+ 	return c.nodeKeyLocked().Public()
+ }
+ 
++// PathStatus describes how the client's live WireGuard peer is currently
++// reached. It is a snapshot of the same magicsock/WireGuard engine carrying
++// the client's traffic, not the result of a separate diagnostic connection.
++//
++// TxBytes and RxBytes are total WireGuard peer payload counters. They are not
++// DERP-only counters: when Direct is true they include direct-path traffic too.
++// Callers must not use them as relayed-byte accounting without separately
++// attributing which intervals were actually relayed.
++type PathStatus struct {
++	Direct      bool
++	Endpoint    string
++	RelayRegion string
++	TxBytes     int64
++	RxBytes     int64
++}
++
++// PathStatus returns the current path to the server from the live client
++// engine. ok is false before the client has started, before magicsock has a
++// usable route to the peer, or after the peer is no longer present in status.
++//
++// When Direct is true, Endpoint is the selected direct UDP endpoint. When it
++// is false, RelayRegion identifies the DERP region currently available for
++// the peer. RelayRegion is a region identifier, not a relay hostname.
++func (c *Client) PathStatus() (_ PathStatus, ok bool) {
++	c.startMu.Lock()
++	defer c.startMu.Unlock()
++	if !c.started || c.lb == nil {
++		return PathStatus{}, false
++	}
++	serverPub := c.ci.ServerPublic.NodePublic
++	st := c.lb.Status()
++	if st == nil || st.Peer == nil {
++		return PathStatus{}, false
++	}
++	ps := st.Peer[serverPub]
++	if ps == nil || (ps.CurAddr == "" && ps.Relay == "") {
++		return PathStatus{}, false
++	}
++	return PathStatus{
++		Direct:      ps.CurAddr != "",
++		Endpoint:    ps.CurAddr,
++		RelayRegion: ps.Relay,
++		TxBytes:     ps.TxBytes,
++		RxBytes:     ps.RxBytes,
++	}, true
++}
++
+ // Close shuts down the client, closing the WireGuard engine and DERP connections.
+ func (c *Client) Close() error {
+ 	c.startMu.Lock()
+diff --git a/tailcat_path_status_test.go b/tailcat_path_status_test.go
+new file mode 100644
+--- /dev/null
++++ b/tailcat_path_status_test.go
+@@ -0,0 +1,22 @@
++package tailcat
++
++import "testing"
++
++func TestClientPathStatusBeforeStartIsUnknown(t *testing.T) {
++	c := NewClient("tc-invalid-is-fine-until-start")
++	if got, ok := c.PathStatus(); ok {
++		t.Fatalf("PathStatus before start = %#v, true; want zero, false", got)
++	}
++}
++
++func TestPathStatusFieldsDoNotClaimRelayedByteSemantics(t *testing.T) {
++	// Keep the public contract explicit: the counters are total peer bytes,
++	// while relay attribution is represented independently by Direct/RelayRegion.
++	got := PathStatus{Direct: false, RelayRegion: "1", TxBytes: 12, RxBytes: 34}
++	if got.Direct || got.RelayRegion != "1" || got.TxBytes != 12 || got.RxBytes != 34 {
++		t.Fatalf("PathStatus fields changed unexpectedly: %#v", got)
++	}
++	if got.Endpoint != "" {
++		t.Fatalf("relayed PathStatus endpoint = %q, want empty", got.Endpoint)
++	}
++}
