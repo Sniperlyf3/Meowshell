@@ -5,16 +5,14 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/tailscale/tailcat"
 )
 
-func TestPathControlMessageFromTailcatDoesNotMislabelPeerBytesAsRelayUsage(t *testing.T) {
-	msg := pathControlMessageFromTailcat(tailcat.PathStatus{
-		Direct:      false,
-		RelayRegion: "ams",
-		TxBytes:     12345,
-		RxBytes:     67890,
+func TestPathControlMessageFromStatusDoesNotMislabelPeerBytesAsRelayUsage(t *testing.T) {
+	msg := pathControlMessageFromStatus(agentPathStatus{
+		direct:      false,
+		relayRegion: "ams",
+		txBytes:     12345,
+		rxBytes:     67890,
 	})
 
 	if msg.Msg != "path" {
@@ -27,16 +25,16 @@ func TestPathControlMessageFromTailcatDoesNotMislabelPeerBytesAsRelayUsage(t *te
 		t.Fatalf("via = %q, want ams", msg.Via)
 	}
 	if msg.RelayedBytesSent != 0 || msg.RelayedBytesRecv != 0 {
-		t.Fatalf("relayed counters = (%d, %d), want zero because PathStatus counters are total peer traffic",
+		t.Fatalf("relayed counters = (%d, %d), want zero because peer counters are total traffic",
 			msg.RelayedBytesSent, msg.RelayedBytesRecv)
 	}
 }
 
-func TestPathControlMessageFromTailcatOmitsRelayForDirectPath(t *testing.T) {
-	msg := pathControlMessageFromTailcat(tailcat.PathStatus{
-		Direct:      true,
-		Endpoint:    "203.0.113.7:41641",
-		RelayRegion: "ams",
+func TestPathControlMessageFromStatusOmitsRelayForDirectPath(t *testing.T) {
+	msg := pathControlMessageFromStatus(agentPathStatus{
+		direct:      true,
+		endpoint:    "203.0.113.7:41641",
+		relayRegion: "ams",
 	})
 
 	if msg.Direct == nil || !*msg.Direct {
@@ -54,11 +52,11 @@ type scriptedPathSource struct {
 }
 
 type scriptedPathState struct {
-	status tailcat.PathStatus
+	status agentPathStatus
 	ok     bool
 }
 
-func (s *scriptedPathSource) PathStatus() (tailcat.PathStatus, bool) {
+func (s *scriptedPathSource) PathStatus() (agentPathStatus, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.next >= len(s.states) {
@@ -72,9 +70,9 @@ func (s *scriptedPathSource) PathStatus() (tailcat.PathStatus, bool) {
 func TestReportTailcatPathIgnoresUnknownAndEmitsOnlyPathChanges(t *testing.T) {
 	source := &scriptedPathSource{states: []scriptedPathState{
 		{},
-		{status: tailcat.PathStatus{Direct: false, RelayRegion: "ams", TxBytes: 10}, ok: true},
-		{status: tailcat.PathStatus{Direct: false, RelayRegion: "ams", TxBytes: 20}, ok: true},
-		{status: tailcat.PathStatus{Direct: true, Endpoint: "203.0.113.7:41641", TxBytes: 30}, ok: true},
+		{status: agentPathStatus{direct: false, relayRegion: "ams", txBytes: 10}, ok: true},
+		{status: agentPathStatus{direct: false, relayRegion: "ams", txBytes: 20}, ok: true},
+		{status: agentPathStatus{direct: true, endpoint: "203.0.113.7:41641", txBytes: 30}, ok: true},
 	}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
