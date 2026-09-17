@@ -49,6 +49,7 @@ import (
 )
 
 const frameHeaderLength = 5
+const maxFrameLength = 64 << 20
 
 const openDelay = 300 * time.Millisecond
 
@@ -65,13 +66,24 @@ type frame struct {
 	Payload   []byte
 }
 
+func checkedFrameLength(payloadLen int) (int, error) {
+	if payloadLen < 0 || payloadLen > maxFrameLength-frameHeaderLength {
+		return 0, fmt.Errorf("frame payload length %d exceeds the %d limit", payloadLen, maxFrameLength-frameHeaderLength)
+	}
+	return frameHeaderLength + payloadLen, nil
+}
+
 func writeFrame(w io.Writer, f frame) error {
-	buf := make([]byte, 4+frameHeaderLength+len(f.Payload))
-	binary.BigEndian.PutUint32(buf[0:4], uint32(frameHeaderLength+len(f.Payload)))
+	frameLength, err := checkedFrameLength(len(f.Payload))
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 4+frameLength)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(frameLength))
 	buf[4] = f.Type
 	binary.BigEndian.PutUint32(buf[5:9], f.ChannelID)
 	copy(buf[9:], f.Payload)
-	_, err := w.Write(buf)
+	_, err = w.Write(buf)
 	return err
 }
 
@@ -81,7 +93,13 @@ func readFrame(r io.Reader) (frame, error) {
 		return frame{}, err
 	}
 	n := binary.BigEndian.Uint32(lenBuf[:])
-	body := make([]byte, n)
+	if n < frameHeaderLength {
+		return frame{}, fmt.Errorf("frame length %d shorter than the header alone", n)
+	}
+	if n > maxFrameLength {
+		return frame{}, fmt.Errorf("frame length %d exceeds the %d limit", n, maxFrameLength)
+	}
+	body := make([]byte, int(n))
 	if _, err := io.ReadFull(r, body); err != nil {
 		return frame{}, err
 	}
