@@ -3,14 +3,20 @@ package main
 import (
 	"context"
 	"time"
-
-	"github.com/tailscale/tailcat"
 )
 
 const agentPathPollInterval = time.Second
 
-type tailcatPathStatusSource interface {
-	PathStatus() (tailcat.PathStatus, bool)
+type agentPathStatus struct {
+	direct      bool
+	endpoint    string
+	relayRegion string
+	txBytes     int64
+	rxBytes     int64
+}
+
+type agentPathStatusSource interface {
+	PathStatus() (agentPathStatus, bool)
 }
 
 type agentPathState struct {
@@ -18,14 +24,14 @@ type agentPathState struct {
 	via    string
 }
 
-func pathControlMessageFromTailcat(status tailcat.PathStatus) controlMessage {
-	direct := status.Direct
+func pathControlMessageFromStatus(status agentPathStatus) controlMessage {
+	direct := status.direct
 	via := ""
-	if !status.Direct {
-		via = status.RelayRegion
+	if !status.direct {
+		via = status.relayRegion
 	}
 
-	// PathStatus.TxBytes/RxBytes are total WireGuard peer counters. They are
+	// txBytes/rxBytes are total WireGuard peer counters. They are
 	// intentionally not copied into relayed_bytes_*: doing so would bill or
 	// display direct-path traffic as relay usage whenever a connection later
 	// happened to be relayed.
@@ -38,7 +44,7 @@ func pathControlMessageFromTailcat(status tailcat.PathStatus) controlMessage {
 
 func reportTailcatPath(
 	ctx context.Context,
-	source tailcatPathStatusSource,
+	source agentPathStatusSource,
 	interval time.Duration,
 	emit func(controlMessage) error,
 ) {
@@ -53,7 +59,7 @@ func reportTailcatPath(
 		if !ok {
 			return true
 		}
-		msg := pathControlMessageFromTailcat(status)
+		msg := pathControlMessageFromStatus(status)
 		state := agentPathState{direct: *msg.Direct, via: msg.Via}
 		if haveLast && state == last {
 			return true
