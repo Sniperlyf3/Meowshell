@@ -94,6 +94,16 @@ type controlMessage struct {
 	// the successful "connected" frame for a Tailcat transport.
 	NodeKey string `json:"node_key,omitempty"`
 
+	// Path fields are present only on "path" control messages. Direct is a
+	// pointer because false is meaningful and must survive omitempty. Via is
+	// the relay hostname when the live path is relayed and the runtime can
+	// identify it. The byte counters are cumulative relayed payload bytes for
+	// this live Tailcat connection.
+	Direct           *bool  `json:"direct,omitempty"`
+	Via              string `json:"via,omitempty"`
+	RelayedBytesSent uint64 `json:"relayed_bytes_sent,omitempty"`
+	RelayedBytesRecv uint64 `json:"relayed_bytes_recv,omitempty"`
+
 	Kind    string   `json:"kind,omitempty"`
 	Command []string `json:"command,omitempty"`
 	Pty     *bool    `json:"pty,omitempty"`
