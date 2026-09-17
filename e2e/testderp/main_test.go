@@ -47,25 +47,16 @@ func TestAdmissionControllerAllowsRegisteredNodeAndRejectsUnknownNode(t *testing
 
 	allowed := newDERPClient(t, allowedPrivate, relayHTTP.URL)
 	defer allowed.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := allowed.Connect(ctx); err != nil {
-		t.Fatalf("allowed node Connect: %v", err)
-	}
-	message, err := allowed.Recv()
-	if err != nil {
-		t.Fatalf("allowed node first Recv: %v", err)
-	}
-	if _, ok := message.(derp.ServerInfoMessage); !ok {
+	if message, err := connectAndRecvFirst(t, allowed); err != nil {
+		t.Fatalf("allowed node handshake: %v", err)
+	} else if _, ok := message.(derp.ServerInfoMessage); !ok {
 		t.Fatalf("allowed node first message type = %T, want derp.ServerInfoMessage", message)
 	}
 
 	denied := newDERPClient(t, deniedPrivate, relayHTTP.URL)
 	defer denied.Close()
-	deniedCtx, deniedCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer deniedCancel()
-	if err := denied.Connect(deniedCtx); err == nil {
-		t.Fatal("unknown node unexpectedly connected to admission-protected DERP")
+	if _, err := connectAndRecvFirst(t, denied); err == nil {
+		t.Fatal("unknown node unexpectedly completed the admission-protected DERP handshake")
 	}
 }
 
@@ -83,10 +74,8 @@ func TestAdmissionControllerFailureFailsClosed(t *testing.T) {
 
 	client := newDERPClient(t, key.NewNode(), relayHTTP.URL)
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Connect(ctx); err == nil {
-		t.Fatal("node unexpectedly connected while fail-closed admission controller was unavailable")
+	if _, err := connectAndRecvFirst(t, client); err == nil {
+		t.Fatal("node unexpectedly completed the DERP handshake while fail-closed admission controller was unavailable")
 	}
 }
 
@@ -97,4 +86,14 @@ func newDERPClient(t *testing.T, private key.NodePrivate, serverURL string) *der
 		t.Fatalf("NewClient: %v", err)
 	}
 	return client
+}
+
+func connectAndRecvFirst(t *testing.T, client *derphttp.Client) (derp.ReceivedMessage, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		return nil, err
+	}
+	return client.Recv()
 }
