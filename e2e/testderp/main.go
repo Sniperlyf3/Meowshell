@@ -7,6 +7,12 @@
 // so setting the variable once in a CI step's environment covers every
 // meowshell/tailcat process that step launches.
 //
+// Optional admission-controller flags mirror upstream derper behavior closely
+// enough for CI to prove managed-relay admission against the real DERP
+// protocol. When an admission URL is configured, fail-open defaults to false
+// because a MeowSSH-managed relay must never become public during an
+// admission-controller outage.
+//
 // On ready, it prints one line to stdout:
 //
 //	TAILCAT_DERPMAP_URL=http://127.0.0.1:PORT/derpmap.json
@@ -34,15 +40,26 @@ import (
 
 func main() {
 	statusFile := flag.String("status-file", "", "also write the TAILCAT_DERPMAP_URL= line to this file once ready")
+	verifyClientURL := flag.String("verify-client-url", "", "optional DERP admission controller URL")
+	verifyClientFailOpen := flag.Bool("verify-client-url-fail-open", false, "allow clients if the admission controller is unreachable")
 	flag.Parse()
-	if err := run(*statusFile); err != nil {
+	if err := run(*statusFile, *verifyClientURL, *verifyClientFailOpen); err != nil {
 		fmt.Fprintf(os.Stderr, "testderp: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(statusFile string) error {
+func configureAdmission(d *derpserver.Server, verifyClientURL string, failOpen bool) {
+	if verifyClientURL == "" {
+		return
+	}
+	d.SetVerifyClientURL(verifyClientURL)
+	d.SetVerifyClientURLFailOpen(failOpen)
+}
+
+func run(statusFile, verifyClientURL string, verifyClientFailOpen bool) error {
 	d := derpserver.New(key.NewNode(), log.Printf)
+	configureAdmission(d, verifyClientURL, verifyClientFailOpen)
 	defer d.Close()
 
 	derpLn, err := net.Listen("tcp", "127.0.0.1:0")
