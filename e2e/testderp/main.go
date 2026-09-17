@@ -32,18 +32,39 @@ import (
 	"tailscale.com/types/key"
 )
 
+type testDERPOptions struct {
+	statusFile              string
+	verifyClientURL         string
+	verifyClientURLFailOpen bool
+}
+
 func main() {
 	statusFile := flag.String("status-file", "", "also write the TAILCAT_DERPMAP_URL= line to this file once ready")
+	verifyClientURL := flag.String("verify-client-url", "", "optional DERP admission controller URL")
+	verifyClientURLFailOpen := flag.Bool("verify-client-url-fail-open", false, "allow clients if the admission controller is unreachable")
 	flag.Parse()
-	if err := run(*statusFile); err != nil {
+	if err := run(testDERPOptions{
+		statusFile:              *statusFile,
+		verifyClientURL:         *verifyClientURL,
+		verifyClientURLFailOpen: *verifyClientURLFailOpen,
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "testderp: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(statusFile string) error {
+func configureAdmission(d *derpserver.Server, verifyClientURL string, failOpen bool) {
+	if verifyClientURL == "" {
+		return
+	}
+	d.SetVerifyClientURL(verifyClientURL)
+	d.SetVerifyClientURLFailOpen(failOpen)
+}
+
+func run(opts testDERPOptions) error {
 	d := derpserver.New(key.NewNode(), log.Printf)
 	defer d.Close()
+	configureAdmission(d, opts.verifyClientURL, opts.verifyClientURLFailOpen)
 
 	derpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -121,8 +142,8 @@ func run(statusFile string) error {
 	mapURL := fmt.Sprintf("http://%s/derpmap.json", mapLn.Addr())
 	statusLine := fmt.Sprintf("TAILCAT_DERPMAP_URL=%s\n", mapURL)
 	fmt.Print(statusLine)
-	if statusFile != "" {
-		if err := os.WriteFile(statusFile, []byte(statusLine), 0o644); err != nil {
+	if opts.statusFile != "" {
+		if err := os.WriteFile(opts.statusFile, []byte(statusLine), 0o644); err != nil {
 			return fmt.Errorf("writing status file: %w", err)
 		}
 	}
