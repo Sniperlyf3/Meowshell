@@ -114,6 +114,13 @@ internal sealed class AgentMessage
 
     public string? NodeKey { get; set; }
 
+    // Present only on "path" messages. Direct is nullable so false remains
+    // distinct from an older agent that does not report path information.
+    public bool? Direct { get; set; }
+    public string? Via { get; set; }
+    public ulong RelayedBytesSent { get; set; }
+    public ulong RelayedBytesRecv { get; set; }
+
     public string? Kind { get; set; }
     public string[]? Command { get; set; }
     public bool? Pty { get; set; }
