@@ -44,9 +44,22 @@ func (c *tailcatForwardClient) PathStatus() (agentPathStatus, bool) {
 	}, true
 }
 
-func (c *tailcatForwardClient) ProbePath(ctx context.Context) error {
-	_, err := c.cl.DiscoPing(ctx)
-	return err
+func (c *tailcatForwardClient) ProbePath(ctx context.Context) (agentPathStatus, bool) {
+	result, err := c.cl.DiscoPing(ctx)
+	if err != nil || result == nil {
+		return agentPathStatus{}, false
+	}
+	status := agentPathStatus{
+		direct:   result.Endpoint != "",
+		endpoint: result.Endpoint,
+	}
+	if !status.direct {
+		status.relayRegion = result.DERPRegionCode
+		if status.relayRegion == "" {
+			status.relayRegion = fmt.Sprint(result.DERPRegionID)
+		}
+	}
+	return status, true
 }
 
 func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
