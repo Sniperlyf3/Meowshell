@@ -20,6 +20,35 @@ type tailcatForwardClient struct {
 	cl *tailcat.Client
 }
 
+func tailcatClientDialer(cl *tailcat.Client, port string) (dialer, error) {
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return nil, fmt.Errorf("invalid Tailcat SSH port %q", port)
+	}
+	return func(ctx context.Context) (net.Conn, error) {
+		return cl.DialTCPPort(ctx, uint16(p))
+	}, nil
+}
+
+func (c *tailcatForwardClient) PathStatus() (agentPathStatus, bool) {
+	status, ok := c.cl.PathStatus()
+	if !ok {
+		return agentPathStatus{}, false
+	}
+	return agentPathStatus{
+		direct:      status.Direct,
+		endpoint:    status.Endpoint,
+		relayRegion: status.RelayRegion,
+		txBytes:     status.TxBytes,
+		rxBytes:     status.RxBytes,
+	}, true
+}
+
+func (c *tailcatForwardClient) ProbePath(ctx context.Context) error {
+	_, err := c.cl.DiscoPing(ctx)
+	return err
+}
+
 func (c *tailcatForwardClient) Dial(network, addr string) (net.Conn, error) {
 	if network != "tcp" {
 		return nil, fmt.Errorf("tailcat forwarding only supports tcp, not %q", network)
