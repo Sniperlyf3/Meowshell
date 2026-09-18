@@ -6,7 +6,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/pkg/sftp v1.13.11
 	github.com/tailscale/tailcat v0.6.0
-	github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e
+	github.com/unixshells/mosh-go v0.5.2
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
