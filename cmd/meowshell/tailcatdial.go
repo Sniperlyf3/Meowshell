@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -32,65 +31,17 @@ func tailcatClientDialer(cl *tailcat.Client, port string) (dialer, error) {
 }
 
 func (c *tailcatForwardClient) PathStatus() (agentPathStatus, bool) {
-	// PathStatus is a small API we add to the pinned Tailcat source in
-	// build.sh. Normal vet/unit-test workflows intentionally compile against
-	// the pristine upstream checkout before that patch is applied, so keep the
-	// optional API behind reflection here. Release binaries are built only
-	// after live-path-status.patch has been applied and therefore expose it.
-	method := reflect.ValueOf(c.cl).MethodByName("PathStatus")
-	if !method.IsValid() || method.Type().NumIn() != 0 || method.Type().NumOut() != 2 {
+	status, ok := c.cl.PathStatus()
+	if !ok {
 		return agentPathStatus{}, false
 	}
-	out := method.Call(nil)
-	if out[1].Kind() != reflect.Bool || !out[1].Bool() {
-		return agentPathStatus{}, false
-	}
-	return decodeTailcatPathStatus(out[0])
-}
-
-func decodeTailcatPathStatus(value reflect.Value) (agentPathStatus, bool) {
-	for value.IsValid() && (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) {
-		if value.IsNil() {
-			return agentPathStatus{}, false
-		}
-		value = value.Elem()
-	}
-	if !value.IsValid() || value.Kind() != reflect.Struct {
-		return agentPathStatus{}, false
-	}
-
-	direct := value.FieldByName("Direct")
-	endpoint := value.FieldByName("Endpoint")
-	relayRegion := value.FieldByName("RelayRegion")
-	txBytes := value.FieldByName("TxBytes")
-	rxBytes := value.FieldByName("RxBytes")
-	if direct.Kind() != reflect.Bool ||
-		endpoint.Kind() != reflect.String ||
-		relayRegion.Kind() != reflect.String ||
-		!isReflectInt(txBytes) ||
-		!isReflectInt(rxBytes) {
-		return agentPathStatus{}, false
-	}
-
 	return agentPathStatus{
-		direct:      direct.Bool(),
-		endpoint:    endpoint.String(),
-		relayRegion: relayRegion.String(),
-		txBytes:     txBytes.Int(),
-		rxBytes:     rxBytes.Int(),
+		direct:      status.Direct,
+		endpoint:    status.Endpoint,
+		relayRegion: status.RelayRegion,
+		txBytes:     status.TxBytes,
+		rxBytes:     status.RxBytes,
 	}, true
-}
-
-func isReflectInt(value reflect.Value) bool {
-	if !value.IsValid() {
-		return false
-	}
-	switch value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return true
-	default:
-		return false
-	}
 }
 
 func (c *tailcatForwardClient) ProbePath(ctx context.Context) error {
