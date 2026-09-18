@@ -356,6 +356,9 @@ jobs:
           dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
           dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
 
+      - name: Start a shared local DERP relay for direct-path E2E
+        run: ./e2e/start-testderp.sh
+
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
         # instead of the fake stand-ins the rest of the suite uses; they
@@ -382,6 +385,10 @@ jobs:
           name: dotnet-test-results
           path: test-results/
           if-no-files-found: warn
+
+      - name: Stop the shared local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.
