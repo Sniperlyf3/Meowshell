@@ -34,13 +34,16 @@ internal static class MeowshellHomeDirectory
     }
 
     /// <summary>Creates <paramref name="dir"/> restricted to the owner if it doesn't exist, or verifies a
-    /// pre-existing one actually is: not a symlink/reparse point, and not accessible by anyone else.</summary>
+    /// pre-existing one actually is: not a symlink/reparse point, and not accessible by anyone else. A
+    /// pre-existing Unix directory that grants group/other access is narrowed to owner-only in place
+    /// rather than rejected outright -- see the "repair, don't just reject" note below.</summary>
     /// <exception cref="IOException">
     /// <paramref name="dir"/> is a symlink/reparse point, a pre-existing directory's permissions allow
-    /// group/other access, or it isn't actually accessible as the current user despite its permissions
-    /// (a stronger signal than the mode bits alone, and the closest a P/Invoke-free, cross-platform check
-    /// gets to a real owner-UID comparison: nothing short of being the owner or root can read a directory
-    /// whose mode is verified to already exclude group and other entirely).
+    /// group/other access and could not be narrowed (Unix: <c>chmod</c> failed because this process does
+    /// not own it; Windows: an untrusted ACE), or it isn't actually accessible as the current user despite
+    /// its permissions (a stronger signal than the mode bits alone, and the closest a P/Invoke-free,
+    /// cross-platform check gets to a real owner-UID comparison: nothing short of being the owner or root
+    /// can read a directory whose mode is verified to already exclude group and other entirely).
     /// </exception>
     internal static void EnsureSecure(string dir)
     {
@@ -81,9 +84,34 @@ internal static class MeowshellHomeDirectory
             UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
         if ((mode & untrustedAccess) != 0)
         {
-            throw new IOException(
-                $"refusing to use {dir}: permissions {ToOctal(mode)} allow group/other access " +
-                "(a pre-existing directory here that isn't exclusively yours could let another local user read or tamper with session data)");
+            // Repair, don't just reject: a directory previous versions of this
+            // library created via plain Directory.CreateDirectory (mode 0777
+            // minus umask -- 0755 under the standard 022 umask) is a bug in an
+            // OLDER version of this library, not an attack, and narrowing it in
+            // place is safe -- the caller already owns it, or this chmod fails.
+            // Rejecting that case identically to a directory someone else
+            // planted left every upgrade permanently unable to use its own
+            // HOME (home-directory-upgrade spec, Finding 1). A directory this
+            // process does NOT own is the case that must still be refused:
+            // chmod on it fails with UnauthorizedAccessException, caught below
+            // and re-checked rather than assumed, so a chmod that silently
+            // no-ops (some overlay/network filesystems) is still caught by the
+            // mode re-read.
+            try
+            {
+                File.SetUnixFileMode(dir, mode & ~untrustedAccess);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Not ours to narrow; the throw below reports it.
+            }
+            mode = File.GetUnixFileMode(dir);
+            if ((mode & untrustedAccess) != 0)
+            {
+                throw new IOException(
+                    $"refusing to use {dir}: permissions {ToOctal(mode)} allow group/other access " +
+                    "(a pre-existing directory here that isn't exclusively yours could let another local user read or tamper with session data)");
+            }
         }
         // Do not reject setgid/sticky bits by themselves. Android app-private
         // directories commonly inherit setgid from their platform-managed
@@ -99,6 +127,28 @@ internal static class MeowshellHomeDirectory
         catch (UnauthorizedAccessException ex)
         {
             throw new IOException($"refusing to use {dir}: not accessible as the current user", ex);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="EnsureSecure"/>, for a call site that launches a native process and documents its
+    /// failures as <see cref="TailcatException"/>: wraps the raw <see cref="IOException"/> as a
+    /// <see cref="TailcatException"/> carrying <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/> so it
+    /// never escapes undocumented and outside that model (home-directory-upgrade spec, "the exception
+    /// type is outside the documented model"). <see cref="MeowshellHome.Prepare"/> and other
+    /// non-process-launching callers use <see cref="EnsureSecure"/> directly and keep the plain
+    /// <see cref="IOException"/>.
+    /// </summary>
+    internal static void EnsureSecureForEntryPoint(string dir)
+    {
+        try
+        {
+            EnsureSecure(dir);
+        }
+        catch (IOException ex)
+        {
+            throw new TailcatException(
+                "meowshell home/working directory is not private", 0, ex.Message, MeowshellErrorCode.HomeDirectoryUnsafe);
         }
     }
 

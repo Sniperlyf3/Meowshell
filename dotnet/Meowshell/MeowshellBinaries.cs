@@ -67,13 +67,35 @@ internal static class MeowshellBinaries
                 $"refusing native binary writable by group/other: {path} ({Convert.ToString((int)mode, 8)})");
         }
 
-        if ((mode & UnixFileMode.UserExecute) == 0)
+        // Already executable by this process? Don't assume the USER bit is
+        // the one that matters: on Android the binaries live under
+        // ApplicationInfo.NativeLibraryDir, owned by `system` and read-only to
+        // the app, so this process is not the owner and runs them through the
+        // OTHER-execute bit instead (the OS extracts native libraries at
+        // 0755, so this is normally already true). If either bit already
+        // grants execution, there is nothing to repair -- and, on Android,
+        // attempting one anyway is doomed: SetUnixFileMode on a file we don't
+        // own throws UnauthorizedAccessException (home-directory-upgrade
+        // spec, Finding 3).
+        if ((mode & (UnixFileMode.UserExecute | UnixFileMode.OtherExecute)) == 0)
         {
             // The runtime packages can lose the executable bit when unpacked
             // through tooling that does not preserve Unix metadata. Restore
             // only the owner's execute bit; making a private binary executable
             // by group/other broadens access for no functional reason.
-            File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
+            try
+            {
+                File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                // Latent until now: this process does not own the file (e.g. a
+                // read-only, system-owned NativeLibraryDir on Android) and
+                // cannot make it executable. Fail with a clear message instead
+                // of letting an undocumented UnauthorizedAccessException escape.
+                throw new IOException(
+                    $"native binary is not executable and cannot be made so: {path}", ex);
+            }
         }
     }
 

@@ -139,7 +139,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <param name="proxyUrl">A SOCKS5 or HTTP CONNECT proxy to reach the first TCP hop through.</param>
     /// <param name="configureConnection">Runs after the native process starts but before any protocol traffic is sent, allowing callers to attach prompt and log handlers in time for the handshake.</param>
     /// <param name="cancellationToken">Cancels waiting for the connection to settle; does not cancel or stop the connection itself once returned.</param>
-    /// <exception cref="TailcatException">The connection failed to establish within <see cref="TailcatClientOptions.Timeout"/>; <see cref="TailcatException.Code"/> names why when the agent reported a typed reason.</exception>
+    /// <exception cref="TailcatException">The connection failed to establish within <see cref="TailcatClientOptions.Timeout"/>; <see cref="TailcatException.Code"/> names why when the agent reported a typed reason. Also thrown, with <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>, before any process starts, if <see cref="TailcatOptions.HomeDirectory"/> is not private and could not be narrowed.</exception>
     public static async Task<MeowshellAgentConnection> ConnectAsync(
         TailcatClientOptions options, string destination, MeowshellAgentConfigureOptions? configure = null,
         string? port = null, IReadOnlyList<string>? jumpHosts = null, string? knownHostsPath = null, string? proxyUrl = null,
@@ -147,7 +147,7 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,

@@ -47,13 +47,17 @@ public sealed record TailcatKeyOptions
     public bool Psk { get; init; } = true;
 }
 
-/// <summary>One-shot tailcat operations that call the bare <c>tailcat</c> binary directly, not meowshell.</summary>
+/// <summary>One-shot tailcat operations that call the bare <c>tailcat</c> binary directly, not meowshell.
+/// Every operation here first prepares <see cref="TailcatOptions.HomeDirectory"/> the same way the
+/// rest of the library does, so any of them can also throw a <see cref="TailcatException"/> carrying
+/// <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/> before the native process even starts, in addition
+/// to whatever exceptions their own docs list for the process itself.</summary>
 public static class TailcatClient
 {
     private static ProcessStartInfo Prepare(TailcatClientOptions options)
     {
         var (_, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var psi = new ProcessStartInfo(tailcat)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -391,7 +395,7 @@ public static class TailcatClient
     public static async Task<TailcatEnvironment> GetEnvironmentAsync(TailcatClientOptions options)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,
@@ -415,7 +419,7 @@ public static class TailcatClient
     private static Task<TailcatResult> RunMeowshellCpAsync(TailcatClientOptions options, IReadOnlyList<string> cpArgs)
     {
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,

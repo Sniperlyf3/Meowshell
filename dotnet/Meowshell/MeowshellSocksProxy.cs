@@ -39,6 +39,7 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
 
     /// <summary>Starts the proxy.</summary>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
+    /// <exception cref="TailcatException"><see cref="TailcatOptions.HomeDirectory"/> is not private and could not be narrowed; <see cref="TailcatException.Code"/> is <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>.</exception>
     public static async Task<MeowshellSocksProxy> StartAsync(
         MeowshellSocksOptions options, Action<string>? onLog = null,
         CancellationToken cancellationToken = default)
@@ -47,7 +48,7 @@ public sealed class MeowshellSocksProxy : IAsyncDisposable
         TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
         {

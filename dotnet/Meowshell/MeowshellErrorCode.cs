@@ -27,6 +27,13 @@ public enum MeowshellErrorCode
     PermissionDenied,
     /// <summary>The remote path does not exist.</summary>
     NotFound,
+    /// <summary>
+    /// The configured home or working directory is not private to the current user (or another user's
+    /// pre-existing directory couldn't be narrowed to be) and no process was started. Never a wire value --
+    /// like <see cref="None"/>, this is caught before the agent is ever invoked, in
+    /// <see cref="MeowshellHomeDirectory.EnsureSecure"/>.
+    /// </summary>
+    HomeDirectoryUnsafe,
     /// <summary>A failure the agent reported without (or with an unrecognized) more specific code.</summary>
     Unknown,
 }

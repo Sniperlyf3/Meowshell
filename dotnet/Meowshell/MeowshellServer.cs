@@ -142,6 +142,7 @@ public sealed class MeowshellServer : IAsyncDisposable
     }
 
     /// <summary>Starts the server and returns once it has published an address.</summary>
+    /// <exception cref="TailcatException"><see cref="MeowshellOptions.WorkDirectory"/> or <see cref="TailcatOptions.HomeDirectory"/> is not private and could not be narrowed; <see cref="TailcatException.Code"/> is <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>.</exception>
     public static async Task<MeowshellServer> StartAsync(
         MeowshellOptions options, CancellationToken cancellationToken = default, Action<string>? onLog = null)
     {
@@ -161,8 +162,8 @@ public sealed class MeowshellServer : IAsyncDisposable
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
 
-        MeowshellHomeDirectory.EnsureSecure(options.WorkDirectory);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.WorkDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var addressFile = Path.Combine(options.WorkDirectory, $"tailcat-addr-{Guid.NewGuid():N}");
 
         var psi = new ProcessStartInfo
