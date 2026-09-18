@@ -34,11 +34,11 @@ jobs:
       # through a tailcat destination dials via tailcat.Client, the same
       # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
       # test need that directory to exist before either can even resolve
-      # imports. A plain, unpatched clone is enough here: the two patches
-      # below only change Android-specific networking behavior, irrelevant
-      # to vetting/testing meowshell on this runner's own host platform.
-      # ./build.sh (further down) later reuses and patches this same
-      # checkout for the real cross-compiled build.
+      # imports. A plain, unpatched clone is intentional here. Optional
+      # live-path telemetry is discovered dynamically by meowshell so this
+      # host vet/test pass remains valid against pristine upstream Tailcat.
+      # ./build.sh (further down) later reuses this checkout, applies the
+      # reviewed live-path and platform patches, and builds release binaries.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
