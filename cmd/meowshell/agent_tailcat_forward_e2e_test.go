@@ -77,8 +77,7 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 			Msg: "open_channel", Kind: "forward_local",
 			ListenAddr: "127.0.0.1:0", RemoteAddr: "localhost:" + backendPort,
 		})
-		f := mustReadFrame(t, out)
-		opened := decodeControl(t, f)
+		_, opened := expectChannelOpenedMessage(t, out)
 		if opened.Msg != "channel_opened" || opened.BoundAddr == "" {
 			t.Fatalf("channel_opened = %+v, want a non-empty BoundAddr", opened)
 		}
