@@ -113,12 +113,12 @@ func (s *probingPathSource) PathStatus() (agentPathStatus, bool) {
 	}, true
 }
 
-func (s *probingPathSource) ProbePath(context.Context) error {
+func (s *probingPathSource) ProbePath(context.Context) (agentPathStatus, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.probes++
 	s.direct = true
-	return nil
+	return agentPathStatus{direct: true, endpoint: "203.0.113.7:41641"}, true
 }
 
 func TestReportTailcatPathProbesRelayedConnectionAndEmitsDirectUpgrade(t *testing.T) {
@@ -148,5 +148,46 @@ func TestReportTailcatPathProbesRelayedConnectionAndEmitsDirectUpgrade(t *testin
 	defer source.mu.Unlock()
 	if source.probes == 0 {
 		t.Fatal("relayed path was never actively probed")
+	}
+}
+
+type initiallyUnknownProbingPathSource struct {
+	mu     sync.Mutex
+	probes int
+}
+
+func (s *initiallyUnknownProbingPathSource) PathStatus() (agentPathStatus, bool) {
+	return agentPathStatus{}, false
+}
+
+func (s *initiallyUnknownProbingPathSource) ProbePath(context.Context) (agentPathStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probes++
+	return agentPathStatus{direct: true, endpoint: "127.0.0.1:41641"}, true
+}
+
+func TestReportTailcatPathProbesUnknownConnectionAndUsesLivePingResult(t *testing.T) {
+	source := &initiallyUnknownProbingPathSource{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var got []controlMessage
+	reportTailcatPath(ctx, source, time.Millisecond, func(msg controlMessage) error {
+		got = append(got, msg)
+		cancel()
+		return nil
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("got %d path updates, want 1", len(got))
+	}
+	if got[0].Direct == nil || !*got[0].Direct || got[0].Via != "" {
+		t.Fatalf("path update = %#v, want direct probe result", got[0])
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.probes == 0 {
+		t.Fatal("unknown path was never actively probed")
 	}
 }
