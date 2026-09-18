@@ -34,11 +34,11 @@ jobs:
       # through a tailcat destination dials via tailcat.Client, the same
       # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
       # test need that directory to exist before either can even resolve
-      # imports. A plain, unpatched clone is intentional here. Optional
-      # live-path telemetry is discovered dynamically by meowshell so this
-      # host vet/test pass remains valid against pristine upstream Tailcat.
-      # ./build.sh (further down) later reuses this checkout, applies the
-      # reviewed live-path and platform patches, and builds release binaries.
+      # imports. Apply the reviewed live-path API patch before compiling
+      # meowshell: the agent now uses that exact Tailcat Client directly, so
+      # path reporting is statically type-checked rather than hidden behind
+      # reflection. ./build.sh later resets this disposable checkout and
+      # reapplies the full reviewed patch set before release binaries are built.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
@@ -47,6 +47,7 @@ jobs:
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
 
       - name: Vet and test meowshell
         env:
@@ -258,6 +259,7 @@ jobs:
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
 
       # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
       # validation, N9) only builds and runs under GOOS=windows, so it never
