@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -86,5 +87,35 @@ func TestTailcatKeyFromNameRejectsOversizedKeyFile(t *testing.T) {
 	}
 	if _, err := tailcatKeyFromName(path); err == nil {
 		t.Fatal("oversized key file was accepted")
+	}
+}
+
+func TestDecodeTailcatPathStatus(t *testing.T) {
+	type patchedPathStatus struct {
+		Direct      bool
+		Endpoint    string
+		RelayRegion string
+		TxBytes     int64
+		RxBytes     int64
+	}
+
+	got, ok := decodeTailcatPathStatus(reflect.ValueOf(patchedPathStatus{
+		Direct:      true,
+		Endpoint:    "192.0.2.10:41641",
+		RelayRegion: "",
+		TxBytes:     123,
+		RxBytes:     456,
+	}))
+	if !ok {
+		t.Fatal("patched Tailcat path status was not decoded")
+	}
+	if !got.direct || got.endpoint != "192.0.2.10:41641" || got.relayRegion != "" || got.txBytes != 123 || got.rxBytes != 456 {
+		t.Fatalf("decoded path = %#v", got)
+	}
+}
+
+func TestDecodeTailcatPathStatusRejectsUnexpectedShape(t *testing.T) {
+	if _, ok := decodeTailcatPathStatus(reflect.ValueOf(struct{ Direct bool }{Direct: true})); ok {
+		t.Fatal("unexpected PathStatus shape was accepted")
 	}
 }
