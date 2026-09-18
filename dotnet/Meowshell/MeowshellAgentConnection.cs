@@ -54,6 +54,11 @@ public sealed record MeowshellKeyboardInteractivePrompt(string Name, string Inst
 /// <param name="Data">The bytes to sign.</param>
 public sealed record MeowshellSignRequest(string KeyId, string Algorithm, byte[] Data);
 
+/// <summary>How the live Tailcat peer is currently reached. This is diagnostic UX state only; it is not authoritative managed-relay accounting.</summary>
+/// <param name="Direct">True when the active WireGuard path is direct; false when it is relayed through DERP.</param>
+/// <param name="Via">The relay region/name when relayed, when known; empty for direct paths.</param>
+public sealed record MeowshellPathStatus(bool Direct, string Via);
+
 /// <summary>One directory entry or a single file's metadata, from an SFTP ls/stat/lstat.</summary>
 /// <param name="Name">The entry's name.</param>
 /// <param name="Size">The size in bytes.</param>
@@ -108,6 +113,12 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
 
     /// <summary>The public Tailcat client identity used by this connection, in <c>nodekey:&lt;hex&gt;</c> form. Null for ordinary TCP SSH transports.</summary>
     public string? TailcatNodeKey { get; private set; }
+
+    /// <summary>The latest live Tailcat path reported by the exact agent connection carrying this SSH session. Null for TCP transports, older agents, or before the first path report.</summary>
+    public MeowshellPathStatus? CurrentPath { get; private set; }
+
+    /// <summary>Raised when the live Tailcat path changes between direct and relayed (or the reported relay changes). Raised from the connection read loop; subscriber exceptions are isolated from the connection.</summary>
+    public event Action<MeowshellPathStatus>? PathChanged;
 
     private MeowshellAgentConnection(Process process, JobObject? job)
     {
@@ -704,6 +715,19 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                 // It is public identity material only; the private Tailcat key never crosses the protocol.
                 TailcatNodeKey = msg.NodeKey;
                 _connected.TrySetResult();
+                return;
+            case "path":
+                // Direct is nullable on the wire so an older agent that does not
+                // support path telemetry is distinguishable from an explicit
+                // relayed path (Direct=false). Ignore malformed/legacy path
+                // frames that omit it rather than inventing a state.
+                if (msg.Direct is not { } direct)
+                    return;
+                var path = new MeowshellPathStatus(direct, msg.Via ?? string.Empty);
+                if (Equals(CurrentPath, path))
+                    return;
+                CurrentPath = path;
+                try { PathChanged?.Invoke(path); } catch { }
                 return;
             case "prompt_request":
                 var promptTask = Task.Run(() => HandlePromptAsync(msg));
