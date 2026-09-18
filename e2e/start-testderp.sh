@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Starts e2e/testderp (a single-node, loopback-only DERP relay) in the
-# background and exports TAILCAT_DERPMAP_URL for the rest of this job, so
+# background and exports TAILCAT_DERPMAP_URL plus TESTDERP_METRICS_URL for
+# the rest of this job, so
 # meowshell/tailcat E2E tests never depend on reaching the public Tailscale
 # relay infrastructure. Every subsequent step in the job inherits the
 # variable as a real environment variable (via $GITHUB_ENV), and tailcat
