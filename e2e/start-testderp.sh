@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Starts e2e/testderp (a single-node, loopback-only DERP relay) in the
-# background and exports TAILCAT_DERPMAP_URL for the rest of this job, so
+# background and exports TAILCAT_DERPMAP_URL plus TESTDERP_METRICS_URL for
+# the rest of this job, so
 # meowshell/tailcat E2E tests never depend on reaching the public Tailscale
 # relay infrastructure. Every subsequent step in the job inherits the
 # variable as a real environment variable (via $GITHUB_ENV), and tailcat
@@ -23,7 +24,9 @@ for _ in $(seq 1 100); do
 		# Unset outside Actions: this script is also the documented way to
 		# run an E2E suite locally (see README.md), where there is no
 		# $GITHUB_ENV to export through and set -u would abort here.
+		metrics_url="${url%/derpmap.json}/metrics.json"
 		echo "TAILCAT_DERPMAP_URL=$url" >> "${GITHUB_ENV:-/dev/null}"
+		echo "TESTDERP_METRICS_URL=$metrics_url" >> "${GITHUB_ENV:-/dev/null}"
 		echo "local DERP relay ready: $url"
 		exit 0
 	fi

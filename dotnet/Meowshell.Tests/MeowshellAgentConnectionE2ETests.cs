@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using Meowshell;
 
 namespace Meowshell.Tests;
@@ -19,6 +20,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
     private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";
     private const string MeowshellEnvVar = "DOTNET_E2E_MEOWSHELL_BIN";
+    private const string RelayMetricsEnvVar = "TESTDERP_METRICS_URL";
 
     private readonly string _dir = Directory.CreateTempSubdirectory("agent-connection-e2e-").FullName;
 
@@ -374,6 +376,83 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task DirectPathLargePayloadBypassesTheRelay()
+    {
+        var real = FindRealBinaries();
+        if (real is null) return;
+        var (bin, _) = real.Value;
+
+        var metricsUrl = Environment.GetEnvironmentVariable(RelayMetricsEnvVar);
+        Assert.False(string.IsNullOrWhiteSpace(metricsUrl),
+            $"Real-binary E2E requires {RelayMetricsEnvVar}; CI must start e2e/testderp before this test.");
+
+        // Deliberately do not use RelayE2E.StartServerAsync here. That helper
+        // gives each server its own embedded loopback DERP. This test needs
+        // both endpoints on the shared testderp instance so its counters are
+        // an independent upper bound on how much payload traversed the relay.
+        await using var server = await MeowshellServer.StartAsync(new MeowshellOptions
+        {
+            BinaryDirectory = bin,
+            HomeDirectory = Path.Combine(_dir, "direct-server-home"),
+            WorkDirectory = Path.Combine(_dir, "direct-server-work"),
+            InsecureNoAuth = true,
+            Lifetime = TimeSpan.FromMinutes(2),
+            StartTimeout = TimeSpan.FromSeconds(30),
+        });
+        Mask(server.Address);
+
+        await using var connection = await MeowshellAgentConnection.ConnectAsync(ClientOptions(bin), server.Address);
+
+        var becameDirect = new TaskCompletionSource<MeowshellPathStatus>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnPath(MeowshellPathStatus status)
+        {
+            if (status.Direct) becameDirect.TrySetResult(status);
+        }
+
+        connection.PathChanged += OnPath;
+        try
+        {
+            if (connection.CurrentPath?.Direct != true)
+                await becameDirect.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            connection.PathChanged -= OnPath;
+        }
+
+        Assert.True(connection.CurrentPath?.Direct == true,
+            $"Tailcat never established a direct path; last path was {connection.CurrentPath}.");
+
+        // Let any relay-assisted discovery frames settle before taking the
+        // baseline. Direct data may still coexist with tiny DERP discovery
+        // traffic; the assertion below deliberately allows a small control
+        // budget while proving the 1 MiB application payload did not traverse
+        // the relay.
+        await Task.Delay(500);
+        var before = await ReadRelayPayloadBytesAsync(metricsUrl!);
+
+        const int applicationBytes = 1024 * 1024;
+        await using var exec = await connection.OpenExecAsync(
+            [$"head -c {applicationBytes} /dev/zero | tr '\\0' 'D'"]);
+
+        long received = 0;
+        var buffer = new byte[32 * 1024];
+        int read;
+        while ((read = await exec.Output.ReadAsync(buffer)) > 0)
+            received += read;
+
+        Assert.Equal(0, await exec.Completed);
+        Assert.Equal(applicationBytes, received);
+
+        var after = await ReadRelayPayloadBytesAsync(metricsUrl!);
+        var relayDelta = after - before;
+
+        const long maxControlBytes = 64 * 1024;
+        Assert.InRange(relayDelta, 0, maxControlBytes);
+    }
+
+    [Fact]
     public async Task ExecChannelDeliversLargeOutputIntactUnderBackpressure()
     {
         var real = FindRealBinaries();
@@ -404,6 +483,15 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         var received = ms.ToArray();
         Assert.Equal(totalBytes, received.Length);
         Assert.All(received, b => Assert.Equal((byte)'A', b));
+    }
+
+    private static async Task<long> ReadRelayPayloadBytesAsync(string metricsUrl)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        using var document = JsonDocument.Parse(await http.GetStringAsync(metricsUrl));
+        var root = document.RootElement;
+        return root.GetProperty("bytes_received").GetInt64()
+             + root.GetProperty("bytes_sent").GetInt64();
     }
 
     private static async Task<byte> Socks5GreetAsync(Socket socket, byte[] methods, CancellationToken cancellationToken)

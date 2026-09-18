@@ -19,6 +19,10 @@ type agentPathStatusSource interface {
 	PathStatus() (agentPathStatus, bool)
 }
 
+type agentPathProber interface {
+	ProbePath(context.Context) (agentPathStatus, bool)
+}
+
 type agentPathState struct {
 	direct bool
 	via    string
@@ -54,11 +58,7 @@ func reportTailcatPath(
 
 	var last agentPathState
 	haveLast := false
-	poll := func() bool {
-		status, ok := source.PathStatus()
-		if !ok {
-			return true
-		}
+	emitStatus := func(status agentPathStatus) bool {
 		msg := pathControlMessageFromStatus(status)
 		state := agentPathState{direct: *msg.Direct, via: msg.Via}
 		if haveLast && state == last {
@@ -69,6 +69,32 @@ func reportTailcatPath(
 		}
 		last = state
 		haveLast = true
+		return true
+	}
+	poll := func() bool {
+		status, ok := source.PathStatus()
+		if ok {
+			if !emitStatus(status) {
+				return false
+			}
+			if status.direct {
+				return true
+			}
+		}
+
+		// Tailcat's DiscoPing actively nudges the call-me-maybe endpoint
+		// exchange. Probe while the path is unknown as well as while it is
+		// relayed: on a freshly started client Status can lag behind the live
+		// magicsock route, and returning early here used to prevent the very
+		// probe needed to establish a direct endpoint.
+		if prober, hasProber := source.(agentPathProber); hasProber {
+			probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			probed, probeOK := prober.ProbePath(probeCtx)
+			cancel()
+			if probeOK {
+				return emitStatus(probed)
+			}
+		}
 		return true
 	}
 

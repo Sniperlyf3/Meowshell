@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 const agentUsage = `meowshell agent -- a persistent, multiplexed SSH connection
@@ -33,8 +35,9 @@ protocol.go) instead of the one-process-per-operation model "meowshell
 connect"/"cp" use. Opening a shell and running a command against the same
 host costs one login instead of two.
 
-<destination> is a tailcat address (dialed through tailcat's own bare
-client mode, same as "connect"/"cp") or a "[user@]host[:port]" TCP address
+<destination> is a tailcat address (dialed by the in-process tailcat client
+so the same live WireGuard path can be observed and reused for forwarding)
+or a "[user@]host[:port]" TCP address
 for a general (non-tailcat) SSH host, verified against a known_hosts file
 (--known-hosts) with trust-on-first-use for a host seen for the first time.
 --jump chains through one or more intermediate TCP hosts first, each
@@ -161,6 +164,14 @@ func agentCmd(args []string) error {
 	}
 	if err := session.writeControl(0, connected); err != nil {
 		return err
+	}
+
+	pathCtx, cancelPath := context.WithCancel(context.Background())
+	defer cancelPath()
+	if source := session.tailcatPathSource(); source != nil {
+		go reportTailcatPath(pathCtx, source, agentPathPollInterval, func(msg controlMessage) error {
+			return session.writeControl(0, msg)
+		})
 	}
 	return <-frameErrCh
 }
@@ -351,16 +362,32 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 		user := ""
 
 		if last && looksLikeTailcatAddress(hop) {
-			dial = tailcatDialer(opts.tailcatBin, tailcatClientArgv(opts.key, opts.derpMapURL, opts.verbose, hop, opts.port))
 			hkCallback = tailcatHostKeyCallback()
 			tcKey, err := tailcatKeyFromName(opts.key)
 			if err != nil {
 				closeClients(chain)
-				return fmt.Errorf("resolving --key %q for forwarding: %w", opts.key, err)
+				return fmt.Errorf("resolving --key %q for Tailcat: %w", opts.key, err)
+			}
+			tcClient := &tailcat.Client{
+				Server:     tailcat.Addr(hop),
+				Key:        tcKey,
+				DERPMapURL: opts.derpMapURL,
+				Logf:       logger.Discard,
+			}
+			if opts.verbose {
+				tcClient.Logf = log.Printf
+			}
+			dial, err = tailcatClientDialer(tcClient, opts.port)
+			if err != nil {
+				closeClients(chain)
+				return err
 			}
 			a.tcAddr = tailcat.Addr(hop)
 			a.tcKey = tcKey
 			a.tcDERPMapURL = opts.derpMapURL
+			a.tcMu.Lock()
+			a.tcClient = tcClient
+			a.tcMu.Unlock()
 		} else {
 			var hostPort string
 			user, hostPort = splitUserHost(hop, opts.port)
@@ -389,6 +416,9 @@ func (a *agentSession) connect(ctx context.Context, opts connectOptions) error {
 		sc, err := dialSSHClient(ctx, dial, remoteAddr, user, hkCallback, opts.auth)
 		if err != nil {
 			closeClients(chain)
+			if last && looksLikeTailcatAddress(hop) {
+				a.closeTailcatClient()
+			}
 			return fmt.Errorf("connecting to %s: %w", connectTargetForDiagnostics(hop, last && looksLikeTailcatAddress(hop)), err)
 		}
 		chain = append(chain, sc)
@@ -421,12 +451,25 @@ func (a *agentSession) closeHops() {
 	// after which closing/clearing the client is bounded.
 	closeClients(a.hops)
 	a.resetSFTPClient(nil)
+	a.closeTailcatClient()
+}
+
+func (a *agentSession) closeTailcatClient() {
 	a.tcMu.Lock()
+	defer a.tcMu.Unlock()
 	if a.tcClient != nil {
 		a.tcClient.Close()
 		a.tcClient = nil
 	}
-	a.tcMu.Unlock()
+}
+
+func (a *agentSession) tailcatPathSource() *tailcatForwardClient {
+	a.tcMu.Lock()
+	defer a.tcMu.Unlock()
+	if a.tcClient == nil {
+		return nil
+	}
+	return &tailcatForwardClient{cl: a.tcClient}
 }
 
 const (
