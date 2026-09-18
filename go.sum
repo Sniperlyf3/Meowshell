@@ -209,6 +209,8 @@ github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 h1:pyC9PaHYZFgEKFdlp3G8
 github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701/go.mod h1:P3a5rG4X7tI17Nn3aOIAYr5HbIMukwXG0urG0WuL8OA=
 github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e h1:2gigof4QkpvcvTawKgTJTbm251hA01sN4JFuvxdl3GE=
 github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e/go.mod h1:4/y1LRlSJZ5GFeunI+aXqpqc2cvPtIWRgfCfxnjgz0Q=
+github.com/unixshells/mosh-go v0.5.2 h1:UqEAdkoJi+YRBP6Rq5lyuD9ifkYphwZfpaDCRX6HxSE=
+github.com/unixshells/mosh-go v0.5.2/go.mod h1:4/y1LRlSJZ5GFeunI+aXqpqc2cvPtIWRgfCfxnjgz0Q=
 github.com/unixshells/vt-go v0.1.0 h1:HWILcExV8MHc6o2YqIRMIM/KrjH31kPzZrlvLS9BG6Y=
 github.com/unixshells/vt-go v0.1.0/go.mod h1:dZpOXxVyO7LG1uxkVMixX7HwUf2ZbUkEKhtHHJTTIBI=
 github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zdEY=
