@@ -114,8 +114,7 @@ func TestAgentSFTPEndToEnd(t *testing.T) {
 		uploadViaAgent(t, stdin, out, "big.bin", payload, false, 0, 0)
 
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "sftp_download", Path: "big.bin"})
-		f := mustReadFrame(t, out)
-		opened := decodeControl(t, f)
+		f, opened := expectChannelOpenedMessage(t, out)
 		if opened.Msg != "channel_opened" || opened.Size != int64(len(payload)) {
 			t.Fatalf("channel_opened = %+v, want Size %d", opened, len(payload))
 		}
@@ -193,11 +192,7 @@ func sftpOp(t *testing.T, stdin interface {
 	req.Msg = "sftp_op"
 	req.RequestID = fmt.Sprintf("op%d", time.Now().UnixNano())
 	send(t, stdin, 0, req)
-	f := mustReadFrame(t, out)
-	msg := decodeControl(t, f)
-	if msg.RequestID != req.RequestID {
-		t.Fatalf("sftp_op %s: reply RequestID = %q, want %q (msg=%+v)", req.Op, msg.RequestID, req.RequestID, msg)
-	}
+	msg := expectRequestReply(t, out, req.RequestID)
 	if msg.Msg == "error" {
 		t.Fatalf("sftp_op %s %s failed: %s: %s", req.Op, req.Path, msg.Code, msg.Message)
 	}
@@ -211,8 +206,7 @@ func trySFTPOp(t *testing.T, stdin interface {
 	req.Msg = "sftp_op"
 	req.RequestID = fmt.Sprintf("op%d", time.Now().UnixNano())
 	send(t, stdin, 0, req)
-	f := mustReadFrame(t, out)
-	msg := decodeControl(t, f)
+	msg := expectRequestReply(t, out, req.RequestID)
 	if msg.Msg == "error" {
 		return msg.Code
 	}
