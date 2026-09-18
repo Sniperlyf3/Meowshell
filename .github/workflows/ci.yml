@@ -386,10 +386,6 @@ jobs:
           path: test-results/
           if-no-files-found: warn
 
-      - name: Stop the shared local DERP relay
-        if: always()
-        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
-
       - name: Install the Android workload
         # Needed to pack Meowshell's android-targeted build below.
         run: dotnet workload install android
@@ -432,6 +428,10 @@ jobs:
           name: nuget
           path: nupkg/*
           if-no-files-found: error
+
+      - name: Stop the shared local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
   # Meowshell.Demo: a real, installable app, not just a pass/fail check.
   # One button generates a fresh throwaway shell address, one field copies
