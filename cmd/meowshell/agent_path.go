@@ -19,6 +19,10 @@ type agentPathStatusSource interface {
 	PathStatus() (agentPathStatus, bool)
 }
 
+type agentPathProber interface {
+	ProbePath(context.Context) error
+}
+
 type agentPathState struct {
 	direct bool
 	via    string
@@ -69,6 +73,19 @@ func reportTailcatPath(
 		}
 		last = state
 		haveLast = true
+
+		// Tailcat's DiscoPing actively nudges the call-me-maybe endpoint
+		// exchange. A persistent SSH connection can otherwise remain on its
+		// bootstrap DERP route for much longer than necessary when there is
+		// little tunnel traffic. Probe only while relayed; failures are
+		// diagnostic and never tear down the live SSH session.
+		if !status.direct {
+			if prober, ok := source.(agentPathProber); ok {
+				probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				_ = prober.ProbePath(probeCtx)
+				cancel()
+			}
+		}
 		return true
 	}
 
