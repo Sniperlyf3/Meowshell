@@ -136,6 +136,34 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         return (connection, meowshellPath + ".results");
     }
 
+    [Fact]
+    public async Task LiveTailcatPathUpdatesAreExposedWithoutCreatingASecondConnection()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var updates = new List<MeowshellPathStatus>();
+        var relayed = new TaskCompletionSource<MeowshellPathStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (await ConnectToFakeAgentAsync("path-updates", connection =>
+        {
+            connection.PathChanged += status =>
+            {
+                lock (updates) updates.Add(status);
+                if (!status.Direct)
+                    relayed.TrySetResult(status);
+            };
+        }) is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var final = await relayed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        MeowshellPathStatus[] observed;
+        lock (updates) observed = [.. updates];
+        Assert.Contains(observed, status => status.Direct && status.Via == string.Empty);
+        Assert.Contains(observed, status => !status.Direct && status.Via == "ci-relay");
+        Assert.Equal(new MeowshellPathStatus(false, "ci-relay"), final);
+        Assert.Equal(final, connection.CurrentPath);
+    }
+
     /// <summary>Polls a fake-agent results file for a line, up to a bound generous enough that a miss means the line is never coming, not that this ran on a slow machine.</summary>
     private static async Task<bool> WaitForResultAsync(string resultsPath, string marker, TimeSpan timeout)
     {

@@ -123,9 +123,13 @@ type message struct {
 	Accept      bool   `json:"accept,omitempty"`
 	Answer      string `json:"answer,omitempty"`
 	Cancelled   bool   `json:"cancelled,omitempty"`
+
+	Direct *bool  `json:"direct,omitempty"`
+	Via    string `json:"via,omitempty"`
 }
 
 var falseVal = false
+var trueVal = true
 
 // delayCloseRemoteAddr is a magic RemoteAddr an open_channel request can set
 // (irrelevant to a real agent, which would just fail to dial it -- this fake
@@ -159,6 +163,7 @@ func writeData(w io.Writer, mu *sync.Mutex, channelID uint32, data []byte) error
 // configure-then-connected behavior, so tests that don't care about prompts
 // are unaffected.
 const promptDestination = "prompt-before-connect"
+const pathUpdatesDestination = "path-updates"
 
 const fakeFingerprint = "SHA256:fakeagentfakeagentfakeagentfakeagentfakeagent"
 
@@ -240,6 +245,14 @@ func main() {
 	}
 	if err := writeControl(os.Stdout, &outMu, 0, message{Msg: "connected"}); err != nil {
 		return
+	}
+	if len(os.Args) > 1 && os.Args[len(os.Args)-1] == pathUpdatesDestination {
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			writeControl(os.Stdout, &outMu, 0, message{Msg: "path", Direct: &trueVal})
+			time.Sleep(25 * time.Millisecond)
+			writeControl(os.Stdout, &outMu, 0, message{Msg: "path", Direct: &falseVal, Via: "ci-relay"})
+		}()
 	}
 
 	for {
