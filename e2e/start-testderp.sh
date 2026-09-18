@@ -23,7 +23,9 @@ for _ in $(seq 1 100); do
 		# Unset outside Actions: this script is also the documented way to
 		# run an E2E suite locally (see README.md), where there is no
 		# $GITHUB_ENV to export through and set -u would abort here.
+		metrics_url="${url%/derpmap.json}/metrics.json"
 		echo "TAILCAT_DERPMAP_URL=$url" >> "${GITHUB_ENV:-/dev/null}"
+		echo "TESTDERP_METRICS_URL=$metrics_url" >> "${GITHUB_ENV:-/dev/null}"
 		echo "local DERP relay ready: $url"
 		exit 0
 	fi
