@@ -20,7 +20,7 @@ type agentPathStatusSource interface {
 }
 
 type agentPathProber interface {
-	ProbePath(context.Context) error
+	ProbePath(context.Context) (agentPathStatus, bool)
 }
 
 type agentPathState struct {
@@ -58,11 +58,7 @@ func reportTailcatPath(
 
 	var last agentPathState
 	haveLast := false
-	poll := func() bool {
-		status, ok := source.PathStatus()
-		if !ok {
-			return true
-		}
+	emitStatus := func(status agentPathStatus) bool {
 		msg := pathControlMessageFromStatus(status)
 		state := agentPathState{direct: *msg.Direct, via: msg.Via}
 		if haveLast && state == last {
@@ -73,17 +69,30 @@ func reportTailcatPath(
 		}
 		last = state
 		haveLast = true
+		return true
+	}
+	poll := func() bool {
+		status, ok := source.PathStatus()
+		if ok {
+			if !emitStatus(status) {
+				return false
+			}
+			if status.direct {
+				return true
+			}
+		}
 
 		// Tailcat's DiscoPing actively nudges the call-me-maybe endpoint
-		// exchange. A persistent SSH connection can otherwise remain on its
-		// bootstrap DERP route for much longer than necessary when there is
-		// little tunnel traffic. Probe only while relayed; failures are
-		// diagnostic and never tear down the live SSH session.
-		if !status.direct {
-			if prober, ok := source.(agentPathProber); ok {
-				probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				_ = prober.ProbePath(probeCtx)
-				cancel()
+		// exchange. Probe while the path is unknown as well as while it is
+		// relayed: on a freshly started client Status can lag behind the live
+		// magicsock route, and returning early here used to prevent the very
+		// probe needed to establish a direct endpoint.
+		if prober, hasProber := source.(agentPathProber); hasProber {
+			probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			probed, probeOK := prober.ProbePath(probeCtx)
+			cancel()
+			if probeOK {
+				return emitStatus(probed)
 			}
 		}
 		return true
