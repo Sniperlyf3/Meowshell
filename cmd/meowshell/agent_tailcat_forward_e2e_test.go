@@ -99,8 +99,14 @@ func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
 
 	t.Run("forward_socks", func(t *testing.T) {
 		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "forward_socks", ListenAddr: "127.0.0.1:0"})
-		f := mustReadFrame(t, out)
-		opened := decodeControl(t, f)
+		// Use the path-telemetry-aware helper, not a raw mustReadFrame: this
+		// server has a live path reporter goroutine (TS_DEBUG_TAILCAT_LOCAL_DERP
+		// above), which can interleave an asynchronous "path" control message
+		// between this request and its channel_opened reply. forward_local
+		// already goes through expectChannelOpenedMessage for the same reason;
+		// this subtest used to read the raw next frame instead and flaked
+		// whenever a path notification won the race.
+		_, opened := expectChannelOpenedMessage(t, out)
 		if opened.Msg != "channel_opened" || opened.BoundAddr == "" {
 			t.Fatalf("channel_opened = %+v, want a non-empty BoundAddr", opened)
 		}
