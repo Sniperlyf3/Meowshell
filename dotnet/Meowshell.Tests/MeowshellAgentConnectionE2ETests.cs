@@ -421,7 +421,7 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
             connection.PathChanged -= OnPath;
         }
 
-        Assert.True(connection.CurrentPath?.Direct,
+        Assert.True(connection.CurrentPath?.Direct == true,
             $"Tailcat never established a direct path; last path was {connection.CurrentPath}.");
 
         // Let any relay-assisted discovery frames settle before taking the
