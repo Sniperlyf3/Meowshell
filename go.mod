@@ -9,8 +9,8 @@ require (
 	github.com/unixshells/mosh-go v0.0.0-20260405220648-8dca5c67ec8e
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 	tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
 )
 
