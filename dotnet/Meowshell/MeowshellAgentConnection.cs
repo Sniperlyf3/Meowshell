@@ -120,6 +120,12 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     /// <summary>Raised when the live Tailcat path changes between direct and relayed (or the reported relay changes). Raised from the connection read loop; subscriber exceptions are isolated from the connection.</summary>
     public event Action<MeowshellPathStatus>? PathChanged;
 
+    /// <summary>The managed relay's latest reported DERP health problem (e.g. an over-quota admission refusal), or null when healthy, for a TCP transport, an older agent, or before the first report.</summary>
+    public string? CurrentRelayHealth { get; private set; }
+
+    /// <summary>Raised when the managed relay's health problem changes -- non-null when it starts refusing or degrading service, null again once it clears. Raised from the connection read loop; subscriber exceptions are isolated from the connection.</summary>
+    public event Action<string?>? RelayHealthChanged;
+
     private MeowshellAgentConnection(Process process, JobObject? job)
     {
         _process = process;
@@ -728,6 +734,18 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
                     return;
                 CurrentPath = path;
                 try { PathChanged?.Invoke(path); } catch { }
+                return;
+            case "relay_health":
+                // A missing or empty RelayProblem means healthy either way --
+                // an agent that has never reported a problem and one that
+                // just cleared a previous report look identical on purpose;
+                // a caller only ever needs to know "is there a problem right
+                // now", not which of those two this is.
+                var problem = string.IsNullOrEmpty(msg.RelayProblem) ? null : msg.RelayProblem;
+                if (problem == CurrentRelayHealth)
+                    return;
+                CurrentRelayHealth = problem;
+                try { RelayHealthChanged?.Invoke(problem); } catch { }
                 return;
             case "prompt_request":
                 var promptTask = Task.Run(() => HandlePromptAsync(msg));
