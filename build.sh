@@ -61,6 +61,16 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/udp-forward.patch"
 # from a second diagnostic process. Keep this as a small reviewed patch on the
 # pinned source until Tailcat exposes an equivalent stable API upstream.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/live-path-status.patch"
+# MeowSSH's managed relay refuses admission over its monthly quota by sending
+# a derp.FrameHealth (see deploy/single-node/derper/patches/admission-reason.patch
+# in meowsshapi), which magicsock already records via SetDERPRegionHealth --
+# but tailscale.com/health's own Strings() is the only way to read it back
+# (no raw getter) and is compiled out entirely by the "ts_omit_health" tag
+# this build otherwise carries. This patch drops that tag and adds
+# Client.RelayHealth() so the reason text ("monthly usage allowance
+# exceeded") reaches cmd/meowshell's control protocol instead of a user just
+# seeing a generic connection failure.
+git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/derp-health-status.patch"
 
 # netmon.New() (which Server.Start and Client both call unconditionally,
 # separately from the PickBestRegion path above) needs a working interface
@@ -72,10 +82,10 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/live-path-status.patch"
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/android-netmon-interface-getter.patch"
 (cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e)
 
-# The live-path API exists only in our pinned-source patch, so upstream tests
-# run before build.sh cannot cover it. Exercise the patched package here before
-# any release binary is produced.
-(cd "$SRC_DIR" && go test . -run '^(TestClientPathStatusBeforeStartIsUnknown|TestPathStatusFieldsDoNotClaimRelayedByteSemantics)$' -count=1)
+# The live-path and relay-health APIs exist only in our pinned-source
+# patches, so upstream tests run before build.sh cannot cover them. Exercise
+# the patched package here before any release binary is produced.
+(cd "$SRC_DIR" && go test . -run '^(TestClientPathStatusBeforeStartIsUnknown|TestPathStatusFieldsDoNotClaimRelayedByteSemantics|TestClientRelayHealthBeforeStartIsUnknown|TestDerpRelayHealthProblemExtractsRawText|TestDerpRelayHealthProblemIgnoresUnrelatedWarnings|TestDerpRelayHealthProblemEmptyWhenHealthy)$' -count=1)
 
 # tailcat's SSH server hardcodes /bin/sh and /usr/local/bin:/usr/bin:/bin
 # for the session shell and PATH, neither of which exist on Android --
