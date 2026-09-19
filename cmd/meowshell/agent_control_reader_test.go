@@ -79,3 +79,34 @@ func TestReadExitOnlySkipsAnInterleavedRelayHealthMessage(t *testing.T) {
 		t.Fatalf("readExitOnly returned exit code %d, want %d -- the interleaved relay_health frame broke reply correlation", got, exitCode)
 	}
 }
+
+// TestExpectRequestReplySkipsAnInterleavedRelayHealthMessage covers the third
+// production-shaped reader in this package (used by sftp_op round trips):
+// unlike expectChannelOpened and readExitOnly, expectRequestReply only ever
+// special-cased "path" before this project wired reportTailcatRelayHealth
+// into the live connection (see agent.go's agentCmd) -- an unrelated
+// "relay_health" notification with no RequestID of its own would otherwise
+// have failed the RequestID != requestID check below and killed whatever
+// sftp_op the test was actually waiting on, exactly the class of bug PR #52's
+// own forward_socks flake (22% failure rate) came from.
+func TestExpectRequestReplySkipsAnInterleavedRelayHealthMessage(t *testing.T) {
+	var buf bytes.Buffer
+	mustEncode := func(channelID uint32, msg controlMessage) {
+		body, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeFrame(&buf, frame{Type: frameTypeControl, ChannelID: channelID, Payload: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustEncode(0, controlMessage{Msg: "relay_health", RelayProblem: "MeowSSH managed relay: monthly usage allowance exceeded"})
+	mustEncode(0, controlMessage{Msg: "sftp_result", RequestID: "op-1", Path: "adir"})
+
+	r := bufio.NewReader(&buf)
+	got := expectRequestReply(t, r, "op-1")
+	if got.RequestID != "op-1" {
+		t.Fatalf("expectRequestReply returned RequestID %q, want %q -- the interleaved relay_health frame broke reply correlation", got.RequestID, "op-1")
+	}
+}

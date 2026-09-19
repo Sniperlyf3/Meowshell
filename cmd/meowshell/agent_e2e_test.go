@@ -194,11 +194,13 @@ func expectChannelOpenedMessage(t *testing.T, r *bufio.Reader) (frame, controlMe
 			return f, msg
 		case "error":
 			t.Fatalf("agent returned an error opening the channel: %s: %s", msg.Code, msg.Message)
-		case "path":
-			// Live path telemetry is an asynchronous connection-level
-			// notification. It may legally arrive between a request and that
-			// request's reply, so request/response E2E helpers must not consume
-			// it as the synchronous response they are waiting for.
+		case "path", "relay_health":
+			// Live path telemetry and relay-health notifications are both
+			// asynchronous connection-level notifications (reportTailcatPath
+			// and reportTailcatRelayHealth respectively). Either may legally
+			// arrive between a request and that request's reply, so
+			// request/response E2E helpers must not consume one as the
+			// synchronous response they are waiting for.
 			continue
 		}
 	}
@@ -224,7 +226,14 @@ func expectRequestReply(t *testing.T, r *bufio.Reader, requestID string) control
 		if err := json.Unmarshal(f.Payload, &msg); err != nil {
 			t.Fatalf("decoding control message: %v", err)
 		}
-		if msg.Msg == "path" {
+		// Live path telemetry and relay-health notifications are both
+		// asynchronous connection-level control messages (see
+		// expectChannelOpenedMessage's identical "path" comment above) that
+		// may legally land between a request and its reply. reportTailcatPath
+		// already forced this exception for "path"; reportTailcatRelayHealth
+		// now emits on the same shared stream the same way, so skip it here
+		// too instead of mistaking it for the awaited reply.
+		if msg.Msg == "path" || msg.Msg == "relay_health" {
 			continue
 		}
 		if msg.RequestID != requestID {
