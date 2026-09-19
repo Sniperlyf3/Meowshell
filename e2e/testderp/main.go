@@ -131,6 +131,10 @@ func run(statusFile, verifyClientURL string, verifyClientFailOpen bool) error {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(mapJSON)
 	})
+	mapMux.HandleFunc("/metrics.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, d.ExpVar(false).String())
+	})
 	mapSrv := &http.Server{Handler: mapMux}
 	go mapSrv.Serve(mapLn)
 	defer mapSrv.Close()

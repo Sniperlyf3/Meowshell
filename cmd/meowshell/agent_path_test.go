@@ -97,3 +97,97 @@ func TestReportTailcatPathIgnoresUnknownAndEmitsOnlyPathChanges(t *testing.T) {
 		t.Fatalf("second path = direct %#v via %q, want direct with no relay", got[1].Direct, got[1].Via)
 	}
 }
+
+type probingPathSource struct {
+	mu     sync.Mutex
+	direct bool
+	probes int
+}
+
+func (s *probingPathSource) PathStatus() (agentPathStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return agentPathStatus{
+		direct:      s.direct,
+		relayRegion: "ci",
+	}, true
+}
+
+func (s *probingPathSource) ProbePath(context.Context) (agentPathStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probes++
+	s.direct = true
+	return agentPathStatus{direct: true, endpoint: "203.0.113.7:41641"}, true
+}
+
+func TestReportTailcatPathProbesRelayedConnectionAndEmitsDirectUpgrade(t *testing.T) {
+	source := &probingPathSource{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var got []controlMessage
+	reportTailcatPath(ctx, source, time.Millisecond, func(msg controlMessage) error {
+		got = append(got, msg)
+		if len(got) == 2 {
+			cancel()
+		}
+		return nil
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("got %d path updates, want 2", len(got))
+	}
+	if got[0].Direct == nil || *got[0].Direct || got[0].Via != "ci" {
+		t.Fatalf("first update = %#v, want relayed via ci", got[0])
+	}
+	if got[1].Direct == nil || !*got[1].Direct || got[1].Via != "" {
+		t.Fatalf("second update = %#v, want direct", got[1])
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.probes == 0 {
+		t.Fatal("relayed path was never actively probed")
+	}
+}
+
+type initiallyUnknownProbingPathSource struct {
+	mu     sync.Mutex
+	probes int
+}
+
+func (s *initiallyUnknownProbingPathSource) PathStatus() (agentPathStatus, bool) {
+	return agentPathStatus{}, false
+}
+
+func (s *initiallyUnknownProbingPathSource) ProbePath(context.Context) (agentPathStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probes++
+	return agentPathStatus{direct: true, endpoint: "127.0.0.1:41641"}, true
+}
+
+func TestReportTailcatPathProbesUnknownConnectionAndUsesLivePingResult(t *testing.T) {
+	source := &initiallyUnknownProbingPathSource{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var got []controlMessage
+	reportTailcatPath(ctx, source, time.Millisecond, func(msg controlMessage) error {
+		got = append(got, msg)
+		cancel()
+		return nil
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("got %d path updates, want 1", len(got))
+	}
+	if got[0].Direct == nil || !*got[0].Direct || got[0].Via != "" {
+		t.Fatalf("path update = %#v, want direct probe result", got[0])
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.probes == 0 {
+		t.Fatal("unknown path was never actively probed")
+	}
+}

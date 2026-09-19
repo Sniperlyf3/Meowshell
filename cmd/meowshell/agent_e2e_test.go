@@ -175,7 +175,7 @@ func expectConnected(t *testing.T, r *bufio.Reader) {
 	}
 }
 
-func expectChannelOpened(t *testing.T, r *bufio.Reader) uint32 {
+func expectChannelOpenedMessage(t *testing.T, r *bufio.Reader) (frame, controlMessage) {
 	t.Helper()
 	for {
 		f, err := readFrameWithDeadline(t, r)
@@ -191,10 +191,46 @@ func expectChannelOpened(t *testing.T, r *bufio.Reader) uint32 {
 		}
 		switch msg.Msg {
 		case "channel_opened":
-			return f.ChannelID
+			return f, msg
 		case "error":
 			t.Fatalf("agent returned an error opening the channel: %s: %s", msg.Code, msg.Message)
+		case "path":
+			// Live path telemetry is an asynchronous connection-level
+			// notification. It may legally arrive between a request and that
+			// request's reply, so request/response E2E helpers must not consume
+			// it as the synchronous response they are waiting for.
+			continue
 		}
+	}
+}
+
+func expectChannelOpened(t *testing.T, r *bufio.Reader) uint32 {
+	t.Helper()
+	f, _ := expectChannelOpenedMessage(t, r)
+	return f.ChannelID
+}
+
+func expectRequestReply(t *testing.T, r *bufio.Reader, requestID string) controlMessage {
+	t.Helper()
+	for {
+		f, err := readFrameWithDeadline(t, r)
+		if err != nil {
+			t.Fatalf("reading reply for request %q: %v", requestID, err)
+		}
+		if f.Type != frameTypeControl {
+			continue
+		}
+		var msg controlMessage
+		if err := json.Unmarshal(f.Payload, &msg); err != nil {
+			t.Fatalf("decoding control message: %v", err)
+		}
+		if msg.Msg == "path" {
+			continue
+		}
+		if msg.RequestID != requestID {
+			t.Fatalf("reply RequestID = %q, want %q (msg=%+v)", msg.RequestID, requestID, msg)
+		}
+		return msg
 	}
 }
 

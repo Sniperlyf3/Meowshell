@@ -34,11 +34,11 @@ jobs:
       # through a tailcat destination dials via tailcat.Client, the same
       # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
       # test need that directory to exist before either can even resolve
-      # imports. A plain, unpatched clone is enough here: the two patches
-      # below only change Android-specific networking behavior, irrelevant
-      # to vetting/testing meowshell on this runner's own host platform.
-      # ./build.sh (further down) later reuses and patches this same
-      # checkout for the real cross-compiled build.
+      # imports. Apply the reviewed live-path API patch before compiling
+      # meowshell: the agent now uses that exact Tailcat Client directly, so
+      # path reporting is statically type-checked rather than hidden behind
+      # reflection. ./build.sh later resets this disposable checkout and
+      # reapplies the full reviewed patch set before release binaries are built.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
@@ -47,6 +47,7 @@ jobs:
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
 
       - name: Vet and test meowshell
         env:
@@ -210,7 +211,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
           go-version: '1.27.1'
 
@@ -242,7 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
           go-version: '1.27.1'
 
@@ -258,6 +259,7 @@ jobs:
           git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
 
       # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
       # validation, N9) only builds and runs under GOOS=windows, so it never
@@ -332,7 +334,7 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
           go-version: '1.27.1'
 
@@ -355,6 +357,9 @@ jobs:
         run: |
           dotnet restore dotnet/Meowshell.sln --force --no-cache --nologo
           dotnet restore scripts/CommentStripper/CommentStripper.csproj --force --no-cache --nologo
+
+      - name: Start a shared local DERP relay for direct-path E2E
+        run: ./e2e/start-testderp.sh
 
       - name: Test
         # The E2E tests in Meowshell.Tests run against these real binaries
@@ -425,6 +430,10 @@ jobs:
           name: nuget
           path: nupkg/*
           if-no-files-found: error
+
+      - name: Stop the shared local DERP relay
+        if: always()
+        run: kill "$(cat /tmp/testderp.pid)" 2>/dev/null || true
 
   # Meowshell.Demo: a real, installable app, not just a pass/fail check.
   # One button generates a fresh throwaway shell address, one field copies

@@ -88,3 +88,4 @@ func TestTailcatKeyFromNameRejectsOversizedKeyFile(t *testing.T) {
 		t.Fatal("oversized key file was accepted")
 	}
 }
+
