@@ -5,7 +5,43 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tailscale/tailcat"
 )
+
+// TestTailcatHealthSourceMirrorsTailcatPathSourceForALiveTailcatClient locks
+// down the wiring agentCmd depends on but can't otherwise be unit-tested
+// through (agentCmd itself is a CLI entrypoint reading os.Stdin, not
+// something a test can call directly): tailcatHealthSource must return nil
+// before a.tcClient exists (a TCP destination, or before connect() has run),
+// and once set it must wrap the exact same *tailcat.Client connect() stored
+// -- not a copy, and not always-nil -- the same contract tailcatPathSource
+// already has for reportTailcatPath. A real agent E2E test can't catch a
+// regression here on its own: TestAgentRelayHealthReporterAttachesToARealTailcatConnection
+// proves the reporter is being polled against the real client (a mutation
+// that made tailcat.Client.RelayHealth panic crashed that test), but proves
+// nothing about the *source* were tailcatHealthSource itself to start
+// returning nil unconditionally, since a real, healthy connection would look
+// identical either way (no relay_health frame in both cases).
+func TestTailcatHealthSourceMirrorsTailcatPathSourceForALiveTailcatClient(t *testing.T) {
+	a := newAgentSession(nil, nil)
+	if src := a.tailcatHealthSource(); src != nil {
+		t.Fatalf("health source before a.tcClient is set = %#v, want nil", src)
+	}
+
+	tc := &tailcat.Client{Server: "tc-does-not-need-to-be-dialable-for-this-check"}
+	a.tcMu.Lock()
+	a.tcClient = tc
+	a.tcMu.Unlock()
+
+	src := a.tailcatHealthSource()
+	if src == nil {
+		t.Fatal("health source after a.tcClient is set = nil, want a source wrapping the live client")
+	}
+	if src.cl != tc {
+		t.Fatal("health source wraps a different *tailcat.Client than session.tcClient -- relay health would be polled against the wrong connection")
+	}
+}
 
 func TestHealthControlMessageFromStatusRoundTripsProblemText(t *testing.T) {
 	msg := healthControlMessageFromStatus("MeowSSH managed relay: monthly usage allowance exceeded")
