@@ -34,11 +34,15 @@ jobs:
       # through a tailcat destination dials via tailcat.Client, the same
       # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
       # test need that directory to exist before either can even resolve
-      # imports. Apply the reviewed live-path API patch before compiling
-      # meowshell: the agent now uses that exact Tailcat Client directly, so
-      # path reporting is statically type-checked rather than hidden behind
-      # reflection. ./build.sh later resets this disposable checkout and
-      # reapplies the full reviewed patch set before release binaries are built.
+      # imports. Apply every reviewed patch that adds an API tailcatdial.go
+      # calls directly and statically (live-path-status.patch's PathStatus,
+      # derp-health-status.patch's RelayHealth) before compiling meowshell:
+      # the agent uses those exact Tailcat Client methods, so this reporting
+      # is type-checked at compile time rather than hidden behind reflection.
+      # A patch that only touches Android-specific or platform behavior stays
+      # out of this list on purpose -- ./build.sh later resets this disposable
+      # checkout and reapplies the full reviewed patch set before release
+      # binaries are built.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
@@ -48,6 +52,7 @@ jobs:
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
           git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/derp-health-status.patch"
 
       - name: Vet and test meowshell
         env:
@@ -260,6 +265,7 @@ jobs:
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
           git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/derp-health-status.patch"
 
       # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
       # validation, N9) only builds and runs under GOOS=windows, so it never
