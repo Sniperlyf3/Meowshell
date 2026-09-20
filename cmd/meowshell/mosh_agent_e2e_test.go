@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -145,8 +144,14 @@ func TestMoshAgentEndToEnd(t *testing.T) {
 			// The real mosh-server daemonizes and outlives the SSH exec
 			// that started it (that's the whole point of "roaming"); a
 			// test that starts one for real has to reap it itself, or
-			// every run leaks a UDP-listening process.
-			syscall.Kill(pid, syscall.SIGTERM)
+			// every run leaks a UDP-listening process. The actual signal
+			// send is unix-only (see mosh_agent_e2e_unix.go / _windows.go)
+			// so this file -- whose other two tests never touch a real
+			// mosh-server -- stays buildable on every GOOS `go vet ./...`
+			// covers, matching the rest of the platform-split files here
+			// (exec_unix.go/nativeexec_windows.go and friends) rather than
+			// tagging the whole file unix-only.
+			killMoshServerProcess(pid)
 		default:
 		}
 	})
