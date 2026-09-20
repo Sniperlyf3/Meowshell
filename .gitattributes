@@ -1,0 +1,11 @@
+# patches/tailcat/*.patch are fed to `git apply` against a tailcat checkout
+# that CI clones with core.autocrlf=false, i.e. LF. GitHub's windows-latest
+# runners set core.autocrlf=true globally, so without this a Windows checkout
+# of THIS repo rewrites the patch files themselves to CRLF, and git apply then
+# cannot match the LF sources it is patching -- windows-e2e failed with
+# "patch failed: tailcat.go:1998" for exactly that reason. Keep them
+# byte-for-byte as committed on every platform.
+#
+# This is the mirror image of tailcat's own .gitattributes, which pins
+# build-tags.txt to eol=lf for the same class of reason.
+*.patch -text
