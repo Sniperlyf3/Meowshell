@@ -34,11 +34,15 @@ jobs:
       # through a tailcat destination dials via tailcat.Client, the same
       # way tailcat's own "forward"/"socks" subcommands do), so go vet/go
       # test need that directory to exist before either can even resolve
-      # imports. Apply the reviewed live-path API patch before compiling
-      # meowshell: the agent now uses that exact Tailcat Client directly, so
-      # path reporting is statically type-checked rather than hidden behind
-      # reflection. ./build.sh later resets this disposable checkout and
-      # reapplies the full reviewed patch set before release binaries are built.
+      # imports. Apply every reviewed patch that adds an API tailcatdial.go
+      # calls directly and statically (live-path-status.patch's PathStatus,
+      # derp-health-status.patch's RelayHealth) before compiling meowshell:
+      # the agent uses those exact Tailcat Client methods, so this reporting
+      # is type-checked at compile time rather than hidden behind reflection.
+      # A patch that only touches Android-specific or platform behavior stays
+      # out of this list on purpose -- ./build.sh later resets this disposable
+      # checkout and reapplies the full reviewed patch set before release
+      # binaries are built.
       - name: Fetch tailcat source (for go.mod's replace directive)
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
@@ -48,6 +52,7 @@ jobs:
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
           git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/derp-health-status.patch"
 
       - name: Vet and test meowshell
         env:
@@ -250,16 +255,33 @@ jobs:
       # See the "build" job's own comment: cmd/meowshell's go.mod replaces
       # github.com/tailscale/tailcat with a local ./.tailcat-src checkout, so
       # go vet/go test need it present before either can resolve imports.
+      #
+      # core.autocrlf=false is load-bearing on Windows, where the runner's
+      # global config sets it to true. tailcat's own .gitattributes pins
+      # "build-tags.txt text eol=lf" (a CRLF there would put a stray carriage
+      # return in the last build tag for anyone doing $(cat build-tags.txt)),
+      # so an autocrlf=true checkout is CRLF for every .go file but LF for
+      # that one. git apply converts an LF patch's content to the worktree's
+      # convention before matching, which then matches the .go hunks and not
+      # build-tags.txt -- derp-health-status.patch, the only patch that edits
+      # it, died with "patch failed: build-tags.txt:1" while the same two
+      # patches applied fine on ubuntu-latest. Cloning with autocrlf off
+      # keeps the whole checkout LF, like the patches. `git clone -c` writes
+      # the setting into the new repo's config, so the checkout below inherits
+      # it too. Nothing here needs CRLF: this job only vets and tests
+      # cmd/meowshell against these sources, it never builds tailcat itself.
       - name: Fetch tailcat source (for go.mod's replace directive)
         shell: bash
         env:
           SRC_REF: ${{ inputs.tailcat_ref }}
         run: |
           SRC_REF=${SRC_REF:-$(tr -d '[:space:]' < tailcat.ref)}
-          git clone --depth=1 https://github.com/tailscale/tailcat.git .tailcat-src
+          git clone --depth=1 -c core.autocrlf=false \
+            https://github.com/tailscale/tailcat.git .tailcat-src
           git -C .tailcat-src fetch --depth=1 origin "$SRC_REF"
           git -C .tailcat-src checkout --detach FETCH_HEAD
           git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/live-path-status.patch"
+          git -C .tailcat-src apply "$GITHUB_WORKSPACE/patches/tailcat/derp-health-status.patch"
 
       # Some of cmd/meowshell's Windows-specific code (known_hosts DACL/SID
       # validation, N9) only builds and runs under GOOS=windows, so it never

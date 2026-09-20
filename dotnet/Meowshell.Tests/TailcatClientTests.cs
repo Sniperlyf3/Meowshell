@@ -109,6 +109,26 @@ public sealed class TailcatClientTests : IDisposable
         Assert.False(File.Exists(argsFile), "the tailcat process was started despite an invalid Timeout");
     }
 
+    // Fix 3 (home-directory-upgrade spec): an unsafe HomeDirectory must
+    // surface as the one documented failure type, TailcatException with
+    // MeowshellErrorCode.HomeDirectoryUnsafe -- never a raw IOException, and
+    // never after the native process has already been started.
+    [Fact]
+    public async Task GenerateKeyRejectsAnUnsafeHomeDirectoryAsATailcatExceptionWithoutStartingTheProcess()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var (options, argsFile) = Fake("echo tcTHEADDRESS000000000000\n");
+        var real = Path.Combine(_dir, "elsewhere");
+        Directory.CreateDirectory(real);
+        Directory.CreateSymbolicLink(options.HomeDirectory, real);
+
+        var ex = await Assert.ThrowsAsync<TailcatException>(() => TailcatClient.GenerateKeyAsync(
+            options, new TailcatKeyOptions { Name = "test-key" }));
+
+        Assert.Equal(MeowshellErrorCode.HomeDirectoryUnsafe, ex.Code);
+        Assert.False(File.Exists(argsFile), "tailcat was started despite an unsafe HomeDirectory");
+    }
+
     [Fact]
     public async Task GenerateKeyReturnsTheLastLineOfOutput()
     {

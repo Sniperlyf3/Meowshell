@@ -11,7 +11,7 @@ public sealed class TailcatException : Exception
     /// <summary>tailcat's own explanation: captured stderr, or a description of the unexpected output when <see cref="ExitCode"/> is 0.</summary>
     public string Diagnostics { get; }
 
-    /// <summary>The typed reason this failed, when one is known -- always set for a <see cref="MeowshellAgentConnection"/> failure, <see cref="MeowshellErrorCode.None"/> otherwise.</summary>
+    /// <summary>The typed reason this failed, when one is known -- always set for a <see cref="MeowshellAgentConnection"/> failure or an unsafe home/working directory at any entry point (<see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>), <see cref="MeowshellErrorCode.None"/> otherwise.</summary>
     public MeowshellErrorCode Code { get; }
 
     /// <summary>Builds a message combining a short summary with the captured diagnostics.</summary>

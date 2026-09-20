@@ -173,6 +173,14 @@ func agentCmd(args []string) error {
 			return session.writeControl(0, msg)
 		})
 	}
+
+	healthCtx, cancelHealth := context.WithCancel(context.Background())
+	defer cancelHealth()
+	if source := session.tailcatHealthSource(); source != nil {
+		go reportTailcatRelayHealth(healthCtx, source, agentHealthPollInterval, func(msg controlMessage) error {
+			return session.writeControl(0, msg)
+		})
+	}
 	return <-frameErrCh
 }
 
@@ -464,6 +472,19 @@ func (a *agentSession) closeTailcatClient() {
 }
 
 func (a *agentSession) tailcatPathSource() *tailcatForwardClient {
+	a.tcMu.Lock()
+	defer a.tcMu.Unlock()
+	if a.tcClient == nil {
+		return nil
+	}
+	return &tailcatForwardClient{cl: a.tcClient}
+}
+
+// tailcatHealthSource mirrors tailcatPathSource exactly, down to the nil
+// result for a non-Tailcat (TCP) destination: relay health, like path
+// status, only means anything for the in-process tailcat.Client backing the
+// live Tailcat SSH transport (also shared with exit-node forwarding).
+func (a *agentSession) tailcatHealthSource() *tailcatForwardClient {
 	a.tcMu.Lock()
 	defer a.tcMu.Unlock()
 	if a.tcClient == nil {

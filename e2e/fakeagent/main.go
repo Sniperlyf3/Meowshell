@@ -29,6 +29,15 @@
 //     channels: harmless for a shell/exec close (nothing is waiting on that
 //     channel ID in _pendingCloses), and this fake doesn't track kind per
 //     channel ID after opening it anyway.
+//  5. For the moshEchoDestination and moshErrorBeforeConnectDestination
+//     destinations, stand in for MeowshellMoshConnection's much simpler
+//     protocol (no open_channel at all -- just "connected" and a single
+//     implicit data channel) the same way: see each constant's own comment.
+//  6. For relayHealthUpdatesDestination and relayHealthRaceDestination,
+//     stand in for the (not yet wired into a real agent -- see
+//     reportTailcatRelayHealth's own doc comment) "relay_health" control
+//     message the same way pathUpdatesDestination stands in for "path": see
+//     each constant's own comment.
 //
 // No flags: MeowshellAgentConnection.ConnectAsync builds its own argv for
 // the "meowshell agent" invocation and gives a caller no way to inject
@@ -126,6 +135,8 @@ type message struct {
 
 	Direct *bool  `json:"direct,omitempty"`
 	Via    string `json:"via,omitempty"`
+
+	RelayProblem string `json:"relay_problem,omitempty"`
 }
 
 var falseVal = false
@@ -164,6 +175,44 @@ func writeData(w io.Writer, mu *sync.Mutex, channelID uint32, data []byte) error
 // are unaffected.
 const promptDestination = "prompt-before-connect"
 const pathUpdatesDestination = "path-updates"
+
+// relayHealthUpdatesDestination mirrors pathUpdatesDestination, for
+// MeowshellAgentConnection.CurrentRelayHealth/RelayHealthChanged: reports a
+// managed-relay quota problem shortly after connecting, then clears it, the
+// same "direct, then relayed" two-step pathUpdatesDestination uses to prove
+// both a value and a change are actually observed, not just whichever state
+// happens to be current when a test looks.
+const relayHealthUpdatesDestination = "relay-health-updates"
+
+// relayHealthRaceDestination is a regression fixture for the exact failure
+// PR #52 hit with the "path" reporter: an unsolicited control message
+// arriving on the shared stream between a request and its correlated reply.
+// Every open_channel on this destination gets a "relay_health" frame
+// written immediately, before the usual openDelay-then-channel_opened --
+// deterministically forcing the interleave a real reportTailcatRelayHealth
+// goroutine could only produce by timing luck, so a regression here fails
+// every run instead of occasionally.
+const relayHealthRaceDestination = "relay-health-race"
+
+// moshEchoDestination is a magic destination for testing
+// MeowshellMoshConnection's terminal-output pump (OutputReceived), which a
+// real Mosh session cannot be made to exercise deterministically: Mosh
+// packages keystrokes through a UDP state-sync protocol, and what (if
+// anything) echoes back is up to a real mosh-server's real shell. This fake
+// instead echoes any data frame it receives straight back out on the same
+// channel, with the stdout stream marker a real agent's pumpMoshOutput uses
+// -- enough to prove WriteAsync -> OutputReceived actually round-trips
+// through MeowshellMoshConnection's read loop.
+const moshEchoDestination = "mosh-echo"
+
+// moshErrorBeforeConnectDestination is a magic destination for testing that
+// an "error" arriving before "connected" -- e.g. a Mosh bootstrap failure
+// discovered after the framed protocol starts but before the handshake
+// finishes -- surfaces as ConnectAsync throwing, not as a connection that
+// silently hangs or one that reports success. A real agent would need an
+// unreachable Mosh UDP endpoint or a remote host with no mosh-server
+// installed to reach this state, neither reproducible on demand.
+const moshErrorBeforeConnectDestination = "mosh-error-before-connect"
 
 const fakeFingerprint = "SHA256:fakeagentfakeagentfakeagentfakeagentfakeagent"
 
@@ -233,20 +282,29 @@ func main() {
 	}
 	defer results.Close()
 
+	var lastArg string
+	if len(os.Args) > 1 {
+		lastArg = os.Args[len(os.Args)-1]
+	}
+
 	// configure -> connected, matching a real agent's handshake closely
 	// enough for MeowshellAgentConnection.ConnectAsync to complete.
 	if _, err := readFrame(os.Stdin); err != nil {
 		return
 	}
-	if len(os.Args) > 1 && os.Args[len(os.Args)-1] == promptDestination {
+	if lastArg == promptDestination {
 		if !handshakePrompts(os.Stdout, &outMu, results) {
 			return
 		}
 	}
+	if lastArg == moshErrorBeforeConnectDestination {
+		writeControl(os.Stdout, &outMu, 0, message{Msg: "error", Code: "auth_failed", Message: "synthetic auth failure before connect"})
+		return
+	}
 	if err := writeControl(os.Stdout, &outMu, 0, message{Msg: "connected"}); err != nil {
 		return
 	}
-	if len(os.Args) > 1 && os.Args[len(os.Args)-1] == pathUpdatesDestination {
+	if lastArg == pathUpdatesDestination {
 		go func() {
 			time.Sleep(25 * time.Millisecond)
 			writeControl(os.Stdout, &outMu, 0, message{Msg: "path", Direct: &trueVal})
@@ -254,11 +312,23 @@ func main() {
 			writeControl(os.Stdout, &outMu, 0, message{Msg: "path", Direct: &falseVal, Via: "ci-relay"})
 		}()
 	}
+	if lastArg == relayHealthUpdatesDestination {
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			writeControl(os.Stdout, &outMu, 0, message{Msg: "relay_health", RelayProblem: "MeowSSH managed relay: monthly usage allowance exceeded"})
+			time.Sleep(25 * time.Millisecond)
+			writeControl(os.Stdout, &outMu, 0, message{Msg: "relay_health"})
+		}()
+	}
 
 	for {
 		f, err := readFrame(os.Stdin)
 		if err != nil {
 			return
+		}
+		if f.Type == 1 && lastArg == moshEchoDestination {
+			writeData(os.Stdout, &outMu, f.ChannelID, f.Payload)
+			continue
 		}
 		var msg message
 		if err := json.Unmarshal(f.Payload, &msg); err != nil {
@@ -272,6 +342,9 @@ func main() {
 				delayCloseMu.Lock()
 				delayClose[id] = true
 				delayCloseMu.Unlock()
+			}
+			if lastArg == relayHealthRaceDestination {
+				writeControl(os.Stdout, &outMu, 0, message{Msg: "relay_health", RelayProblem: "MeowSSH managed relay: monthly usage allowance exceeded"})
 			}
 			go func(requestID, kind, path string, command []string, id uint32) {
 				time.Sleep(openDelay)

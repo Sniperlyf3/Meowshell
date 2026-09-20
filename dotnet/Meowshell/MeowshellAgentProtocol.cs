@@ -121,6 +121,13 @@ internal sealed class AgentMessage
     public ulong RelayedBytesSent { get; set; }
     public ulong RelayedBytesRecv { get; set; }
 
+    // Present only on "relay_health" messages: the managed relay's own DERP
+    // health text (e.g. an over-quota admission refusal), verbatim. Unlike
+    // Direct, no separate presence flag is needed -- null/empty means
+    // healthy either way, whether that is because nothing was ever wrong or
+    // a previously reported problem just cleared.
+    public string? RelayProblem { get; set; }
+
     public string? Kind { get; set; }
     public string[]? Command { get; set; }
     public bool? Pty { get; set; }

@@ -51,8 +51,17 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         MeowshellHomeDirectory.EnsureSecure(target); // Android commonly yields 2700.
     }
 
+    // Regression test for the home-directory-upgrade spec's Finding 1: a
+    // directory an OLDER version of this library (or a plain
+    // Directory.CreateDirectory + umask) left at 0755 must be narrowed in
+    // place on upgrade, not rejected forever -- EnsureSecure owns it (the test
+    // process created it), so the chmod succeeds and no exception is thrown.
+    // This test used to assert the opposite (that 0755 was rejected); the
+    // spec calls that out explicitly as the case that must change, not be
+    // deleted -- see EnsureSecureRejectsADirectoryItDoesNotOwnAndCannotNarrow
+    // below for the case that must still throw.
     [Fact]
-    public void EnsureSecureRejectsAPreExistingDirectoryReadableByOthers()
+    public void EnsureSecureNarrowsAPreExistingDirectoryReadableByOthers()
     {
         if (OperatingSystem.IsWindows()) return;
         var target = Path.Combine(_dir, "meowshell");
@@ -60,12 +69,14 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
-        var ex = Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
-        Assert.Contains("group/other", ex.Message);
+        MeowshellHomeDirectory.EnsureSecure(target); // must not throw -- narrowed instead
+
+        var mode = File.GetUnixFileMode(target);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, mode);
     }
 
     [Fact]
-    public void EnsureSecureRejectsAPreExistingDirectoryWritableByGroup()
+    public void EnsureSecureNarrowsAPreExistingDirectoryWritableByGroup()
     {
         if (OperatingSystem.IsWindows()) return;
         var target = Path.Combine(_dir, "meowshell");
@@ -73,7 +84,61 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupWrite);
 
-        Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
+        MeowshellHomeDirectory.EnsureSecure(target); // must not throw -- narrowed instead
+
+        var mode = File.GetUnixFileMode(target);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, mode);
+    }
+
+    // The case narrowing must NOT paper over: a directory this process does
+    // not own (simulated here with chattr +i, which makes chmod fail with
+    // UnauthorizedAccessException the same way owning-someone-else's-directory
+    // would) is still refused, exactly as before Finding 1's fix.
+    [Fact]
+    public void EnsureSecureRejectsADirectoryItDoesNotOwnAndCannotNarrow()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var target = Path.Combine(_dir, "meowshell");
+        Directory.CreateDirectory(target);
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        if (!TrySetImmutable(target, true))
+            return; // sandbox/filesystem doesn't support simulating an unnarrowable directory this way
+
+        try
+        {
+            var ex = Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
+            Assert.Contains("group/other", ex.Message);
+        }
+        finally
+        {
+            TrySetImmutable(target, false); // otherwise Dispose()'s recursive delete fails
+        }
+    }
+
+    // Returns false (rather than throwing) when chattr isn't available or the
+    // underlying filesystem doesn't support the immutable attribute, so the
+    // test above can skip itself instead of failing on an unrelated sandbox
+    // limitation.
+    private static bool TrySetImmutable(string path, bool immutable)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("chattr", $"{(immutable ? "+i" : "-i")} {path}")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+            };
+            using var process = System.Diagnostics.Process.Start(psi);
+            if (process is null) return false;
+            process.WaitForExit();
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     [Fact]
@@ -82,11 +147,20 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         if (OperatingSystem.IsWindows()) return;
         var real = Path.Combine(_dir, "elsewhere");
         Directory.CreateDirectory(real);
+        File.SetUnixFileMode(real, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute); // 0755, same shape as Finding 1
         var target = Path.Combine(_dir, "meowshell");
         Directory.CreateSymbolicLink(target, real);
 
         var ex = Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
         Assert.Contains("symlink", ex.Message);
+
+        // The repair in EnsureSecure must never follow a symlink: it checks
+        // for a reparse point before it ever looks at mode bits, so the link
+        // target's own permissions are left exactly as this test set them.
+        var realMode = File.GetUnixFileMode(real);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute, realMode);
     }
 
     [Fact]
@@ -96,6 +170,35 @@ public sealed class MeowshellHomeDirectoryTests : IDisposable
         File.WriteAllText(target, "not a directory");
 
         Assert.Throws<IOException>(() => MeowshellHomeDirectory.EnsureSecure(target));
+    }
+
+    // Fix 3 (home-directory-upgrade spec, "the exception type is outside the
+    // documented model"): every process-launching entry point calls
+    // EnsureSecureForEntryPoint, not EnsureSecure directly, specifically so a
+    // bad home/working directory surfaces as the one documented failure type
+    // (TailcatException) instead of an undocumented raw IOException that a
+    // caller following ConnectAsync's own <exception> doc would never catch.
+    [Fact]
+    public void EnsureSecureForEntryPointWrapsTheIOExceptionInATailcatException()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var real = Path.Combine(_dir, "elsewhere");
+        Directory.CreateDirectory(real);
+        var target = Path.Combine(_dir, "meowshell");
+        Directory.CreateSymbolicLink(target, real); // deterministic, ownership-independent way to hit EnsureSecure's IOException
+
+        var ex = Assert.Throws<TailcatException>(() => MeowshellHomeDirectory.EnsureSecureForEntryPoint(target));
+        Assert.Equal(MeowshellErrorCode.HomeDirectoryUnsafe, ex.Code);
+        Assert.Contains("symlink", ex.Message);
+    }
+
+    [Fact]
+    public void EnsureSecureForEntryPointStillAcceptsAPrivateDirectory()
+    {
+        var target = Path.Combine(_dir, "meowshell");
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(target); // must not throw
+
+        Assert.True(Directory.Exists(target));
     }
 
     [Fact]

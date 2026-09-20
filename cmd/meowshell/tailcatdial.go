@@ -44,6 +44,15 @@ func (c *tailcatForwardClient) PathStatus() (agentPathStatus, bool) {
 	}, true
 }
 
+// RelayHealth satisfies agentHealthStatusSource the same way PathStatus above
+// satisfies agentPathStatusSource: a thin pass-through to the live
+// tailcat.Client so reportTailcatRelayHealth can poll the exact in-process
+// client the SSH transport and forwarding both already share (agentCmd's
+// session.tailcatPathSource, mirrored by session.tailcatHealthSource).
+func (c *tailcatForwardClient) RelayHealth() (string, bool) {
+	return c.cl.RelayHealth()
+}
+
 func (c *tailcatForwardClient) ProbePath(ctx context.Context) (agentPathStatus, bool) {
 	result, err := c.cl.DiscoPing(ctx)
 	if err != nil || result == nil {

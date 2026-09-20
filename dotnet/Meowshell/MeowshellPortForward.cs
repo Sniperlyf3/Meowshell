@@ -49,6 +49,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
     /// <summary>Starts forwarding.</summary>
     /// <exception cref="ArgumentException">No mappings were given.</exception>
     /// <exception cref="FileNotFoundException">A native binary is missing.</exception>
+    /// <exception cref="TailcatException"><see cref="TailcatOptions.HomeDirectory"/> is not private and could not be narrowed; <see cref="TailcatException.Code"/> is <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>.</exception>
     public static async Task<MeowshellPortForward> StartAsync(
         MeowshellPortForwardOptions options, Action<string>? onLog = null,
         CancellationToken cancellationToken = default)
@@ -61,7 +62,7 @@ public sealed class MeowshellPortForward : IAsyncDisposable
         TimeSpanValidation.EnsurePositiveAndBounded(options.GracePeriod, nameof(options.GracePeriod));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
 
         var psi = new ProcessStartInfo
         {

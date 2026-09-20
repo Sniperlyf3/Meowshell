@@ -65,6 +65,7 @@ public sealed class MeowshellMoshConnection : IAsyncDisposable
     /// Authenticates to <paramref name="destination"/> over SSH, starts
     /// <c>mosh-server</c> there, then switches to Mosh's UDP transport.
     /// </summary>
+    /// <exception cref="TailcatException"><see cref="TailcatOptions.HomeDirectory"/> is not private and could not be narrowed, before any process starts; <see cref="TailcatException.Code"/> is <see cref="MeowshellErrorCode.HomeDirectoryUnsafe"/>.</exception>
     public static async Task<MeowshellMoshConnection> ConnectAsync(
         TailcatClientOptions options,
         string destination,
@@ -80,7 +81,7 @@ public sealed class MeowshellMoshConnection : IAsyncDisposable
         TimeSpanValidation.EnsurePositiveAndBounded(options.Timeout, nameof(options.Timeout));
 
         var (meowshell, tailcat) = MeowshellBinaries.Locate(options.BinaryDirectory, options.Naming);
-        MeowshellHomeDirectory.EnsureSecure(options.HomeDirectory);
+        MeowshellHomeDirectory.EnsureSecureForEntryPoint(options.HomeDirectory);
         var psi = new ProcessStartInfo(meowshell)
         {
             WorkingDirectory = options.HomeDirectory,

@@ -239,18 +239,27 @@ func serveMoshFrames(agent *agentSession, runtime *moshAgentRuntime) error {
 				agent.deliverPromptResponse(msg)
 				continue
 			}
+			// close_channel must end the session even if the Mosh client
+			// doesn't exist yet: this frame is how DisposeAsync tells the
+			// agent to stop, and it can arrive during the SSH bootstrap or
+			// the mosh-server dial, before setClient has ever run. Gating
+			// it behind "a client exists" (as it used to be, alongside
+			// resize below) silently dropped a cancellation sent in that
+			// window instead of ending the session -- serveMoshFrames just
+			// kept reading, relying on the client's stdin eventually
+			// closing some other way to notice at all.
+			if msg.Msg == "close_channel" {
+				runtime.close()
+				return nil
+			}
 			client := runtime.getClient()
 			if client == nil {
 				continue
 			}
-			switch msg.Msg {
-			case "resize":
+			if msg.Msg == "resize" {
 				if msg.Cols > 0 && msg.Rows > 0 && msg.Cols <= 65535 && msg.Rows <= 65535 {
 					client.Resize(uint16(msg.Cols), uint16(msg.Rows))
 				}
-			case "close_channel":
-				runtime.close()
-				return nil
 			}
 		default:
 			return fmt.Errorf("unknown Mosh frame type %d", frame.Type)

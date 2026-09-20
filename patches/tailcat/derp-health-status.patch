@@ -1,0 +1,129 @@
+diff --git a/build-tags.txt b/build-tags.txt
+--- a/build-tags.txt
++++ b/build-tags.txt
+@@ -1 +1 @@
+-ts_omit_ace,ts_omit_acme,ts_omit_advertiseexitnode,ts_omit_advertiseroutes,ts_omit_appconnectors,ts_omit_aws,ts_omit_bird,ts_omit_cachenetmap,ts_omit_captiveportal,ts_omit_capture,ts_omit_cliconndiag,ts_omit_clientmetrics,ts_omit_clientupdate,ts_omit_cloud,ts_omit_colorable,ts_omit_completion,ts_omit_completion_scripts,ts_omit_conn25,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_dns,ts_omit_doctor,ts_omit_drive,ts_omit_favorites,ts_omit_flashappliance,ts_omit_health,ts_omit_hujsonconf,ts_omit_identityfederation,ts_omit_ipnbus,ts_omit_iptables,ts_omit_kube,ts_omit_linkspeed,ts_omit_linuxdnsfight,ts_omit_listenrawdisco,ts_omit_logtail,ts_omit_netlog,ts_omit_networkmanager,ts_omit_oauthkey,ts_omit_osrouter,ts_omit_outboundproxy,ts_omit_peerapiclient,ts_omit_peerapiserver,ts_omit_portlist,ts_omit_portmapper,ts_omit_posture,ts_omit_qrcodes,ts_omit_relayserver,ts_omit_remoteconfig,ts_omit_resolved,ts_omit_routecheck,ts_omit_runtimemetrics,ts_omit_sdnotify,ts_omit_serve,ts_omit_serviceclientprefs,ts_omit_synology,ts_omit_syslog,ts_omit_syspolicy,ts_omit_systray,ts_omit_taildrop,ts_omit_tailnetlock,ts_omit_tap,ts_omit_tpm,ts_omit_tundevstats,ts_omit_unixsocketidentity,ts_omit_useexitnode,ts_omit_useproxy,ts_omit_usermetrics,ts_omit_useroutes,ts_omit_wakeonlan,ts_omit_webbrowser,ts_omit_webclient
++ts_omit_ace,ts_omit_acme,ts_omit_advertiseexitnode,ts_omit_advertiseroutes,ts_omit_appconnectors,ts_omit_aws,ts_omit_bird,ts_omit_cachenetmap,ts_omit_captiveportal,ts_omit_capture,ts_omit_cliconndiag,ts_omit_clientmetrics,ts_omit_clientupdate,ts_omit_cloud,ts_omit_colorable,ts_omit_completion,ts_omit_completion_scripts,ts_omit_conn25,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_dns,ts_omit_doctor,ts_omit_drive,ts_omit_favorites,ts_omit_flashappliance,ts_omit_hujsonconf,ts_omit_identityfederation,ts_omit_ipnbus,ts_omit_iptables,ts_omit_kube,ts_omit_linkspeed,ts_omit_linuxdnsfight,ts_omit_listenrawdisco,ts_omit_logtail,ts_omit_netlog,ts_omit_networkmanager,ts_omit_oauthkey,ts_omit_osrouter,ts_omit_outboundproxy,ts_omit_peerapiclient,ts_omit_peerapiserver,ts_omit_portlist,ts_omit_portmapper,ts_omit_posture,ts_omit_qrcodes,ts_omit_relayserver,ts_omit_remoteconfig,ts_omit_resolved,ts_omit_routecheck,ts_omit_runtimemetrics,ts_omit_sdnotify,ts_omit_serve,ts_omit_serviceclientprefs,ts_omit_synology,ts_omit_syslog,ts_omit_syspolicy,ts_omit_systray,ts_omit_taildrop,ts_omit_tailnetlock,ts_omit_tap,ts_omit_tpm,ts_omit_tundevstats,ts_omit_unixsocketidentity,ts_omit_useexitnode,ts_omit_useproxy,ts_omit_usermetrics,ts_omit_useroutes,ts_omit_wakeonlan,ts_omit_webbrowser,ts_omit_webclient
+diff --git a/tailcat.go b/tailcat.go
+--- a/tailcat.go
++++ b/tailcat.go
+@@ -2045,6 +2045,64 @@ func (c *Client) PathStatus() (_ PathStatus, ok bool) {
+ 	}, true
+ }
+ 
++// derpRegionIssueSeparator is the fixed substring between a DERP region's
++// number and the actual problem text in tailscale.com/health's
++// derpRegionErrorWarnable template ("The relay server #%v is reporting an
++// issue: %v"). See RelayHealth for why matching this literal template is
++// the only way to recover that raw text.
++const derpRegionIssueSeparator = " is reporting an issue: "
++
++// derpRelayHealthProblem picks the DERP-region-health entry out of an
++// ipnstate.Status.Health slice (which also carries unrelated warnings --
++// NAT traversal, magicsock receive funcs, control-plane messages, etc. --
++// that must not be mistaken for a relay problem) and returns its raw problem
++// text. Split out from RelayHealth so the parsing itself is testable against
++// literal health.Tracker output, without a live client/engine.
++func derpRelayHealthProblem(health []string) (problem string, ok bool) {
++	for _, s := range health {
++		if _, after, found := strings.Cut(s, derpRegionIssueSeparator); found {
++			return after, true
++		}
++	}
++	return "", false
++}
++
++// RelayHealth reports the current DERP relay health problem for this
++// client's live connection, if any -- e.g. a managed relay's admission
++// refusal reason (an over-quota derp.FrameHealth arriving as
++// derp.HealthMessage). ok is false before the client has started, or when
++// magicsock has not recorded a health problem for any DERP region right now.
++// An ok true with an empty problem never happens: absence of a problem is
++// always ok=false, exactly like PathStatus's "unknown" contract.
++//
++// tailscale.com/health exposes DERP region health only through its already
++// user-facing, Warnable-templated Strings() (surfaced here via the same
++// c.lb.Status() call PathStatus already makes) -- never as the bare
++// derp.HealthMessage.Problem text a magicsock derp read loop records via
++// SetDERPRegionHealth. There is no raw getter, so derpRelayHealthProblem
++// parses that one known template; TestDerpRelayHealthProblemExtractsRawText
++// pins the exact separator so a future tailscale.com wording change breaks
++// this loudly instead of silently dropping the reason text.
++//
++// This also depends on the "ts_omit_health" build tag being off (dropped
++// from build-tags.txt by this same patch): with it set,
++// tailscale.com/feature/buildfeatures.HasHealth is a compile-time false,
++// health.Tracker's own nil() reports true unconditionally, and
++// SetDERPRegionHealth becomes a permanent no-op -- so a real health problem
++// would never reach st.Health at all, no matter how this method is written.
++func (c *Client) RelayHealth() (problem string, ok bool) {
++	c.startMu.Lock()
++	defer c.startMu.Unlock()
++	if !c.started || c.lb == nil {
++		return "", false
++	}
++	st := c.lb.Status()
++	if st == nil {
++		return "", false
++	}
++	return derpRelayHealthProblem(st.Health)
++}
++
+ // Close shuts down the client, closing the WireGuard engine and DERP connections.
+ func (c *Client) Close() error {
+ 	c.startMu.Lock()
+diff --git a/tailcat_derp_health_test.go b/tailcat_derp_health_test.go
+new file mode 100644
+--- /dev/null
++++ b/tailcat_derp_health_test.go
+@@ -0,0 +1,50 @@
++package tailcat
++
++import "testing"
++
++func TestClientRelayHealthBeforeStartIsUnknown(t *testing.T) {
++	c := NewClient("tc-invalid-is-fine-until-start")
++	if got, ok := c.RelayHealth(); ok || got != "" {
++		t.Fatalf("RelayHealth before start = %q, %v; want empty, false", got, ok)
++	}
++}
++
++// TestDerpRelayHealthProblemExtractsRawText pins tailscale.com/health's
++// derpRegionErrorWarnable template literally. If this ever fails after an
++// upstream bump, the wording changed and derpRelayHealthProblem's separator
++// needs updating -- silently returning ok=false forever (as it would if this
++// test didn't exist) would drop every relay health notification without any
++// build failure to say so.
++func TestDerpRelayHealthProblemExtractsRawText(t *testing.T) {
++	health := []string{
++		"NAT traversal setup failure: Tailscale couldn't listen for incoming UDP connections.",
++		"The relay server #2 is reporting an issue: MeowSSH managed relay: monthly usage allowance exceeded",
++	}
++	problem, ok := derpRelayHealthProblem(health)
++	if !ok {
++		t.Fatalf("derpRelayHealthProblem(%v) ok = false, want true", health)
++	}
++	want := "MeowSSH managed relay: monthly usage allowance exceeded"
++	if problem != want {
++		t.Fatalf("derpRelayHealthProblem(%v) = %q, want %q", health, problem, want)
++	}
++}
++
++func TestDerpRelayHealthProblemIgnoresUnrelatedWarnings(t *testing.T) {
++	health := []string{
++		"Tailscale couldn't listen for incoming UDP connections.",
++		"Tailscale hasn't heard from the control plane in a while.",
++	}
++	if problem, ok := derpRelayHealthProblem(health); ok {
++		t.Fatalf("derpRelayHealthProblem(%v) = %q, true; want false for warnings unrelated to DERP region health", health, problem)
++	}
++}
++
++func TestDerpRelayHealthProblemEmptyWhenHealthy(t *testing.T) {
++	if problem, ok := derpRelayHealthProblem(nil); ok {
++		t.Fatalf("derpRelayHealthProblem(nil) = %q, true; want false", problem)
++	}
++	if problem, ok := derpRelayHealthProblem([]string{}); ok {
++		t.Fatalf("derpRelayHealthProblem([]) = %q, true; want false", problem)
++	}
++}

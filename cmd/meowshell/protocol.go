@@ -104,6 +104,15 @@ type controlMessage struct {
 	RelayedBytesSent uint64 `json:"relayed_bytes_sent,omitempty"`
 	RelayedBytesRecv uint64 `json:"relayed_bytes_recv,omitempty"`
 
+	// RelayProblem is present only on "relay_health" control messages: the
+	// managed relay's own DERP health text (e.g. an over-quota admission
+	// refusal), taken verbatim from tailcat.Client.RelayHealth. Unlike
+	// Direct, this needs no separate presence flag -- omitted/empty means
+	// healthy either way, whether that is because nothing was ever wrong or
+	// because a previously reported problem just cleared, and a receiver
+	// does not need to tell those two apart.
+	RelayProblem string `json:"relay_problem,omitempty"`
+
 	Kind    string   `json:"kind,omitempty"`
 	Command []string `json:"command,omitempty"`
 	Pty     *bool    `json:"pty,omitempty"`

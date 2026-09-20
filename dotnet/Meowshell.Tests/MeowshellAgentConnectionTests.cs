@@ -164,6 +164,70 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         Assert.Equal(final, connection.CurrentPath);
     }
 
+    /// <summary>
+    /// Mirrors LiveTailcatPathUpdatesAreExposedWithoutCreatingASecondConnection
+    /// for the managed-relay health signal: proves both that a problem is
+    /// observed and that clearing it is too, not just whichever state
+    /// happens to be current when the test looks.
+    /// </summary>
+    [Fact]
+    public async Task RelayHealthUpdatesAreExposedOnTheSameConnection()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var updates = new List<string?>();
+        var cleared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (await ConnectToFakeAgentAsync("relay-health-updates", connection =>
+        {
+            connection.RelayHealthChanged += problem =>
+            {
+                lock (updates) updates.Add(problem);
+                if (problem is null) cleared.TrySetResult();
+            };
+        }) is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await cleared.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        string?[] observed;
+        lock (updates) observed = [.. updates];
+        Assert.Contains(observed, p => p == "MeowSSH managed relay: monthly usage allowance exceeded");
+        Assert.Contains(observed, p => p is null);
+        Assert.Null(connection.CurrentRelayHealth);
+    }
+
+    /// <summary>
+    /// Regression test for the exact failure mode named in this project's own
+    /// notes on PR #52: an asynchronous control message (there, "path"; here,
+    /// "relay_health") landing on the shared stream between an open_channel
+    /// request and its channel_opened reply must not be mistaken for that
+    /// reply, or otherwise stop the pending open from ever completing.
+    /// e2e/fakeagent's relayHealthRaceDestination writes the interleaved
+    /// frame deterministically (before its usual openDelay), so this fails
+    /// on every run if HandleControlAsync's dispatch ever regresses to
+    /// "the next control frame must be the reply", instead of only on
+    /// whichever run happens to lose the timing race.
+    /// </summary>
+    [Fact]
+    public async Task RelayHealthArrivingMidOpenChannelDoesNotBreakReplyCorrelation()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        string? observed = null;
+        var reported = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (await ConnectToFakeAgentAsync("relay-health-race", connection =>
+        {
+            connection.RelayHealthChanged += problem => { observed = problem; reported.TrySetResult(); };
+        }) is not var (connection, _)) return;
+        await using var _ = connection;
+
+        await using var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80")
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        await reported.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("MeowSSH managed relay: monthly usage allowance exceeded", observed);
+    }
+
     /// <summary>Polls a fake-agent results file for a line, up to a bound generous enough that a miss means the line is never coming, not that this ran on a slow machine.</summary>
     private static async Task<bool> WaitForResultAsync(string resultsPath, string marker, TimeSpan timeout)
     {
