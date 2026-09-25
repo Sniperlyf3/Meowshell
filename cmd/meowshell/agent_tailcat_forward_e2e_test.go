@@ -13,8 +13,8 @@ import (
 )
 
 func TestAgentForwardsThroughTailcatDestination(t *testing.T) {
-	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat_linux_amd64")
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))

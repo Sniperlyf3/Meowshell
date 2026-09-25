@@ -11,7 +11,7 @@ import (
 )
 
 func TestAgentRejectsNonLoopbackBindByDefault(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	addr, _, _ := startTestSSHServer(t, echoCommandHandler)
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
@@ -63,7 +63,7 @@ func TestAgentUnixSocketForward(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("unix domain sockets aren't this test's concern on Windows")
 	}
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -122,7 +122,7 @@ func TestAgentUnixSocketForward(t *testing.T) {
 }
 
 func TestAgentSocksAuthToken(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -207,7 +207,7 @@ func TestAgentSocksAuthToken(t *testing.T) {
 }
 
 func TestAgentConfigureCarriesProxyURL(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	addr, _, _ := startTestSSHServer(t, echoCommandHandler)
 
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")

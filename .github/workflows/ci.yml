@@ -97,13 +97,14 @@ jobs:
 
       # Run the agent E2E suite only after the real binaries exist; the
       # earlier go test step intentionally runs before ./build.sh and those
-      # tests skip when dist/ is absent.
+      # tests skip when dist/ is absent. The wrapper fails the step if any
+      # of them still skipped for a missing binary, or none ran at all.
       - name: End-to-end test the agent against the binaries just built
         env:
           GOTOOLCHAIN: local
           MEOWSHELL: ${{ github.workspace }}/dist/meowshell_linux_amd64
           TAILCAT: ${{ github.workspace }}/dist/tailcat_linux_amd64
-        run: go test ./cmd/meowshell/ -count=1
+        run: ./e2e/require-agent-e2e-ran.sh go test -v ./cmd/meowshell/ -count=1
 
       - name: Scan the patched tailcat build input for known vulnerabilities
         env:
@@ -244,7 +245,9 @@ jobs:
   windows-e2e:
     needs: build
     runs-on: windows-latest
-    timeout-minutes: 15
+    # Was 15 before this job also ran the Go agent E2E suite, which recompiles
+    # and reruns cmd/meowshell's tests on top of the vet/test step.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -287,7 +290,8 @@ jobs:
       # validation, N9) only builds and runs under GOOS=windows, so it never
       # gets exercised by the "build" job's own go vet/go test, which run on
       # ubuntu-latest -- this is the only place in CI a real Windows host
-      # actually type-checks and runs that code.
+      # actually type-checks and runs that code. The agent E2E tests skip
+      # here, since the binaries are not fetched yet; they run further down.
       - name: Vet and test meowshell on Windows
         shell: bash
         env:
@@ -323,6 +327,24 @@ jobs:
         with:
           name: tailcat-binaries
           path: ${{ runner.temp }}/meowshell-dist
+
+      # The same agent E2E suite the "build" job runs after ./build.sh, here
+      # against the Windows binaries it built. Until this step existed the
+      # suite only ever ran in the vet/test step above, with no binaries and
+      # a fallback that only knew linux_amd64, so all of it skipped and the
+      # job went green. MEOWSHELL/TAILCAT stay explicit so a broken binary
+      # fails rather than skips; the wrapper fails the step if anything
+      # still skipped for a missing binary. Before the DERP relay step on
+      # purpose: that exports TAILCAT_DERPMAP_URL for later steps, and these
+      # tests run their servers in TS_DEBUG_TAILCAT_LOCAL_DERP mode instead,
+      # exactly as they do in the "build" job, which never sets it.
+      - name: End-to-end test the agent against the Windows binaries
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          MEOWSHELL: ${{ runner.temp }}\meowshell-dist\meowshell_windows_amd64.exe
+          TAILCAT: ${{ runner.temp }}\meowshell-dist\tailcat_windows_amd64.exe
+        run: ./e2e/require-agent-e2e-ran.sh go test -v ./cmd/meowshell/ -count=1
 
       - name: Start a local DERP relay for the E2E tests
         shell: pwsh

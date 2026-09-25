@@ -26,7 +26,7 @@ import (
 // keeps working normally afterward (a real exec command run against it still
 // completes and returns its output).
 func TestNonTerminalErrorDoesNotEndTheChannel(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	addr, _, stop := startTestSSHServer(t, echoCommandHandler)
 	defer stop()
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
@@ -69,7 +69,7 @@ func TestNonTerminalErrorDoesNotEndTheChannel(t *testing.T) {
 }
 
 func TestAgentTCPEndToEnd(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	addr, hostKey1, stopServer1 := startTestSSHServer(t, echoCommandHandler)
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
@@ -139,7 +139,7 @@ func TestAgentTCPEndToEnd(t *testing.T) {
 // nothing was listening to (what MeowshellAgentConnection sends when no
 // HostKeyPromptRequested handler is attached).
 func TestUnknownHostKeyIsReportedAsHostKeyUnknown(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	addr, _, stopServer := startTestSSHServer(t, echoCommandHandler)
 	defer stopServer()
 
@@ -191,7 +191,7 @@ func TestUnknownHostKeyIsReportedAsHostKeyUnknown(t *testing.T) {
 // unwind a "successfully opened" channel for. A server that rejects the
 // exec request lets the test trigger that failure deterministically.
 func TestOpenShellChannelReportsOpenFailureNotChannelOpenedThenError(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	addr, stop := startTestSSHServerRejectingSessionStart(t)
 	defer stop()
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
@@ -309,7 +309,7 @@ func startTestSSHServerRejectingSessionStart(t *testing.T) (addr string, stop fu
 // ordinary exec channel opened right after it must still succeed promptly
 // rather than wait on the first.
 func TestOpenChannelDoesNotBlockOtherChannels(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	const stuckCommand = "stuck"
 	addr, stop := startTestSSHServerHangingOnExecCommand(t, stuckCommand)
 	defer stop()
