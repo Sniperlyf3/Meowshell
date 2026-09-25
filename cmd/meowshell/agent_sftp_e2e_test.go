@@ -7,9 +7,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+// servedFileMode is the permission bits a server on this platform reports
+// for a file chmod-ed to mode. Windows has no Unix permissions: Go's
+// os.Chmod there sets or clears only the read-only attribute, from the owner
+// write bit, and os.Stat reports 0666 or 0444. Expecting 0640 back failed
+// the first time these tests ran on Windows; the exact bits are the Linux
+// job's to check.
+func servedFileMode(mode uint32) uint32 {
+	if runtime.GOOS != "windows" {
+		return mode
+	}
+	if mode&0o200 != 0 {
+		return 0o666
+	}
+	return 0o444
+}
 
 func TestAgentSFTPEndToEnd(t *testing.T) {
 	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat")
@@ -46,8 +63,8 @@ func TestAgentSFTPEndToEnd(t *testing.T) {
 
 		sftpOp(t, stdin, out, controlMessage{Op: "chmod", Path: "adir/file.txt", Mode: 0o640})
 		stat = sftpOp(t, stdin, out, controlMessage{Op: "stat", Path: "adir/file.txt"})
-		if got := stat.Entries[0].Mode & 0o777; got != 0o640 {
-			t.Errorf("mode after chmod = %o, want 0640", got)
+		if got, want := stat.Entries[0].Mode&0o777, servedFileMode(0o640); got != want {
+			t.Errorf("mode after chmod = %o, want %o", got, want)
 		}
 
 		sftpOp(t, stdin, out, controlMessage{Op: "rename", Path: "adir/file.txt", NewPath: "adir/renamed.txt"})
@@ -71,8 +88,8 @@ func TestAgentSFTPEndToEnd(t *testing.T) {
 		if len(stat.Entries) != 1 {
 			t.Fatalf("stat = %+v", stat.Entries)
 		}
-		if got := stat.Entries[0].Mode & 0o777; got != 0o600 {
-			t.Errorf("preserved mode = %o, want 0600", got)
+		if got, want := stat.Entries[0].Mode&0o777, servedFileMode(0o600); got != want {
+			t.Errorf("preserved mode = %o, want %o", got, want)
 		}
 		if got := stat.Entries[0].ModTime; got != mtime.Unix() {
 			t.Errorf("preserved mtime = %d, want %d", got, mtime.Unix())

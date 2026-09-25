@@ -62,7 +62,15 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 
 	t.Run("exec channel with a nonzero exit reports it as a structured value", func(t *testing.T) {
-		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: []string{"sh", "-c", "'exit 42'"}})
+		// The server runs an exec command through its user's shell: sh on
+		// Unix, but `pwsh -Command` on Windows, which turns a failing native
+		// command's exit code into 1 -- so `sh -c 'exit 42'` read back 1
+		// there. `exit 42` is what each shell itself exits 42 on.
+		command := []string{"sh", "-c", "'exit 42'"}
+		if runtime.GOOS == "windows" {
+			command = []string{"exit", "42"}
+		}
+		send(t, stdin, 0, controlMessage{Msg: "open_channel", Kind: "exec", Command: command})
 		id := expectChannelOpened(t, out)
 
 		exitCode := readExitOnly(t, out, id)
@@ -78,14 +86,19 @@ func TestAgentEndToEnd(t *testing.T) {
 
 		send(t, stdin, id, controlMessage{Msg: "resize", Cols: 120, Rows: 40})
 
-		mustWriteFrame(t, stdin, frame{Type: frameTypeData, ChannelID: id, Payload: []byte("echo shell-marker-e2e\n")})
+		// Enter is \r, as a real terminal (and the app's xterm.js) sends it.
+		// A Unix pty turns it into \n, which is why \n used to work here; the
+		// Windows server's ConPTY does not, and PowerShell took \n as
+		// Ctrl+Enter -- a new line, never a submitted command -- so "exit"
+		// sat unrun until the frame read timed out.
+		mustWriteFrame(t, stdin, frame{Type: frameTypeData, ChannelID: id, Payload: []byte("echo shell-marker-e2e\r")})
 
 		got := readUntil(t, out, id, "shell-marker-e2e", 20*time.Second)
 		if !bytes.Contains(got, []byte("shell-marker-e2e")) {
 			t.Errorf("shell output = %q, want it to contain the echoed marker", got)
 		}
 
-		mustWriteFrame(t, stdin, frame{Type: frameTypeData, ChannelID: id, Payload: []byte("exit\n")})
+		mustWriteFrame(t, stdin, frame{Type: frameTypeData, ChannelID: id, Payload: []byte("exit\r")})
 		readUntilExit(t, out, id)
 	})
 }
