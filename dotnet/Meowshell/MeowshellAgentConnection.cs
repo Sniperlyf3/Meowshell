@@ -991,13 +991,29 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
 
     private readonly IAgentChannelSink _inner;
     private readonly Action? _onBackpressure;
+    // Bounded by bytes, not by item count. It used to be a 32-item channel,
+    // which a burst of small PTY output frames (a prompt redraw, a
+    // line-at-a-time command) filled before the pump caught up, failing a
+    // perfectly healthy shell with "not being consumed fast enough" -- seen on
+    // the Android emulator, where the probe's SSH session died that way while
+    // the same commit passed on the next run. What the bound is for is memory
+    // held for a consumer that has stopped, so it counts payload bytes; the
+    // item cap only stops a flood of empty frames growing the queue's own
+    // overhead without limit.
+    internal const long MaxQueuedBytes = 4 << 20;
+    internal const int MaxQueuedItems = 16 * 1024;
+
     private readonly System.Threading.Channels.Channel<QueueItem> _queue =
-        System.Threading.Channels.Channel.CreateBounded<QueueItem>(new System.Threading.Channels.BoundedChannelOptions(32)
+        System.Threading.Channels.Channel.CreateUnbounded<QueueItem>(new System.Threading.Channels.UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = true,
-            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,
         });
+    // Written by the read loop on enqueue and by RunAsync after delivery, so
+    // Interlocked; together they are what the unbounded channel no longer
+    // enforces itself.
+    private long _queuedBytes;
+    private int _queuedItems;
     private readonly Task _pumpTask;
 
     // Touched only from OnDataAsync/OnControlAsync, which the read loop
@@ -1019,14 +1035,24 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         {
             await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                if (item.IsData)
+                try
                 {
-                    try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
-                    catch { }
+                    if (item.IsData)
+                    {
+                        try { await _inner.OnDataAsync(item.Stream, item.Data).ConfigureAwait(false); }
+                        catch { }
+                    }
+                    else
+                    {
+                        await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
+                    }
                 }
-                else
+                finally
                 {
-                    await _inner.OnControlAsync(item.Control!).ConfigureAwait(false);
+                    // Released only once delivered, not when dequeued: the item
+                    // being handed to a stalled sink is still held in memory.
+                    Interlocked.Add(ref _queuedBytes, -item.Data.Length);
+                    Interlocked.Decrement(ref _queuedItems);
                 }
             }
         }
@@ -1045,7 +1071,7 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
     }
 
     // N1: OnDataAsync/OnControlAsync used to await the bounded queue's own
-    // WriteAsync, which blocks once the queue is full (32 items) until this
+    // WriteAsync, which blocked once the queue was full (then 32 items) until this
     // channel's own RunAsync pump has drained some of it. That awaited
     // WriteAsync ran directly inside RunReadLoopAsync's single shared frame
     // loop (via HandleDataAsync/HandleControlAsync), so one channel whose
@@ -1086,7 +1112,24 @@ internal sealed class AgentChannelDataPump : IAgentChannelSink
         return Task.CompletedTask;
     }
 
-    private bool TryEnqueue(QueueItem item) => !_failed && _queue.Writer.TryWrite(item);
+    private bool TryEnqueue(QueueItem item)
+    {
+        if (_failed) return false;
+        var bytes = Interlocked.Read(ref _queuedBytes);
+        var items = Volatile.Read(ref _queuedItems);
+        // An empty queue always takes the item, whatever its size: a single
+        // frame bigger than the limit is not a stalled consumer, and refusing
+        // it would fail a channel that has nothing backed up at all.
+        if (items > 0 && (bytes + item.Data.Length > MaxQueuedBytes || items >= MaxQueuedItems))
+            return false;
+        Interlocked.Add(ref _queuedBytes, item.Data.Length);
+        Interlocked.Increment(ref _queuedItems);
+        if (_queue.Writer.TryWrite(item)) return true;
+        // Completed (the channel already ended): nothing was queued.
+        Interlocked.Add(ref _queuedBytes, -item.Data.Length);
+        Interlocked.Decrement(ref _queuedItems);
+        return false;
+    }
 
     private void FailBackpressure()
     {

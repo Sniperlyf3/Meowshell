@@ -623,11 +623,13 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
         await pump.OnDataAsync(0, new byte[] { 1 });
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        // Fill its 32-entry bounded queue, then overflow it. Every producer
-        // call must return synchronously; the overflow faults only this
-        // channel and asks the owner to close the remote side.
-        for (var i = 0; i < 40; i++)
-            await pump.OnDataAsync(0, new byte[] { 2 });
+        // Fill its queue past the byte limit with the agent's largest frames,
+        // then overflow it. Every producer call must return synchronously;
+        // the overflow faults only this channel and asks the owner to close
+        // the remote side.
+        var chunk = new byte[32 * 1024];
+        for (var i = 0; i < AgentChannelDataPump.MaxQueuedBytes / chunk.Length + 8; i++)
+            await pump.OnDataAsync(0, chunk);
 
         await backpressure.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(1, Volatile.Read(ref callbackCount));
