@@ -193,12 +193,15 @@ public sealed class AgentChannelDataPumpTests
         var sink = new StallingSink();
         var pump = new AgentChannelDataPump(sink);
 
+        // 32 KiB is the Go agent's read size, so its largest data frame; 200
+        // of them is 6.25 MiB, past the queue's byte limit.
         const int attempts = 200;
+        var chunk = new byte[32 * 1024];
         var maxCallDuration = TimeSpan.Zero;
         for (var i = 0; i < attempts; i++)
         {
             var sw = Stopwatch.StartNew();
-            await pump.OnDataAsync(0, new byte[] { 1, 2, 3 }).WaitAsync(TimeSpan.FromSeconds(2));
+            await pump.OnDataAsync(0, chunk).WaitAsync(TimeSpan.FromSeconds(2));
             sw.Stop();
             if (sw.Elapsed > maxCallDuration) maxCallDuration = sw.Elapsed;
         }
@@ -206,10 +209,10 @@ public sealed class AgentChannelDataPumpTests
         Assert.True(maxCallDuration < TimeSpan.FromSeconds(1),
             $"a single OnDataAsync call took {maxCallDuration}, want it to never block on the stalled inner sink");
 
-        // The bounded queue (32 items) can only ever absorb so much while
-        // its one consumer is permanently stuck on the first item -- well
-        // under the 200 fed above, so backpressure must have kicked in and
-        // failed this channel by now.
+        // The queue can only ever absorb so much while its one consumer is
+        // permanently stuck on the first item -- well under what was fed
+        // above, so backpressure must have kicked in and failed this channel
+        // by now.
         Assert.NotNull(sink.Faulted);
         Assert.Contains("not being consumed fast enough", sink.Faulted!.Message);
     }
@@ -226,7 +229,7 @@ public sealed class AgentChannelDataPumpTests
         // Saturate the queue with data first, the same way the data-only
         // test does, so a subsequent control message actually lands on a
         // full queue instead of just sailing through.
-        for (var i = 0; i < 64; i++)
+        for (var i = 0; i < AgentChannelDataPump.MaxQueuedItems + 1; i++)
         {
             await pump.OnDataAsync(0, new byte[] { 1 }).WaitAsync(TimeSpan.FromSeconds(2));
         }
@@ -234,6 +237,72 @@ public sealed class AgentChannelDataPumpTests
         await pump.OnControlAsync(new AgentMessage { Msg = "exit_status" }).WaitAsync(TimeSpan.FromSeconds(2));
 
         Assert.NotNull(sink.Faulted);
+    }
+
+    // Regression test: the queue used to hold 32 items, whatever their size,
+    // so a burst of small PTY output frames arriving faster than the pump
+    // delivered them -- a prompt redraw, a line-at-a-time command -- failed a
+    // healthy shell with "not being consumed fast enough". The Android probe's
+    // SSH session died that way on the emulator, on a commit whose next run
+    // passed. A few thousand tiny frames are a few kilobytes: nothing a
+    // consumer that has merely fallen behind should be failed for, so none
+    // of them may fault the channel even though this sink never returns.
+    [Fact]
+    public async Task ABurstOfSmallFramesDoesNotFaultAChannelThatHasOnlyFallenBehind()
+    {
+        var sink = new StallingSink();
+        var pump = new AgentChannelDataPump(sink);
+
+        for (var i = 0; i < 4096; i++)
+            await pump.OnDataAsync(0, new byte[] { (byte)'x', (byte)'\r', (byte)'\n' }).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Null(sink.Faulted);
+    }
+
+    // The limit is on what is queued, not on what a channel ever carries:
+    // bytes are released once delivered. Without that, every shell would be
+    // failed after its first 4 MiB of output, however fast it was read.
+    [Fact]
+    public async Task AConsumerThatKeepsUpCanReceiveFarMoreThanTheLimitInTotal()
+    {
+        var delivered = System.Threading.Channels.Channel.CreateUnbounded<int>();
+        Exception? faulted = null;
+        var sink = new DelegatingSink(
+            onData: (stream, data) => { delivered.Writer.TryWrite(data.Length); return Task.CompletedTask; },
+            onFault: ex => faulted = ex);
+        var pump = new AgentChannelDataPump(sink);
+
+        var chunk = new byte[32 * 1024];
+        var rounds = (int)(3 * AgentChannelDataPump.MaxQueuedBytes / chunk.Length);
+        for (var i = 0; i < rounds; i++)
+        {
+            await pump.OnDataAsync(0, chunk).WaitAsync(TimeSpan.FromSeconds(2));
+            // Wait for delivery so the queue never actually backs up: what is
+            // under test is the running total, not a burst.
+            await delivered.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Null(faulted);
+    }
+
+    // A single frame larger than the byte limit is not a stalled consumer:
+    // with nothing queued ahead of it, it must be taken rather than fail a
+    // channel that has nothing backed up at all.
+    [Fact]
+    public async Task AFrameLargerThanTheLimitIsAcceptedIntoAnEmptyQueue()
+    {
+        var received = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Exception? faulted = null;
+        var sink = new DelegatingSink(
+            onData: (stream, data) => { received.TrySetResult(data.Length); return Task.CompletedTask; },
+            onFault: ex => faulted = ex);
+        var pump = new AgentChannelDataPump(sink);
+
+        var big = new byte[AgentChannelDataPump.MaxQueuedBytes + 1];
+        await pump.OnDataAsync(0, big).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(big.Length, await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Null(faulted);
     }
 
     // A channel whose own consumer keeps up must behave exactly as before:
