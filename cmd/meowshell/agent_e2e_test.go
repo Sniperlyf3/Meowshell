@@ -9,13 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
 
 func TestAgentEndToEnd(t *testing.T) {
-	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat_linux_amd64")
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	tailcatBin := findE2EBinary(t, "TAILCAT", "tailcat")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
@@ -89,20 +90,73 @@ func TestAgentEndToEnd(t *testing.T) {
 	})
 }
 
-func findE2EBinary(t *testing.T, envVar, distName string) string {
+// CI greps the `go test -v` log of every step meant to run these tests for
+// both markers (e2e/require-agent-e2e-ran.sh): any "missing" line, or no
+// "resolved" line at all, fails the step. Without that, a job whose binaries
+// were never wired up passes green with every E2E test skipped -- which is
+// exactly how windows-e2e ran none of them for as long as they existed.
+const (
+	e2eBinaryMissingMarker  = "E2E binary missing:"
+	e2eBinaryResolvedMarker = "E2E binary resolved:"
+)
+
+// findE2EBinary returns the real <name> binary for this test: $envVar if set,
+// else the one ./build.sh wrote for this host under ../../dist.
+//
+// An explicit $envVar is returned unchecked on purpose: CI always sets it, so
+// a missing or broken binary fails the test loudly instead of skipping.
+func findE2EBinary(t *testing.T, envVar, name string) string {
 	t.Helper()
 	if p := os.Getenv(envVar); p != "" {
+		t.Logf("%s $%s=%s", e2eBinaryResolvedMarker, envVar, p)
 		return p
 	}
+	distName := e2eDistName(name, runtime.GOOS, runtime.GOARCH)
 	p := filepath.Join("..", "..", "dist", distName)
 	if _, err := os.Stat(p); err != nil {
-		t.Skipf("no %s (looked for $%s and %s); build.sh must run first", distName, envVar, p)
+		t.Skipf("%s no %s (looked for $%s and %s); build.sh must run first", e2eBinaryMissingMarker, distName, envVar, p)
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("%s %s", e2eBinaryResolvedMarker, abs)
 	return abs
+}
+
+// e2eDistName is the file name ./build.sh's build() gives <name> for
+// goos/goarch. This used to be the literal "..._linux_amd64" at every call
+// site, so on any other host -- Windows above all, where the file also ends
+// in .exe -- the fallback looked for a binary that was never there and every
+// E2E test skipped. build.sh only builds arm as GOARM=7, hence "armv7".
+func e2eDistName(name, goos, goarch string) string {
+	s := name + "_" + goos + "_" + goarch
+	if goarch == "arm" {
+		s += "v7"
+	}
+	if goos == "windows" {
+		s += ".exe"
+	}
+	return s
+}
+
+// The wanted names are copied from what ./build.sh writes (its build() and
+// targets_for), not derived from e2eDistName's own logic: the point is that
+// the fallback finds build.sh's output on the host running the tests.
+func TestE2EDistNameMatchesBuildSh(t *testing.T) {
+	for _, tc := range []struct{ name, goos, goarch, want string }{
+		{"meowshell", "linux", "amd64", "meowshell_linux_amd64"},
+		{"tailcat", "linux", "arm64", "tailcat_linux_arm64"},
+		{"meowshell", "linux", "arm", "meowshell_linux_armv7"},
+		{"tailcat", "linux", "386", "tailcat_linux_386"},
+		{"meowshell", "windows", "amd64", "meowshell_windows_amd64.exe"},
+		{"tailcat", "windows", "arm64", "tailcat_windows_arm64.exe"},
+		{"meowshell", "android", "arm64", "meowshell_android_arm64"},
+	} {
+		if got := e2eDistName(tc.name, tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("e2eDistName(%q, %q, %q) = %q, want %q", tc.name, tc.goos, tc.goarch, got, tc.want)
+		}
+	}
 }
 
 func startE2EServer(t *testing.T, tailcatBin, meowshellBin, home string) string {

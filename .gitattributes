@@ -9,3 +9,8 @@
 # This is the mirror image of tailcat's own .gitattributes, which pins
 # build-tags.txt to eol=lf for the same class of reason.
 *.patch -text
+
+# Same class of bug for the shell scripts CI runs under Git Bash on Windows
+# (e2e/require-agent-e2e-ran.sh in windows-e2e): an autocrlf=true checkout
+# makes them CRLF, and bash then reads every line with a trailing \r.
+*.sh text eol=lf

@@ -51,13 +51,19 @@ fail once before believing it.
 Both E2E suites are wired into CI, but only just: the `dotnet` job sets
 `DOTNET_E2E_*`, and the `build` job runs the Go agent E2E tests in a step
 *after* `./build.sh`, because the `go test ./...` step before it has no `dist/`
-yet and skipped all 22 for as long as they existed. Those two steps are the
-only reason any of it runs — `findE2EBinary`'s `../../dist` fallback skips on a
-missing file, while an explicit `$MEOWSHELL`/`$TAILCAT` is returned unchecked,
-so keep setting them and a broken binary fails loudly instead of going quiet.
-Windows is still dark: `windows-e2e` also runs `go test` before fetching the
-artifact, and the dist name `findE2EBinary` falls back to is hardcoded
-`linux_amd64`.
+yet and skipped all 22 for as long as they existed. `windows-e2e` does the
+same against the Windows binaries, in a step after it downloads the build
+artifact (its own earlier `go test` step skips them too). Those steps are the
+only reason any of it runs — `findE2EBinary`'s `../../dist` fallback (named
+for the host's GOOS/GOARCH as `./build.sh` names it, `.exe` on Windows) skips
+on a missing file, while an explicit `$MEOWSHELL`/`$TAILCAT` is returned
+unchecked, so keep setting them and a broken binary fails loudly instead of
+going quiet. Both Go agent E2E steps run through `e2e/require-agent-e2e-ran.sh`,
+which fails the step if any test skipped for a missing binary or none resolved
+one; it needs `go test -v`, since it greps the markers `findE2EBinary` logs.
+The .NET E2E suite has no such guard and runs on Linux only: there is no .NET
+job on Windows, and `FindRealBinaries` also no-ops when a `DOTNET_E2E_*` path
+does not exist, so a wrong path there still goes quiet.
 
 ## E2E tests and the DERP relay
 

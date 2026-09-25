@@ -79,7 +79,7 @@ func acceptHostKeyPrompt(t *testing.T, stdin *os.File, out *bufio.Reader) {
 }
 
 func TestAgentPasswordAuth(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	addr, _ := startAuthTestSSHServer(t, func(cfg *ssh.ServerConfig) {
 		cfg.PasswordCallback = func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
@@ -127,7 +127,7 @@ func TestAgentPasswordAuth(t *testing.T) {
 }
 
 func TestAgentSuppliedPrivateKeyAuth(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	privatePEM, publicKey := newTestKeyPair(t)
 
 	addr, _ := startAuthTestSSHServer(t, func(cfg *ssh.ServerConfig) {
@@ -189,7 +189,7 @@ func driveKeystoreAuth(t *testing.T, stdin *os.File, out *bufio.Reader, signer s
 }
 
 func TestAgentKeystoreKeyAuth(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	// An RSA key is the case the key-type-as-signature-algorithm shortcut got
 	// wrong: ssh-rsa means SHA-1, which every current server refuses. The server
@@ -312,7 +312,7 @@ func newEncryptedTestKeyPair(t *testing.T, passphrase string) (encryptedPEM []by
 // complete. mustReadFrame's 30s deadline (see readFrameWithDeadline) turns a
 // regression here into a clean failure instead of a hung test.
 func TestAgentEncryptedSuppliedPrivateKeyAuth(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 	const passphrase = "correct-passphrase"
 	encryptedPEM, publicKey := newEncryptedTestKeyPair(t, passphrase)
 

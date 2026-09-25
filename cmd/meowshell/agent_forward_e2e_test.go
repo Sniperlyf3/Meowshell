@@ -10,7 +10,7 @@ import (
 )
 
 func TestAgentLocalForwardEndToEnd(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -65,7 +65,7 @@ func TestAgentLocalForwardEndToEnd(t *testing.T) {
 }
 
 func TestAgentSOCKSForwardEndToEnd(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

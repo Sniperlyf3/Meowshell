@@ -20,7 +20,7 @@ import (
 // uses), a real system mosh-server for the bootstrap's exec command, and a
 // real Mosh/UDP client dialing it -- the same three pieces production wires
 // together, just all on loopback. They skip (via findE2EBinary) without a
-// built dist/meowshell_linux_amd64, and skip outright if this host has no
+// built dist/meowshell for this host, and skip outright if this host has no
 // mosh-server on PATH: neither is optional stand-in behavior worth faking,
 // since bootstrapMosh's whole job is parsing that program's real output.
 
@@ -126,7 +126,7 @@ func acceptMoshHostKey(t *testing.T, stdin *os.File, out *bufio.Reader) {
 // here proven from the outside through the compiled binary instead.
 func TestMoshAgentEndToEnd(t *testing.T) {
 	requireMoshServerBinary(t)
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	pids := make(chan int, 1)
 	addr, _, stop := startTestSSHServer(t, moshServerExecHandler(pids))
@@ -204,7 +204,7 @@ func TestMoshAgentEndToEnd(t *testing.T) {
 // confirms that message actually reaches the client as a structured "error"
 // rather than the process just hanging or exiting silently.
 func TestMoshAgentSurfacesAMissingMoshServer(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	addr, _, stop := startTestSSHServer(t, moshServerNotInstalledExecHandler)
 	defer stop()
@@ -241,7 +241,7 @@ func TestMoshAgentSurfacesAMissingMoshServer(t *testing.T) {
 // init()'s os.Args dispatch and main's actual os.Exit(1), which the direct
 // moshAgentCmd() call can't observe on its own.
 func TestMoshAgentRejectsTailcatAddressAsARealProcess(t *testing.T) {
-	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell_linux_amd64")
+	meowshellBin := findE2EBinary(t, "MEOWSHELL", "meowshell")
 
 	cmd := exec.Command(meowshellBin, "mosh-agent", validTailcatAddress)
 	var stderr bytes.Buffer
