@@ -18,8 +18,6 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         if (!string.IsNullOrEmpty(value)) Console.WriteLine("::add-mask::" + value);
     }
 
-    private const string TailcatEnvVar = "DOTNET_E2E_TAILCAT_BIN";
-    private const string MeowshellEnvVar = "DOTNET_E2E_MEOWSHELL_BIN";
     private const string RelayMetricsEnvVar = "TESTDERP_METRICS_URL";
 
     private readonly string _dir = Directory.CreateTempSubdirectory("agent-connection-e2e-").FullName;
@@ -28,13 +26,9 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
 
     private (string binDir, string tailcatPath)? FindRealBinaries()
     {
-        var tailcatSrc = Environment.GetEnvironmentVariable(TailcatEnvVar);
-        var meowshellSrc = Environment.GetEnvironmentVariable(MeowshellEnvVar);
-        if (string.IsNullOrEmpty(tailcatSrc) || string.IsNullOrEmpty(meowshellSrc)
-            || !File.Exists(tailcatSrc) || !File.Exists(meowshellSrc))
-        {
+        if (E2EBinaries.Sources() is not { } sources)
             return null;
-        }
+        var (tailcatSrc, meowshellSrc) = sources;
 
         var bin = Path.Combine(_dir, "bin");
         Directory.CreateDirectory(bin);
