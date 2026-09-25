@@ -44,7 +44,7 @@ dotnet test dotnet/Meowshell.sln
 ```
 
 Tests that need real binaries or a toolchain they can't find **no-op silently**
-rather than failing (`FindRealBinaries`, `BuildFakeAgentAsync`, `findE2EBinary`).
+rather than failing (`E2EBinaries.Sources`, `BuildFakeAgentAsync`, `findE2EBinary`).
 A green run does not by itself mean your new test ran — mutate it and watch it
 fail once before believing it.
 
@@ -61,9 +61,11 @@ unchecked, so keep setting them and a broken binary fails loudly instead of
 going quiet. Both Go agent E2E steps run through `e2e/require-agent-e2e-ran.sh`,
 which fails the step if any test skipped for a missing binary or none resolved
 one; it needs `go test -v`, since it greps the markers `findE2EBinary` logs.
-The .NET E2E suite has no such guard and runs on Linux only: there is no .NET
-job on Windows, and `FindRealBinaries` also no-ops when a `DOTNET_E2E_*` path
-does not exist, so a wrong path there still goes quiet.
+The .NET E2E suite runs on Linux only (there is no .NET job on Windows). Its
+binaries come from `E2EBinaries.Sources()`: both `DOTNET_E2E_*` unset skips, as
+a local run should, but one set without the other, or either naming a file that
+does not exist, throws -- a wrong path used to turn the whole real-binary suite
+into a green no-op.
 
 ## E2E tests and the DERP relay
 
