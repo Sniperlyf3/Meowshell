@@ -35,6 +35,21 @@ git -C "$SRC_DIR" reset --hard FETCH_HEAD
 # build checkout; clean it as well so repeated builds start from the same tree.
 git -C "$SRC_DIR" clean -fd
 
+# go.mod's replace builds the tailcat sources inside meowshell, so meowshell's
+# own tailscale.com requirement decides which tailscale.com that code compiles
+# against (MVS takes the higher of the two). It must be the exact version
+# tailcat.ref pins, or the meowshell agent embeds tailcat built against a
+# tailscale.com tailcat was never tested with, while the tailcat binary built
+# below uses the pinned one. Dependabot proposed exactly that bump (#63); move
+# this only together with tailcat.ref.
+tailscale_version() { awk '$1 == "tailscale.com" { print $2; exit }' "$1"; }
+ours=$(tailscale_version "$REPO_DIR/go.mod")
+theirs=$(tailscale_version "$SRC_DIR/go.mod")
+if [ "$ours" != "$theirs" ]; then
+	echo "go.mod requires tailscale.com $ours but tailcat.ref pins $theirs; they must match" >&2
+	exit 1
+fi
+
 # netmon.NewStatic() (used by pickregion.go's PickBestRegion, itself called
 # by ConnInfo.Expand whenever a key's RegionID is -1, the default for
 # --key=new) silently leaves its interface state nil if interface
