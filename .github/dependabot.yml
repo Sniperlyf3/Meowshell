@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # Must equal the version tailcat.ref's own go.mod pins; build.sh fails
+      # otherwise. It moves together with tailcat.ref, never on its own.
+      - dependency-name: tailscale.com
 
   - package-ecosystem: nuget
     directory: /dotnet
