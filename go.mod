@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/pkg/sftp v1.13.11
+	github.com/pkg/sftp v1.13.12
 	github.com/tailscale/tailcat v0.6.0
 	github.com/unixshells/mosh-go v0.5.2
 	golang.org/x/crypto v0.58.0
