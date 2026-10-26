@@ -9,7 +9,7 @@ require (
 	github.com/unixshells/mosh-go v0.5.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.46.0
 	tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
 )
