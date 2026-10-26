@@ -26,7 +26,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       # cmd/meowshell's go.mod replaces github.com/tailscale/tailcat with a
       # local ./.tailcat-src checkout (see tailcatdial.go's doc comment for
@@ -144,7 +144,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -219,7 +219,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -253,7 +253,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       # See the "build" job's own comment: cmd/meowshell's go.mod replaces
       # github.com/tailscale/tailcat with a local ./.tailcat-src checkout, so
@@ -380,7 +380,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -547,7 +547,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
 
       - name: Install the Android workload
         run: dotnet workload install android

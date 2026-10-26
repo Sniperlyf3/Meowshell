@@ -92,7 +92,10 @@ func TestListenUnixAllowsRootOwnedStickyTmpStyleParent(t *testing.T) {
 	if err := os.Mkdir(parent, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(parent, 0o1777); err != nil {
+	// os.ModeSticky, not 0o1000: Go's FileMode keeps the sticky bit apart
+	// from the permission bits, so os.Chmod(parent, 0o1777) set plain 0777
+	// and this test failed (correctly refused) whenever it ran as root.
+	if err := os.Chmod(parent, 0o777|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(parent, "sock")
