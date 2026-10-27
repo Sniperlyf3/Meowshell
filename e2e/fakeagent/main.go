@@ -137,6 +137,8 @@ type message struct {
 	Via    string `json:"via,omitempty"`
 
 	RelayProblem string `json:"relay_problem,omitempty"`
+
+	FlowControl bool `json:"flow_control,omitempty"`
 }
 
 var falseVal = false
@@ -214,6 +216,26 @@ const moshEchoDestination = "mosh-echo"
 // installed to reach this state, neither reproducible on demand.
 const moshErrorBeforeConnectDestination = "mosh-error-before-connect"
 
+// flowControlledUploadPath is a magic sftp_upload path for testing the
+// client's upload window, which a real agent on a fast local link never
+// fills: on it this fake echoes flow_control, acks each data frame only after
+// a delay (a slow link), and on close records how many frames the client ever
+// had in flight -- "FLOWCONTROL frames=N maxinflight=M" in its results file --
+// before sending exit_status. Any other upload path gets no flow control,
+// which is also what an agent that predates it looks like.
+const flowControlledUploadPath = "flow-controlled-upload"
+
+const flowControlAckDelay = 3 * time.Millisecond
+
+type flowControlledUpload struct {
+	mu          sync.Mutex
+	inFlight    int
+	maxInFlight int
+	frames      int
+	pending     chan struct{}
+	acked       sync.WaitGroup
+}
+
 const fakeFingerprint = "SHA256:fakeagentfakeagentfakeagentfakeagentfakeagent"
 
 // readPromptResponse reads frames until the answer to requestID arrives,
@@ -274,6 +296,8 @@ func main() {
 	var nextID uint32
 	var delayCloseMu sync.Mutex
 	delayClose := make(map[uint32]bool)
+	var uploadsMu sync.Mutex
+	uploads := make(map[uint32]*flowControlledUpload)
 
 	results, err := os.OpenFile(os.Args[0]+".results", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -330,6 +354,23 @@ func main() {
 			writeData(os.Stdout, &outMu, f.ChannelID, f.Payload)
 			continue
 		}
+		if f.Type == 1 {
+			uploadsMu.Lock()
+			u := uploads[f.ChannelID]
+			uploadsMu.Unlock()
+			if u != nil {
+				u.mu.Lock()
+				u.frames++
+				u.inFlight++
+				if u.inFlight > u.maxInFlight {
+					u.maxInFlight = u.inFlight
+				}
+				u.mu.Unlock()
+				u.acked.Add(1)
+				u.pending <- struct{}{}
+			}
+			continue
+		}
 		var msg message
 		if err := json.Unmarshal(f.Payload, &msg); err != nil {
 			continue
@@ -345,6 +386,29 @@ func main() {
 			}
 			if lastArg == relayHealthRaceDestination {
 				writeControl(os.Stdout, &outMu, 0, message{Msg: "relay_health", RelayProblem: "MeowSSH managed relay: monthly usage allowance exceeded"})
+			}
+			if msg.Kind == "sftp_upload" && msg.Path == flowControlledUploadPath && msg.FlowControl {
+				// Registered before channel_opened is sent, so no data frame
+				// can arrive for an upload this loop does not know yet.
+				u := &flowControlledUpload{pending: make(chan struct{}, 4096)}
+				uploadsMu.Lock()
+				uploads[id] = u
+				uploadsMu.Unlock()
+				go func(id uint32) {
+					for range u.pending {
+						time.Sleep(flowControlAckDelay)
+						u.mu.Lock()
+						u.inFlight--
+						u.mu.Unlock()
+						writeControl(os.Stdout, &outMu, id, message{Msg: "write_ack"})
+						u.acked.Done()
+					}
+				}(id)
+				go func(requestID string, id uint32) {
+					time.Sleep(openDelay)
+					writeControl(os.Stdout, &outMu, id, message{Msg: "channel_opened", RequestID: requestID, FlowControl: true})
+				}(msg.RequestID, id)
+				continue
 			}
 			go func(requestID, kind, path string, command []string, id uint32) {
 				time.Sleep(openDelay)
@@ -387,6 +451,22 @@ func main() {
 		case "close_channel":
 			fmt.Fprintf(results, "CLOSED %d\n", f.ChannelID)
 			results.Sync()
+			uploadsMu.Lock()
+			u := uploads[f.ChannelID]
+			delete(uploads, f.ChannelID)
+			uploadsMu.Unlock()
+			if u != nil {
+				go func(channelID uint32) {
+					u.acked.Wait()
+					close(u.pending)
+					u.mu.Lock()
+					fmt.Fprintf(results, "FLOWCONTROL frames=%d maxinflight=%d\n", u.frames, u.maxInFlight)
+					u.mu.Unlock()
+					results.Sync()
+					writeControl(os.Stdout, &outMu, channelID, message{Msg: "exit_status"})
+				}(f.ChannelID)
+				continue
+			}
 			delayCloseMu.Lock()
 			delayed := delayClose[f.ChannelID]
 			delayCloseMu.Unlock()

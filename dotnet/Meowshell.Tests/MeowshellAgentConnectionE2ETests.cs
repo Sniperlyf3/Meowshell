@@ -160,6 +160,19 @@ public sealed class MeowshellAgentConnectionE2ETests : IDisposable
         await connection.DownloadAsync("uploads/file.txt", localDownload);
         Assert.Equal(content, await File.ReadAllTextAsync(localDownload));
 
+        // Many times the agent's 32-frame queue: before upload flow control
+        // this failed with "not being consumed fast enough" whenever the
+        // link was slower than reading the file, which on a phone is always.
+        var large = new byte[6 * 1024 * 1024 + 123];
+        Random.Shared.NextBytes(large);
+        var localLarge = Path.Combine(_dir, "large.bin");
+        await File.WriteAllBytesAsync(localLarge, large);
+        await connection.UploadAsync(localLarge, "uploads/large.bin");
+        var largeBack = Path.Combine(_dir, "large-back.bin");
+        await connection.DownloadAsync("uploads/large.bin", largeBack);
+        Assert.Equal(large, await File.ReadAllBytesAsync(largeBack));
+        await connection.RemoveAsync("uploads/large.bin");
+
         await connection.RenameAsync("uploads/file.txt", "uploads/renamed.txt");
         await connection.RemoveAsync("uploads/renamed.txt");
         await connection.RemoveDirectoryAsync("uploads");

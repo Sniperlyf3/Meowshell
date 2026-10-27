@@ -249,11 +249,14 @@ type agentChannel struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	isUpload           bool
-	uploadPath         string
-	uploadTempPath     string
-	uploadPreserve     bool
-	uploadMode         uint32
-	uploadModTime      int64
+	// ackWrites: send "write_ack" after each payload is written to the
+	// remote file (the client asked for flow control; see FlowControl).
+	ackWrites      bool
+	uploadPath     string
+	uploadTempPath string
+	uploadPreserve bool
+	uploadMode     uint32
+	uploadModTime  int64
 	// uploadErr, once set, is terminal: a write to sftpFile failed, so
 	// finalizeUpload must report that failure instead of exit_status 0 --
 	// closing the file cleanly afterward says nothing about the data
@@ -880,6 +883,11 @@ func (a *agentSession) startChannelWriter(channelID uint32, ch *agentChannel) {
 					_, err = ch.sftpFile.Write(payload)
 				}
 				ch.writePending.Done()
+				if err == nil && ch.ackWrites {
+					// One ack per frame, sent only once the bytes have left
+					// the queue: that is the space the client may refill.
+					a.writeControl(channelID, controlMessage{Msg: "write_ack"})
+				}
 				if err != nil {
 					// Mark the writer closed before draining so no concurrent
 					// handleData can enqueue a new item after the drain. Every

@@ -119,7 +119,6 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 	// on OS-specific ways to actually trigger one.
 	breakTransport()
 
-	out := session.out.(*bytes.Buffer)
 	session.handleData(id, []byte("this data will not make it"))
 
 	deadline := time.Now().Add(time.Second)
@@ -129,7 +128,7 @@ func TestHandleDataRecordsAWriteFailure(t *testing.T) {
 	if ch.getUploadErr() == nil {
 		t.Fatal("channel writer did not record the write failure on the channel (ch.uploadErr is nil)")
 	}
-	msgs := readControlFrames(t, out)
+	msgs := controlFramesLocked(t, session)
 	if len(msgs) != 1 || msgs[0].Msg != "error" {
 		t.Fatalf("control messages after the failed write = %+v, want exactly one \"error\"", msgs)
 	}
@@ -160,10 +159,9 @@ func TestFinalizeUploadReportsRecordedWriteFailureNotSuccess(t *testing.T) {
 	}
 	session.chans[id] = ch
 
-	out := session.out.(*bytes.Buffer)
 	session.finalizeUpload(id, ch)
 
-	msgs := readControlFrames(t, out)
+	msgs := controlFramesLocked(t, session)
 	if len(msgs) != 1 {
 		t.Fatalf("control messages from finalizeUpload = %+v, want exactly one", msgs)
 	}
@@ -191,7 +189,6 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 
 	breakTransport()
 
-	out := session.out.(*bytes.Buffer)
 	session.handleData(id, []byte("first chunk, fails"))
 	deadline := time.Now().Add(time.Second)
 	for ch.getUploadErr() == nil && time.Now().Before(deadline) {
@@ -200,12 +197,12 @@ func TestUploadFurtherDataAfterAFailureIsIgnored(t *testing.T) {
 	if ch.getUploadErr() == nil {
 		t.Fatal("first upload write never failed")
 	}
-	firstErrCount := len(readControlFrames(t, out))
+	firstErrCount := len(controlFramesLocked(t, session))
 
 	// failChannelWrite removes the failed channel, so any later frame for the
 	// stale ID is ignored by handleData instead of reaching the broken file.
 	session.handleData(id, []byte("second chunk, must be ignored"))
-	secondErrCount := len(readControlFrames(t, out))
+	secondErrCount := len(controlFramesLocked(t, session))
 
 	if secondErrCount != firstErrCount {
 		t.Fatalf("a data frame after the channel's terminal write error produced %d more control message(s); want it silently ignored",
@@ -278,7 +275,7 @@ func TestSuccessfulUploadAtomicallyReplacesDestination(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var msgs []controlMessage
 	for time.Now().Before(deadline) {
-		msgs = readControlFrames(t, out)
+		msgs = controlFramesLocked(t, session)
 		for _, msg := range msgs {
 			if msg.Msg == "exit_status" {
 				if msg.ExitCode != 0 {
@@ -375,7 +372,6 @@ func TestResetSFTPClientClearsMatchedClientAfterTransportIsClosed(t *testing.T) 
 	}
 }
 
-
 func TestCancelledSFTPTransferDoesNotBlockFrameReader(t *testing.T) {
 	oldGrace := sftpTransferCancelGrace
 	sftpTransferCancelGrace = 50 * time.Millisecond
@@ -413,4 +409,97 @@ func TestCancelledSFTPTransferDoesNotBlockFrameReader(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("stuck cancelled SFTP transfer did not escalate to transport teardown")
+}
+
+// controlFramesLocked snapshots the agent's output under outMu: the channel
+// writer goroutine sends write_ack while the test reads.
+func controlFramesLocked(t *testing.T, session *agentSession) []controlMessage {
+	t.Helper()
+	session.outMu.Lock()
+	snapshot := bytes.NewBuffer(append([]byte(nil), session.out.(*bytes.Buffer).Bytes()...))
+	session.outMu.Unlock()
+	return readControlFrames(t, snapshot)
+}
+
+// TestUploadFlowControlAcksEachWrittenFrame is the agent half of upload
+// backpressure: with flow_control requested, channel_opened says so and one
+// write_ack follows each frame once it is written, which is what lets the
+// client keep no more in flight than the bounded queue holds. Without it,
+// uploads over ~2 MB failed with "not being consumed fast enough" on any link
+// slower than the client's disk (the MeowSSH emulator E2E run).
+func TestUploadFlowControlAcksEachWrittenFrame(t *testing.T) {
+	session, client, _, _ := newInProcessSFTPClient(t)
+
+	session.openSFTPChannel(controlMessage{Kind: "sftp_upload", Path: "acked.bin", RequestID: "u-fc", FlowControl: true})
+	opened := controlFramesLocked(t, session)[0]
+	if opened.Msg != "channel_opened" || !opened.FlowControl {
+		t.Fatalf("channel_opened = %+v, want flow_control echoed", opened)
+	}
+	id := openedChannelID(t, session.out.(*bytes.Buffer))
+
+	const frames = 5
+	for i := 0; i < frames; i++ {
+		session.handleData(id, bytes.Repeat([]byte{byte('a' + i)}, 1000))
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	acks := 0
+	for time.Now().Before(deadline) {
+		acks = 0
+		for _, msg := range controlFramesLocked(t, session) {
+			if msg.Msg == "write_ack" {
+				acks++
+			}
+		}
+		if acks == frames {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if acks != frames {
+		t.Fatalf("got %d write_ack, want one per frame (%d)", acks, frames)
+	}
+
+	session.closeChannel(id, controlMessage{})
+	for time.Now().Before(deadline) {
+		for _, msg := range controlFramesLocked(t, session) {
+			if msg.Msg == "exit_status" {
+				if got := readRemoteFile(t, client, "acked.bin"); len(got) != frames*1000 {
+					t.Fatalf("committed %d bytes, want %d", len(got), frames*1000)
+				}
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("upload never finished")
+}
+
+// TestUploadWithoutFlowControlSendsNoAcks keeps the old wire behaviour for a
+// client that did not ask: no unexpected frames, and nothing echoed.
+func TestUploadWithoutFlowControlSendsNoAcks(t *testing.T) {
+	session, _, _, _ := newInProcessSFTPClient(t)
+
+	session.openSFTPChannel(controlMessage{Kind: "sftp_upload", Path: "plain.bin", RequestID: "u-plain"})
+	if opened := controlFramesLocked(t, session)[0]; opened.FlowControl {
+		t.Fatalf("channel_opened = %+v, flow_control echoed without being asked", opened)
+	}
+	id := openedChannelID(t, session.out.(*bytes.Buffer))
+	session.handleData(id, []byte("data"))
+	session.closeChannel(id, controlMessage{})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs := controlFramesLocked(t, session)
+		for _, msg := range msgs {
+			if msg.Msg == "write_ack" {
+				t.Fatalf("write_ack sent to a client that did not ask: %+v", msgs)
+			}
+			if msg.Msg == "exit_status" {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("upload never finished")
 }

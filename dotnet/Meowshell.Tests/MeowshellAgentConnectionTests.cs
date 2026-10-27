@@ -301,6 +301,78 @@ public sealed class MeowshellAgentConnectionTests : IDisposable
     }
 
     /// <summary>
+    /// Regression test: UploadAsync streamed as fast as it could read the
+    /// file, with no backpressure, into an agent whose per-channel queue holds
+    /// 32 frames. On any link slower than the disk it overflowed after ~2 MB
+    /// and failed the upload with "not being consumed fast enough" -- every
+    /// upload over a couple of MB from a phone (MeowSSH's emulator E2E run).
+    /// e2e/fakeagent's flow-controlled path acks slowly and records the most
+    /// frames the client ever had outstanding.
+    /// </summary>
+    [Fact]
+    public async Task UploadKeepsNoMoreThanItsWindowInFlight()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        const int frames = 48;
+        var localPath = Path.Combine(_dir, "windowed.bin");
+        await File.WriteAllBytesAsync(localPath, new byte[frames * MeowshellAgentConnection.UploadFrameBytes]);
+
+        await connection.UploadAsync(localPath, "flow-controlled-upload").WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.True(await WaitForResultAsync(resultsPath, "FLOWCONTROL", TimeSpan.FromSeconds(5)), "the fake never saw a flow-controlled upload");
+        var line = (await File.ReadAllLinesAsync(resultsPath)).Single(l => l.StartsWith("FLOWCONTROL", StringComparison.Ordinal));
+        var fields = line.Split(' ').Skip(1).Select(f => f.Split('=')).ToDictionary(f => f[0], f => int.Parse(f[1], System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(frames, fields["frames"]);
+        Assert.InRange(fields["maxinflight"], 1, MeowshellAgentConnection.UploadFramesInFlight);
+    }
+
+    /// <summary>
+    /// An agent that does not echo flow_control (one that predates it, or this
+    /// fake on any other path) is never waited on: an upload far larger than
+    /// the window still completes rather than stalling for acks that will not come.
+    /// </summary>
+    [Fact]
+    public async Task UploadToAnAgentWithoutFlowControlDoesNotWaitForAcks()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, _)) return;
+        await using var _ = connection;
+
+        var localPath = Path.Combine(_dir, "unwindowed.bin");
+        await File.WriteAllBytesAsync(localPath, new byte[3 * MeowshellAgentConnection.UploadFramesInFlight * MeowshellAgentConnection.UploadFrameBytes]);
+
+        await connection.UploadAsync(localPath, "remote.bin").WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// Regression test: the agent acknowledges a forward's close_channel once,
+    /// and CloseForwardAsync forgot the id after that answer, so a second close
+    /// -- an explicit CloseAsync followed by the DisposeAsync of "await using"
+    /// -- sent a second close_channel and waited forever for a reply the real
+    /// agent never sends for a channel it no longer has (MeowSSH's
+    /// forward.local E2E scenario hung there). This fake answers every close,
+    /// so what is checked is the cause: only one close_channel goes out.
+    /// </summary>
+    [Fact]
+    public async Task ClosingAForwardTwiceSendsOneClose()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (await ConnectToFakeAgentAsync() is not var (connection, resultsPath)) return;
+        await using var _ = connection;
+
+        var forward = await connection.OpenLocalForwardAsync("127.0.0.1:0", "10.0.0.1:80");
+        await forward.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await forward.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await forward.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Task.Delay(200); // a stray second frame would be written by now
+        Assert.Single(await File.ReadAllLinesAsync(resultsPath), l => l.StartsWith("CLOSED", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// Regression test: DownloadAsync's finally block already removed the
     /// local channel entry on cancellation, but never told the agent to
     /// stop -- so the agent kept reading and sending the rest of the remote

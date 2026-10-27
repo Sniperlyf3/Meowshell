@@ -149,6 +149,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			sftpFile: f, sftpClose: f.Close, ctx: ctx, cancel: cancel, isUpload: true,
 			uploadPath: msg.Path, uploadTempPath: tempPath,
 			uploadPreserve: msg.Preserve, uploadMode: msg.Mode, uploadModTime: msg.ModTime,
+			ackWrites: msg.FlowControl,
 		}
 		id, err := a.registerChannel(ch)
 		if err != nil {
@@ -158,7 +159,7 @@ func (a *agentSession) openSFTPChannel(msg controlMessage) {
 			return
 		}
 		a.startChannelWriter(id, ch)
-		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID})
+		a.writeControl(id, controlMessage{Msg: "channel_opened", RequestID: msg.RequestID, FlowControl: msg.FlowControl})
 
 	case "sftp_download":
 		fi, err := sf.Stat(msg.Path)
