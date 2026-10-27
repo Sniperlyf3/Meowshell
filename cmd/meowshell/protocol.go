@@ -186,8 +186,19 @@ type controlMessage struct {
 	Size    int64  `json:"size,omitempty"`
 	ModTime int64  `json:"mod_time,omitempty"`
 
-	Preserve  bool  `json:"preserve,omitempty"`
-	BytesDone int64 `json:"bytes_done,omitempty"`
+	Preserve bool `json:"preserve,omitempty"`
+
+	// FlowControl, on an sftp_upload open_channel, asks for a "write_ack"
+	// after each data frame the agent has written to the remote file; the
+	// agent echoes it on channel_opened when it will send them. Uploads used
+	// to stream with no backpressure at all: a client reading a local file
+	// outruns any real network, the agent's bounded per-channel queue filled
+	// after ~2 MB, and the upload failed with "remote input is not being
+	// consumed fast enough" -- every upload over a couple of MB from a phone.
+	// A client only waits for acks the agent promised, so an older agent
+	// (or e2e/fakeagent) that never echoes this keeps working as before.
+	FlowControl bool  `json:"flow_control,omitempty"`
+	BytesDone   int64 `json:"bytes_done,omitempty"`
 
 	Entries []sftpEntry `json:"entries,omitempty"`
 

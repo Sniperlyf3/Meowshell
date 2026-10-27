@@ -325,24 +325,38 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
     public async Task UploadAsync(string localPath, string remotePath, bool preserve = false, IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         var info = new FileInfo(localPath);
-        var request = new AgentMessage { Msg = "open_channel", Kind = "sftp_upload", Path = remotePath, Preserve = preserve };
+        var request = new AgentMessage { Msg = "open_channel", Kind = "sftp_upload", Path = remotePath, Preserve = preserve, FlowControl = true };
         if (preserve)
         {
             request.Mode = (uint)GetUnixMode(localPath);
             request.ModTime = new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeSeconds();
         }
         var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Frames the agent may still be holding. Without this the loop below
+        // ran as fast as the disk, the agent's 32-frame queue overflowed on any
+        // link slower than that, and the upload failed with "not being
+        // consumed fast enough" -- every upload over ~2 MB from a phone.
+        using var credits = new SemaphoreSlim(UploadFramesInFlight, UploadFramesInFlight);
+        var windowed = false;
         var id = await OpenChannelAsync(request,
-            (chId, _) => (chId, (IAgentChannelSink)new AgentRequestResponseSink(completion)), cancellationToken).ConfigureAwait(false);
+            (chId, opened) =>
+            {
+                // Only an agent that promised acks is waited on; anything else
+                // (an older agent, e2e/fakeagent) streams as before rather
+                // than stalling on an ack that will never come.
+                windowed = opened.FlowControl;
+                return (chId, (IAgentChannelSink)new AgentRequestResponseSink(completion, credits));
+            }, cancellationToken).ConfigureAwait(false);
         var normalCloseSent = false;
         try
         {
             await using var file = File.OpenRead(localPath);
-            var buffer = new byte[64 * 1024];
+            var buffer = new byte[UploadFrameBytes];
             long sent = 0;
             int n;
             while ((n = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
+                if (windowed) await WaitForUploadCreditAsync(credits, completion.Task, cancellationToken).ConfigureAwait(false);
                 await SendDataAsync(id, buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
                 sent += n;
                 progress?.Report(sent);
@@ -365,6 +379,34 @@ public sealed class MeowshellAgentConnection : IAsyncDisposable
             }
             _channels.TryRemove(id, out _);
         }
+    }
+
+    internal const int UploadFrameBytes = 64 * 1024;
+
+    // Half the agent's per-channel queue (agentChannelWriteQueueDepth = 32 in
+    // agent.go): 1 MiB in flight keeps a slow link busy while leaving the
+    // queue room to spare, so it cannot overflow however slow the link is.
+    internal const int UploadFramesInFlight = 16;
+
+    private static async Task WaitForUploadCreditAsync(SemaphoreSlim credits, Task<int> completion, CancellationToken cancellationToken)
+    {
+        if (credits.Wait(0)) return;
+
+        // The channel can end while we wait (a write failed remotely, the
+        // connection dropped): then no ack is coming, and the failure is the
+        // answer rather than a hang.
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var credit = credits.WaitAsync(stop.Token);
+        if (await Task.WhenAny(credit, completion).ConfigureAwait(false) == credit)
+        {
+            await credit.ConfigureAwait(false);
+            return;
+        }
+
+        stop.Cancel();
+        try { await credit.ConfigureAwait(false); } catch (OperationCanceledException) { }
+        await completion.ConfigureAwait(false);
+        throw new TailcatException("upload failed", 0, "the agent ended the upload before it was complete");
     }
 
     private const int DefaultUnixFileMode = 0b110_100_100;
@@ -1153,13 +1195,20 @@ internal sealed class AgentIgnoreSink : IAgentChannelSink
     public void OnFault(Exception ex) { }
 }
 
-internal sealed class AgentRequestResponseSink(TaskCompletionSource<int> completion) : IAgentChannelSink
+internal sealed class AgentRequestResponseSink(TaskCompletionSource<int> completion, SemaphoreSlim? credits = null) : IAgentChannelSink
 {
     public Task OnDataAsync(byte stream, ReadOnlyMemory<byte> data) => Task.CompletedTask;
 
     public Task OnControlAsync(AgentMessage msg)
     {
-        if (msg.Msg == "exit_status") completion.TrySetResult(msg.ExitCode);
+        // One frame left the agent's queue: room for one more (see UploadAsync).
+        if (msg.Msg == "write_ack")
+        {
+            try { credits?.Release(); }
+            catch (SemaphoreFullException) { /* an ack the window never lent: ignore, never overfill */ }
+            catch (ObjectDisposedException) { /* the upload already finished */ }
+        }
+        else if (msg.Msg == "exit_status") completion.TrySetResult(msg.ExitCode);
         else if (msg.Msg == "error") completion.TrySetException(new TailcatException("upload failed", 0, msg.Message ?? "", MeowshellErrorCodeExtensions.Parse(msg.Code)));
         return Task.CompletedTask;
     }
@@ -1297,11 +1346,20 @@ public sealed class MeowshellForward : IAsyncDisposable
 {
     private readonly MeowshellAgentConnection _connection;
     private readonly uint _id;
+    private readonly Lazy<Task> _close;
 
     internal MeowshellForward(MeowshellAgentConnection connection, uint id, string boundAddress, string? socksUsername, string? socksPassword)
     {
         _connection = connection;
         _id = id;
+        // One close per forward, shared by every caller. The agent
+        // acknowledges only the first close_channel and CloseForwardAsync
+        // forgets the id once answered, so a second call -- the DisposeAsync
+        // of an "await using" after an explicit CloseAsync -- used to send
+        // another close and wait forever (found by MeowSSH's E2E run). Started
+        // uncancellable: a caller giving up must not leave the remote listener
+        // running; their token only ends their own wait.
+        _close = new Lazy<Task>(() => _connection.CloseForwardAsync(_id, CancellationToken.None));
         BoundAddress = boundAddress;
         SocksUsername = socksUsername;
         SocksPassword = socksPassword;
@@ -1316,8 +1374,8 @@ public sealed class MeowshellForward : IAsyncDisposable
     /// <summary>The SOCKS5 password paired with <see cref="SocksUsername"/>.</summary>
     public string? SocksPassword { get; }
 
-    /// <summary>Stops the forward: new connections are refused; ones already forwarded finish or fail on their own.</summary>
-    public Task CloseAsync(CancellationToken cancellationToken = default) => _connection.CloseForwardAsync(_id, cancellationToken);
+    /// <summary>Stops the forward: new connections are refused; ones already forwarded finish or fail on their own. Safe to call more than once.</summary>
+    public Task CloseAsync(CancellationToken cancellationToken = default) => _close.Value.WaitAsync(cancellationToken);
 
     /// <summary>Same as <see cref="CloseAsync(CancellationToken)"/>.</summary>
     public ValueTask DisposeAsync() => new(CloseAsync());

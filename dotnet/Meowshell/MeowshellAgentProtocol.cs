@@ -189,6 +189,11 @@ internal sealed class AgentMessage
     public long Size { get; set; }
     public long ModTime { get; set; }
     public bool Preserve { get; set; }
+
+    // On an sftp_upload open_channel: ask for a "write_ack" per data frame
+    // written. Echoed on channel_opened by an agent that will send them; see
+    // MeowshellAgentConnection.UploadAsync and protocol.go's FlowControl.
+    public bool FlowControl { get; set; }
     public long BytesDone { get; set; }
     public AgentSftpEntry[]? Entries { get; set; }
 
