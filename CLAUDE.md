@@ -18,7 +18,7 @@ git -C .tailcat-src fetch --depth 1 origin "$(tr -d '[:space:]' < tailcat.ref)"
 git -C .tailcat-src checkout FETCH_HEAD
 # then every patch in patches/tailcat/ -- key-from-stdin needs --unidiff-zero
 # (zero-context hunks), and android-netmon is followed by the go get below
-(cd .tailcat-src && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0)
+(cd .tailcat-src && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/klauspost/compress@v1.20.2)
 ```
 
 The patches are not optional for E2E work: `key-from-stdin` is what makes
