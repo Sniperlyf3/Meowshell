@@ -94,8 +94,12 @@ git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/derp-health-status.patch"
 # without the netlink call the stdlib makes; see the patch and its target
 # file's comments for the detail. Added via `go get`, which computes
 # go.mod/go.sum correctly, rather than hand-patching them.
+#
+# klauspost/compress >= v1.20.2 fixes GO-2026-6865 (a panic on two-block
+# frames), which govulncheck finds reachable from cmd/tailcat; the pinned
+# tailcat ref still requires v1.19.1. The root go.mod carries the same floor.
 git -C "$SRC_DIR" apply "$REPO_DIR/patches/tailcat/android-netmon-interface-getter.patch"
-(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e)
+(cd "$SRC_DIR" && go get github.com/wlynxg/anet@v0.0.5 golang.org/x/crypto@v0.56.0 github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e github.com/klauspost/compress@v1.20.2)
 
 # The live-path and relay-health APIs exist only in our pinned-source
 # patches, so upstream tests run before build.sh cannot cover them. Exercise
