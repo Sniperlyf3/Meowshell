@@ -10,7 +10,7 @@ require (
 	github.com/wlynxg/anet v0.0.5
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.62.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.47.0
 	tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
 )
